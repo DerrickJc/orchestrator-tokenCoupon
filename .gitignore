@@ -1,0 +1,20 @@
+# Local secrets and environment-specific configuration
+.env
+.env.*
+!.env.example
+
+# Python migration/runtime artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.ses
+.pytest_cache/
+.ruff_cache/
+
+# Existing Node.js prototype artifacts
+node_modules/
+coverage/
+
+.docs/
+.roadmap.md
+
