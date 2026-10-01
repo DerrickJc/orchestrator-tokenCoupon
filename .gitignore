@@ -15,6 +15,7 @@ __pycache__/
 node_modules/
 coverage/
 
-.docs/
-.roadmap.md
+docs/
+roadmap.md
+UPSTREAM_HISTORY.md
 
