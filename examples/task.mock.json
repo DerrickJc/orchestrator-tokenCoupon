@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-001",
+  "title": "增加一个问候函数",
+  "prompt": "新增 greet.mjs，导出 greet(name)，返回 Hello, name!。完成后说明修改内容和验证方式。",
+  "execution": {
+    "runnerId": "mock",
+    "mode": "non_interactive",
+    "timeoutMs": 60000
+  }
+}

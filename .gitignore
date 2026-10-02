@@ -15,7 +15,13 @@ __pycache__/
 node_modules/
 coverage/
 
+# Generated build and runtime artifacts
+packages/*/dist/
+.vitest/
+.token-coupon/
+
 docs/
 roadmap.md
 UPSTREAM_HISTORY.md
+docs/*
 
