@@ -18,6 +18,7 @@ export class MockRunner implements Runner {
   }
 
   run(input: RunnerInput, context: RunnerContext) {
+    context.onOutput({ stream: "stdout", text: "", structuredEvent: { type: "mock.scenario", scenario: this.scenario } });
     return runChildProcess({
       executable: process.execPath,
       args: [fixturePath, this.scenario, input.completionMarker],

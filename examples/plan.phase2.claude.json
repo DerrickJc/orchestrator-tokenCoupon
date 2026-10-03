@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "phase2-greeting-claude-demo",
+  "title": "Phase 2 问候函数计划（Claude Code）",
+  "tasks": [
+    {
+      "task": {
+        "schemaVersion": 1,
+        "id": "implement-greeting",
+        "title": "实现问候函数",
+        "prompt": "在当前工作目录新增 greet.mjs，导出 greet(name)，返回 `Hello, ${name}!`。不要修改工作目录之外的文件。",
+        "execution": { "runnerId": "claude-code", "modelId": "deepseek-v4-flash", "mode": "non_interactive", "timeoutMs": 180000 }
+      },
+      "dependsOn": [],
+      "status": "planned"
+    },
+    {
+      "task": {
+        "schemaVersion": 1,
+        "id": "add-greeting-tests",
+        "title": "增加问候函数测试",
+        "prompt": "在当前工作目录新增 greet.test.mjs，使用 node:test 和 node:assert/strict 覆盖正常姓名与空字符串输入。不要修改工作目录之外的文件。",
+        "execution": { "runnerId": "claude-code", "modelId": "deepseek-v4-flash", "mode": "non_interactive", "timeoutMs": 180000 }
+      },
+      "dependsOn": ["implement-greeting"],
+      "status": "planned"
+    },
+    {
+      "task": {
+        "schemaVersion": 1,
+        "id": "verify-greeting",
+        "title": "运行问候函数测试",
+        "prompt": "检查当前实现和测试，执行 `node --test greet.test.mjs`，根据实际输出汇报通过或失败。不要修改工作目录之外的文件。",
+        "execution": { "runnerId": "claude-code", "modelId": "deepseek-v4-flash", "mode": "non_interactive", "timeoutMs": 180000 }
+      },
+      "dependsOn": ["add-greeting-tests"],
+      "status": "planned"
+    }
+  ]
+}

@@ -25,5 +25,13 @@ docs/
 roadmap.md
 UPSTREAM_HISTORY.md
 docs/*
+!docs/
+!docs/PHASE_2_PLAN.md
+!docs/PHASE_2_IMPLEMENTATION_GUIDE.md
 examples/
+!examples/
+examples/*
+!examples/plan.phase2.mock.json
+!examples/plan.phase2.claude.json
+demo-workspace/
 .token-coupon/

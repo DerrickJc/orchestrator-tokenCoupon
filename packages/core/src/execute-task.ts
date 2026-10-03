@@ -13,6 +13,8 @@ export interface ExecuteTaskOptions {
   runner: Runner;
   signal?: AbortSignal;
   onOutput?: (output: RunnerOutput) => void;
+  /** Allows a persisted orchestrator reservation to own the attempt identity. */
+  attemptId?: string;
 }
 
 export interface ExecuteTaskResult {
@@ -22,7 +24,10 @@ export interface ExecuteTaskResult {
 
 export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteTaskResult> {
   const cwd = resolve(options.cwd);
-  const attemptId = randomUUID();
+  const attemptId = options.attemptId ?? randomUUID();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(attemptId)) {
+    throw new Error("attemptId 必须是 UUID");
+  }
   const protocol = createCompletionProtocol(options.task);
   const now = new Date().toISOString();
   const attempt: AttemptRecord = {

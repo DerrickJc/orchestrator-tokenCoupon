@@ -48,6 +48,7 @@ export class ClaudeCodeRunner implements Runner {
         text: `${line}\n`,
         structuredEvent: event,
         ...(text ? { agentText: text } : {}),
+        ...(record.type === "result" && typeof record.result === "string" ? { finalText: record.result } : {}),
         ...(record.type === "result" ? { displayText: "" } : isTextDelta ? { displayText: text } : {}),
       };
       context.onOutput(out);

@@ -16,6 +16,8 @@ export interface RunnerOutput {
   agentText?: string;
   /** Optional user-facing text; unset defaults to agentText, empty suppresses display. */
   displayText?: string;
+  /** Adapter-extracted final response, distinct from streamed deltas. */
+  finalText?: string;
   structuredEvent?: unknown;
 }
 

@@ -70,7 +70,27 @@ export function parsePlan(value: unknown): PlanDefinition {
         );
       }
     }
+    if (plannedTask.dependsOn.includes(plannedTask.task.id)) {
+      throw new InputValidationError(`plan.tasks[${index}].dependsOn`, `任务不能依赖自身：${plannedTask.task.id}`);
+    }
   }
+
+  const byId = new Map(tasks.map((entry) => [entry.task.id, entry]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (taskId: string, path: string[]) => {
+    if (visiting.has(taskId)) {
+      const cycleStart = path.indexOf(taskId);
+      const cycle = [...path.slice(cycleStart), taskId].join(" -> ");
+      throw new InputValidationError("plan.tasks", `依赖关系存在循环：${cycle}`);
+    }
+    if (visited.has(taskId)) return;
+    visiting.add(taskId);
+    for (const dependencyId of byId.get(taskId)?.dependsOn ?? []) visit(dependencyId, [...path, taskId]);
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+  for (const entry of tasks) visit(entry.task.id, []);
 
   return { schemaVersion: 1, id: planId, title, tasks };
 }

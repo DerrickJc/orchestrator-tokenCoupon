@@ -10,3 +10,8 @@ export { determineVerdict } from "./verdict.js";
 export { executeTask } from "./execute-task.js";
 export { MockRunner } from "./runners/mock-runner.js";
 export { ClaudeCodeRunner } from "./runners/claude-runner.js";
+export type { SessionSnapshot, SessionStatus, SessionTaskStatus, SessionTaskState, TaskResult } from "./session-types.js";
+export { PlanStore } from "./plan-store.js";
+export { SessionStore, SessionLockError } from "./session-store.js";
+export { formatSession, resumeSession, retrySession, runPlan, validateMockTaskScenarios } from "./task-orchestrator.js";
+export type { PlanRunOptions, RetryOptions, SessionOperationOptions, SessionOperationResult, TaskRunnerFactory, TaskRunnerFactoryOptions } from "./task-orchestrator.js";

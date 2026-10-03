@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "phase2-greeting-demo",
+  "title": "Phase 2 问候函数计划（Mock）",
+  "tasks": [
+    {
+      "task": {
+        "schemaVersion": 1,
+        "id": "implement-greeting",
+        "title": "实现问候函数",
+        "prompt": "新增 greet.mjs，导出 greet(name)，返回 Hello, name!。",
+        "execution": { "runnerId": "mock", "mode": "non_interactive", "timeoutMs": 60000 }
+      },
+      "dependsOn": [],
+      "status": "planned"
+    },
+    {
+      "task": {
+        "schemaVersion": 1,
+        "id": "add-greeting-tests",
+        "title": "增加问候函数测试",
+        "prompt": "新增 greet.test.mjs，使用 node:test 覆盖正常姓名和空字符串输入。",
+        "execution": { "runnerId": "mock", "mode": "non_interactive", "timeoutMs": 60000 }
+      },
+      "dependsOn": ["implement-greeting"],
+      "status": "planned"
+    },
+    {
+      "task": {
+        "schemaVersion": 1,
+        "id": "verify-greeting",
+        "title": "验证问候函数交付",
+        "prompt": "检查问候函数和测试文件，运行 node --test greet.test.mjs 并汇报结果。",
+        "execution": { "runnerId": "mock", "mode": "non_interactive", "timeoutMs": 60000 }
+      },
+      "dependsOn": ["add-greeting-tests"],
+      "status": "planned"
+    }
+  ]
+}

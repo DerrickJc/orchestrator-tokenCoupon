@@ -103,4 +103,21 @@ describe("parsePlan", () => {
     expect(() => parsePlan(duplicateDependency)).toThrow("依赖重复");
     expect(() => parsePlan(changedStatus)).toThrow("只支持 planned 状态");
   });
+
+  test("rejects self-dependencies and multi-task dependency cycles", () => {
+    const selfDependency = {
+      ...makePlan(),
+      tasks: [{ task: makeTask("only"), dependsOn: ["only"], status: "planned" }],
+    };
+    const cycle = {
+      ...makePlan(),
+      tasks: [
+        { task: makeTask("first"), dependsOn: ["second"], status: "planned" },
+        { task: makeTask("second"), dependsOn: ["first"], status: "planned" },
+      ],
+    };
+
+    expect(() => parsePlan(selfDependency)).toThrow("不能依赖自身");
+    expect(() => parsePlan(cycle)).toThrow("依赖关系存在循环");
+  });
 });

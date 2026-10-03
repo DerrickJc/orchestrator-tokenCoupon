@@ -104,4 +104,42 @@ describe("CLI show commands", () => {
     expect(attempt.status).toBe("succeeded");
     expect(result.stdout).toContain(`产物：${attempt.artifactDir}`);
   });
+
+  test("runs a plan, retries one failed task, then resumes the remaining tasks", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-cli-session-"));
+    temporaryDirectories.push(directory);
+    const planFile = join(directory, "plan.json");
+    const task = (id: string) => ({
+      schemaVersion: 1, id, title: id, prompt: `Execute ${id}`,
+      execution: { runnerId: "mock", mode: "non_interactive", timeoutMs: 3000 },
+    });
+    writeFileSync(planFile, JSON.stringify({
+      schemaVersion: 1, id: "cli-session-test", title: "CLI Session test",
+      tasks: [
+        { task: task("first"), dependsOn: [], status: "planned" },
+        { task: task("second"), dependsOn: ["first"], status: "planned" },
+        { task: task("verify"), dependsOn: ["second"], status: "planned" },
+      ],
+    }), "utf8");
+
+    const first = await invokeCli("plan", "run", "--file", planFile, "--workspace", directory, "--mock-task-scenario", "second=missing-marker");
+    expect(first.exitCode).toBe(1);
+    const sessionId = /Session：([\da-f-]{36})/.exec(first.stdout)?.[1];
+    expect(sessionId).toBeDefined();
+    expect(first.stdout).toContain("second — second：failed");
+    expect(first.stdout).toContain("verify — verify：blocked");
+
+    const shown = await invokeCli("session", "show", "--id", sessionId!, "--workspace", directory);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("状态：failed");
+
+    const retried = await invokeCli("session", "retry", "--id", sessionId!, "--task", "second", "--workspace", directory, "--mock-task-scenario", "second=success");
+    expect(retried.exitCode).toBe(0);
+    expect(retried.stdout).toContain("verify — verify：planned");
+
+    const resumed = await invokeCli("session", "resume", "--id", sessionId!, "--workspace", directory);
+    expect(resumed.exitCode).toBe(0);
+    expect(resumed.stdout).toContain("状态：succeeded");
+    expect(resumed.stdout).toContain("verify — verify：succeeded");
+  });
 });
