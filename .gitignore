@@ -19,9 +19,11 @@ coverage/
 packages/*/dist/
 .vitest/
 .token-coupon/
+.learning/
 
 docs/
 roadmap.md
 UPSTREAM_HISTORY.md
 docs/*
-
+examples/
+.token-coupon/

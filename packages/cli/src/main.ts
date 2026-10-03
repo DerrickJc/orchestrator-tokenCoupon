@@ -1,21 +1,27 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { InputValidationError, parsePlan, parseTask } from "@token-coupon/core";
+import { ClaudeCodeRunner, executeTask, InputValidationError, MockRunner, parsePlan, parseTask } from "@token-coupon/core";
 import type { PlanDefinition, TaskDefinition } from "@token-coupon/core";
 
 const usage = `用法：
   token-coupon plan show --file <计划.json>
   token-coupon task show --file <任务.json>
+  token-coupon task run --file <任务.json> [--workspace <目录>] [--mock-scenario <场景>] [--accept-edits]
   token-coupon --help
 
-阶段 0 只读取和展示计划，不会启动 Runner 或修改工作目录。`;
+支持 Runner：mock、claude-code。工作目录默认为启动 CLI 时的当前目录，可通过 --workspace 指定。
+任务生成的文件写入工作目录，执行记录写入其 .token-coupon/runs/<attemptId>/。`;
 
 interface ParsedCommand {
   kind: "plan" | "task";
+  action: "show" | "run";
   file: string;
+  workspace?: string;
+  mockScenario?: string;
+  acceptEdits?: boolean;
 }
 
 function parseArguments(args: string[]): ParsedCommand | "help" {
@@ -24,25 +30,35 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
   }
 
   const [kind, action, ...options] = args;
-  if ((kind !== "plan" && kind !== "task") || action !== "show") {
+  if ((kind !== "plan" && kind !== "task") || (action !== "show" && !(kind === "task" && action === "run"))) {
     throw new Error("命令无效。请运行 token-coupon --help 查看用法。");
   }
 
   let file: string | undefined;
+  let workspace: string | undefined;
+  let mockScenario: string | undefined;
+  let acceptEdits = false;
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index];
-    if (option !== "--file") {
+    if (option === "--accept-edits") {
+      if (acceptEdits) throw new Error("--accept-edits 只能指定一次");
+      acceptEdits = true;
+      continue;
+    }
+    if (!["--file", "--workspace", "--mock-scenario"].includes(option ?? "")) {
       throw new Error(`不支持的参数：${option}`);
     }
-    if (file !== undefined) {
-      throw new Error("--file 只能指定一次");
+    if (option === "--file" ? file !== undefined : option === "--workspace" ? workspace !== undefined : mockScenario !== undefined) {
+      throw new Error(`${option} 只能指定一次`);
     }
 
     const value = options[index + 1];
     if (value === undefined || value.startsWith("--")) {
       throw new Error("--file 后需要提供 JSON 文件路径");
     }
-    file = value;
+    if (option === "--file") file = value;
+    else if (option === "--workspace") workspace = value;
+    else mockScenario = value;
     index += 1;
   }
 
@@ -50,7 +66,9 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
     throw new Error("缺少 --file 参数");
   }
 
-  return { kind, file };
+  if (action === "show" && (workspace !== undefined || mockScenario !== undefined || acceptEdits)) throw new Error("--workspace、--mock-scenario 和 --accept-edits 只适用于 task run");
+  if (action === "run" && workspace === undefined) workspace = process.cwd();
+  return { kind, action, file, ...(workspace ? { workspace } : {}), ...(mockScenario ? { mockScenario } : {}), ...(acceptEdits ? { acceptEdits } : {}) };
 }
 
 async function readJsonFile(file: string): Promise<unknown> {
@@ -116,8 +134,55 @@ export async function runCli(args: string[]): Promise<number> {
     const rawValue = await readJsonFile(command.file);
     if (command.kind === "plan") {
       console.log(formatPlan(parsePlan(rawValue)));
-    } else {
+    } else if (command.action === "show") {
       console.log(formatTask(parseTask(rawValue)).join("\n"));
+    } else {
+      const task = parseTask(rawValue);
+      const runner = task.execution.runnerId === "mock"
+        ? new MockRunner(command.mockScenario)
+        : task.execution.runnerId === "claude-code" ? new ClaudeCodeRunner(command.acceptEdits ? "acceptEdits" : undefined) : undefined;
+      if (!runner) throw new InputValidationError("task.execution.runnerId", `不支持的 Runner：${task.execution.runnerId}`);
+      if (task.execution.modelId && !runner.supportsModel) throw new InputValidationError("task.execution.modelId", `${runner.id} 不支持 modelId`);
+      if (command.mockScenario && runner.id !== "mock") throw new InputValidationError("--mock-scenario", "仅适用于 mock Runner");
+      if (command.acceptEdits && runner.id !== "claude-code") throw new InputValidationError("--accept-edits", "仅适用于 claude-code Runner");
+      await runner.checkAvailable();
+      const workspaceInfo = await stat(command.workspace!);
+      if (!workspaceInfo.isDirectory()) throw new InputValidationError("--workspace", "必须是已存在的目录");
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      process.once("SIGINT", cancel);
+      process.once("SIGTERM", cancel);
+      let result: Awaited<ReturnType<typeof executeTask>>;
+      try {
+        result = await executeTask({
+          task,
+          cwd: command.workspace!,
+          runner,
+          signal: controller.signal,
+          onOutput: (output) => {
+            const displayText = output.displayText ?? output.agentText;
+            if (displayText) process.stdout.write(displayText);
+            else if (output.stream === "stderr" && output.text) process.stderr.write(output.text);
+          },
+        });
+      } catch (error) {
+        console.error(`执行记录创建失败，Runner 未启动：${error instanceof Error ? error.message : String(error)}`);
+        return 1;
+      } finally {
+        process.removeListener("SIGINT", cancel);
+        process.removeListener("SIGTERM", cancel);
+      }
+      const elapsedMs = Date.parse(result.attempt.finishedAt ?? "") - Date.parse(result.attempt.createdAt);
+      console.log(`\n任务：${result.attempt.taskId}`);
+      console.log(`Attempt：${result.attempt.attemptId}`);
+      console.log(`状态：${result.attempt.status}（${result.attempt.reasonCode}）`);
+      console.log(`退出码：${result.attempt.exitCode ?? "无"}；耗时：${Number.isFinite(elapsedMs) ? elapsedMs : "未知"} ms`);
+      console.log(`产物：${result.artifactDir}`);
+      if (result.attempt.reason) console.error(result.attempt.reason);
+      if (result.attempt.status === "succeeded") return 0;
+      if (result.attempt.status === "timed_out") return 124;
+      if (result.attempt.status === "cancelled") return 130;
+      return 1;
     }
     return 0;
   } catch (error) {

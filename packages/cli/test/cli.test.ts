@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { runCli } from "../src/main.js";
 
@@ -63,5 +64,44 @@ describe("CLI show commands", () => {
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("invalid-task.json");
     expect(result.stderr).toContain("schemaVersion");
+  });
+
+  test("rejects an unsupported runner instead of silently substituting Claude Code", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-cli-"));
+    temporaryDirectories.push(directory);
+    const taskFile = join(directory, "task.json");
+    writeFileSync(taskFile, JSON.stringify({
+      schemaVersion: 1, id: "unsupported", title: "test", prompt: "test",
+      execution: { runnerId: "other", mode: "non_interactive", timeoutMs: 1000 },
+    }), "utf8");
+    const result = await invokeCli("task", "run", "--file", taskFile, "--workspace", directory);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("不支持的 Runner");
+  });
+
+  test("accepts --accept-edits only for Claude Code runs", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-cli-"));
+    temporaryDirectories.push(directory);
+    const result = await invokeCli("task", "run", "--file", "examples/task.mock.json", "--workspace", directory, "--accept-edits");
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("仅适用于 claude-code Runner");
+  });
+
+  test("runs without --workspace and records artifacts in the caller's directory", () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-cli-"));
+    temporaryDirectories.push(directory);
+    const result = spawnSync(process.execPath, [
+      resolve("packages/cli/dist/main.js"), "task", "run",
+      "--file", resolve("examples/task.mock.json"),
+    ], { cwd: directory, encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    const runsDirectory = join(directory, ".token-coupon", "runs");
+    const attempts = readdirSync(runsDirectory);
+    expect(attempts).toHaveLength(1);
+    const attempt = JSON.parse(readFileSync(join(runsDirectory, attempts[0]!, "attempt.json"), "utf8"));
+    expect(attempt.cwd).toBe(directory);
+    expect(attempt.status).toBe("succeeded");
+    expect(result.stdout).toContain(`产物：${attempt.artifactDir}`);
   });
 });
