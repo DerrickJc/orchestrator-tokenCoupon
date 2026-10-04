@@ -29,6 +29,8 @@ export interface PlanRunOptions {
   signal?: AbortSignal;
   acceptEdits?: boolean;
   mockTaskScenarios?: Map<string, string>;
+  sessionId?: string;
+  beforeCreateSession?: () => Promise<void>;
   onOutput?: (taskId: string, output: RunnerOutput) => void;
 }
 
@@ -68,7 +70,8 @@ export async function runPlan(options: PlanRunOptions): Promise<SessionOperation
   const store = new SessionStore(options.workspace);
   const release = await store.acquireLock();
   try {
-    const record = await store.create(options.plan);
+    await options.beforeCreateSession?.();
+    const record = await store.create(options.plan, options.sessionId);
     return await schedule(record, store, options);
   } finally {
     await release();

@@ -8,6 +8,7 @@ import {
   resumeSession, retrySession, runPlan, SessionLockError, SessionStore,
 } from "@token-coupon/core";
 import type { PlanDefinition, Runner, RunnerOutput, TaskDefinition, TaskRunnerFactoryOptions } from "@token-coupon/core";
+import { runPlannerCli } from "./planner-cli.js";
 
 const usage = `用法：
   token-coupon plan show --file <计划.json>
@@ -20,6 +21,7 @@ const usage = `用法：
       [--mock-task-scenario <taskId>=<场景> ...]
   token-coupon session retry --id <sessionId> --task <taskId> [--workspace <目录>]
       [--accept-edits] [--mock-task-scenario <taskId>=<场景> ...]
+  token-coupon planner <start|reply|retry|show|export|replace|approve|run> [选项]
   token-coupon --help
 
 工作目录默认为启动 CLI 时的当前目录。Session 和 Attempt 记录保存在该目录的 .token-coupon/ 下。`;
@@ -181,6 +183,7 @@ function sessionExitCode(snapshot: import("@token-coupon/core").SessionSnapshot)
 }
 
 export async function runCli(args: string[]): Promise<number> {
+  if (args[0] === "planner") return runPlannerCli(args.slice(1));
   let command: ParsedCommand | "help";
   try { command = parseArguments(args); }
   catch (error) { console.error(error instanceof Error ? error.message : String(error)); return 2; }

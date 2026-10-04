@@ -15,3 +15,16 @@ export { PlanStore } from "./plan-store.js";
 export { SessionStore, SessionLockError } from "./session-store.js";
 export { formatSession, resumeSession, retrySession, runPlan, validateMockTaskScenarios } from "./task-orchestrator.js";
 export type { PlanRunOptions, RetryOptions, SessionOperationOptions, SessionOperationResult, TaskRunnerFactory, TaskRunnerFactoryOptions } from "./task-orchestrator.js";
+export { RepositoryReader, repositoryToolDefinitions, verifyRepositoryEvidence } from "./repository-reader.js";
+export { PlannerStore, PlannerLockError, canonicalHash, validateDraft } from "./planner-store.js";
+export { MockPlanner } from "./planners/mock-planner.js";
+export { DeepSeekPlanner, PlannerApiError } from "./planners/deepseek-planner.js";
+export type {
+  ConversationMessage, ExecutionReference, PlanApproval, Planner, PlannerConfig, PlannerContext, PlannerConversationSnapshot,
+  PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, PlannerTurnStatus, RepositoryEvidence,
+} from "./planner-types.js";
+export {
+  approvePlannerDraft, createPlanner, formatPlanner, loadPlannerConversation, replacePlannerDraft,
+  replyToPlanner, retryPlannerTurn, runApprovedPlanner, startPlannerConversation,
+} from "./planner-conversation.js";
+export type { PlannerOperationResult, PlannerRunOptions, PlannerStartOptions } from "./planner-conversation.js";

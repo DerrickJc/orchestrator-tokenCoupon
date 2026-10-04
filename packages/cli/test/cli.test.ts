@@ -142,4 +142,60 @@ describe("CLI show commands", () => {
     expect(resumed.stdout).toContain("状态：succeeded");
     expect(resumed.stdout).toContain("verify — verify：succeeded");
   });
+
+  test("reopens, edits, approves, and runs a planner draft once", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-planner-cli-"));
+    temporaryDirectories.push(directory);
+    const started = await invokeCli(
+      "planner", "start", "--planner", "mock", "--runner", "mock",
+      "--request", "Add a greeting function.", "--workspace", directory, "--mock-clarify",
+    );
+    expect(started.exitCode).toBe(0);
+    expect(started.stdout).toContain("状态：collecting");
+    expect(started.stdout).toContain("自动化测试");
+    const planningId = /Planning：([\da-f-]{36})/.exec(started.stdout)?.[1];
+    expect(planningId).toBeDefined();
+
+    const reopened = await invokeCli("planner", "show", "--id", planningId!, "--workspace", directory);
+    expect(reopened.exitCode).toBe(0);
+    expect(reopened.stdout).toContain("用户：Add a greeting function.");
+    expect(reopened.stdout).toContain("自动化测试");
+    const drafted = await invokeCli(
+      "planner", "reply", "--id", planningId!, "--message", "需要，同时覆盖空字符串。", "--workspace", directory,
+    );
+    expect(drafted.exitCode).toBe(0);
+    expect(drafted.stdout).toContain("状态：draft_ready");
+
+    const planFile = join(directory, "edited-plan.json");
+    const exported = await invokeCli("planner", "export", "--id", planningId!, "--file", planFile, "--workspace", directory);
+    expect(exported.exitCode).toBe(0);
+    const editedPlan = JSON.parse(readFileSync(planFile, "utf8")) as { title: string; tasks: Array<{ task: { title: string } }> };
+    editedPlan.title = "Greeting implementation and tests";
+    editedPlan.tasks[0]!.task.title = "Implement greeting with the empty-string behavior";
+    writeFileSync(planFile, JSON.stringify(editedPlan, null, 2), "utf8");
+    const replaced = await invokeCli("planner", "replace", "--id", planningId!, "--file", planFile, "--workspace", directory);
+    expect(replaced.exitCode).toBe(0);
+    expect(replaced.stdout).toContain("草案版本：draft-2");
+
+    const unapproved = await invokeCli("planner", "run", "--id", planningId!, "--workspace", directory);
+    expect(unapproved.exitCode).toBe(1);
+    expect(unapproved.stderr).toContain("必须批准");
+    expect(readdirSync(join(directory, ".token-coupon")).filter((entry) => entry === "sessions")).toHaveLength(0);
+
+    const approved = await invokeCli("planner", "approve", "--id", planningId!, "--revision", "2", "--workspace", directory);
+    expect(approved.exitCode).toBe(0);
+    expect(approved.stdout).toContain("批准：");
+    const executed = await invokeCli("planner", "run", "--id", planningId!, "--workspace", directory);
+    expect(executed.exitCode).toBe(0);
+    expect(executed.stdout).toContain("Session 状态：succeeded");
+    expect(executed.stdout).toContain("verify-request — 验证实现：succeeded");
+    const sessionId = /执行 Session：([\da-f-]{36})/.exec(executed.stdout)?.[1];
+    expect(sessionId).toBeDefined();
+    const sessionPlan = JSON.parse(readFileSync(join(directory, ".token-coupon", "sessions", sessionId!, "plan.json"), "utf8"));
+    expect(sessionPlan).toEqual(editedPlan);
+
+    const repeated = await invokeCli("planner", "run", "--id", planningId!, "--workspace", directory);
+    expect(repeated.exitCode).toBe(0);
+    expect(readdirSync(join(directory, ".token-coupon", "sessions"), { withFileTypes: true }).filter((entry) => entry.isDirectory())).toHaveLength(1);
+  });
 });

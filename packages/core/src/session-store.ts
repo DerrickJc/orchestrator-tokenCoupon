@@ -54,8 +54,8 @@ export class SessionStore {
     };
   }
 
-  async create(plan: PlanDefinition): Promise<SessionRecord> {
-    const sessionId = randomUUID();
+  async create(plan: PlanDefinition, sessionId: string = randomUUID()): Promise<SessionRecord> {
+    if (!UUID.test(sessionId)) throw new Error("sessionId 必须是 UUID");
     const sessionDir = join(this.root, "sessions", sessionId);
     const now = new Date().toISOString();
     const snapshot: SessionSnapshot = {
