@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parsePlan } from "./validate-plan.js";
 import type { ExecutionConfig } from "./task.js";
@@ -49,6 +49,20 @@ export class PlannerStore {
     }
     if (snapshot.status === "execution_created" && snapshot.execution?.state !== "created") throw new Error("Planner execution_created 状态缺少已创建 Session");
     return snapshot;
+  }
+
+  async list(): Promise<PlannerConversationSnapshot[]> {
+    const entries = await readdir(this.root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const snapshots: PlannerConversationSnapshot[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !isUuid(entry.name)) continue;
+      try { snapshots.push(await this.load(entry.name)); }
+      catch { /* One corrupt planner record should not hide other records. */ }
+    }
+    return snapshots.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async save(snapshot: PlannerConversationSnapshot): Promise<void> {
@@ -227,6 +241,8 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
   const active = raw.activeTurnId as string | null;
   if ((active !== null) !== turns.some((turn) => turn.turnId === active && turn.status === "running")) throw new Error("Planner activeTurnId 与轮次状态不一致");
   const approval = raw.approval === null ? null : parseApproval(raw.approval);
+  const latestReviewId = raw.latestReviewId === undefined || raw.latestReviewId === null ? null : raw.latestReviewId;
+  if (latestReviewId !== null && !isUuid(latestReviewId)) throw new Error("Planner latestReviewId 无效");
   const execution = raw.execution === null ? null : parseExecutionReference(raw.execution);
   if (raw.status === "approved" && (!approval || raw.draftRevision !== approval.draftRevision)) throw new Error("Planner approved 状态缺少当前批准");
   if (raw.status === "draft_ready" && raw.draftRevision === null) throw new Error("Planner draft_ready 状态缺少草案");
@@ -235,7 +251,7 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
   return {
     schemaVersion: 1, planningId: raw.planningId as string, workspace, revision: raw.revision as number,
     status: raw.status as PlannerConversationSnapshot["status"], config: { provider: config.provider as "mock" | "deepseek", model: config.model as string, baseUrl: config.baseUrl as string },
-    executionDefaults, messages, turns, context, activeTurnId: active, draftRevision: raw.draftRevision as number | null, approval, execution,
+    executionDefaults, messages, turns, context, activeTurnId: active, draftRevision: raw.draftRevision as number | null, approval, latestReviewId, execution,
     createdAt: raw.createdAt, updatedAt: raw.updatedAt,
   };
 }
@@ -259,8 +275,19 @@ function parseTurn(value: unknown, workspace: string, planningId: string): Plann
 
 function parseApproval(value: unknown): NonNullable<PlannerConversationSnapshot["approval"]> {
   const raw = object(value, "Planner approval");
-  if (!isUuid(raw.approvalId) || !Number.isSafeInteger(raw.draftRevision) || (raw.draftRevision as number) < 1 || typeof raw.planHash !== "string" || !HASH.test(raw.planHash) || typeof raw.approvedAt !== "string") throw new Error("Planner approval 无效");
-  return raw as unknown as NonNullable<PlannerConversationSnapshot["approval"]>;
+  if (!isUuid(raw.approvalId) || !Number.isSafeInteger(raw.draftRevision) || (raw.draftRevision as number) < 1 || typeof raw.planHash !== "string" || !HASH.test(raw.planHash) || typeof raw.approvedAt !== "string" ||
+      (raw.reviewId !== undefined && (typeof raw.reviewId !== "string" || !isUuid(raw.reviewId))) ||
+      (raw.reportHash !== undefined && (typeof raw.reportHash !== "string" || !HASH.test(raw.reportHash))) ||
+      (raw.waivedFindings !== undefined && (!Array.isArray(raw.waivedFindings) || raw.waivedFindings.length > 100 || raw.waivedFindings.some((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+        const waiver = item as Record<string, unknown>;
+        return typeof waiver.findingId !== "string" || !/^[A-Z][A-Z0-9_-]{0,31}$/.test(waiver.findingId) || typeof waiver.reason !== "string" || Buffer.byteLength(waiver.reason, "utf8") > 1024 || typeof waiver.waivedAt !== "string";
+      })))) throw new Error("Planner approval 无效");
+  return {
+    approvalId: raw.approvalId as string, draftRevision: raw.draftRevision as number, planHash: raw.planHash as string, approvedAt: raw.approvedAt,
+    ...(raw.reviewId === undefined ? {} : { reviewId: raw.reviewId as string }), ...(raw.reportHash === undefined ? {} : { reportHash: raw.reportHash as string }),
+    ...(raw.waivedFindings === undefined ? {} : { waivedFindings: raw.waivedFindings as NonNullable<NonNullable<PlannerConversationSnapshot["approval"]>["waivedFindings"]> }),
+  };
 }
 
 function parseExecutionReference(value: unknown): NonNullable<PlannerConversationSnapshot["execution"]> {

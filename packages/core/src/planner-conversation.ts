@@ -12,7 +12,10 @@ import { InputValidationError } from "./validation.js";
 import type { TaskRunnerFactory } from "./task-orchestrator.js";
 import { runPlan } from "./task-orchestrator.js";
 import { SessionStore } from "./session-store.js";
-import { parsePlan } from "./validate-plan.js";
+import { checkPlan } from "./plan-check.js";
+import { loadCurrentPlanReview } from "./plan-review.js";
+import { ReviewStore } from "./review-store.js";
+import type { PlanReviewRecord } from "./planner-types.js";
 
 const USER_MESSAGE_LIMIT = 8 * 1024;
 const REQUEST_CONTEXT_LIMIT = 256 * 1024;
@@ -33,8 +36,12 @@ export interface PlannerStartOptions {
 export interface PlannerOperationResult {
   snapshot: PlannerConversationSnapshot;
   draft?: PlannerDraft;
+  /** False means a newly generated response reused the current immutable draft unchanged. */
+  draftChanged?: boolean;
   reply?: PlannerReply;
   error?: string;
+  review?: PlanReviewRecord;
+  reviewIsCurrent?: boolean;
 }
 
 export interface PlannerRunOptions {
@@ -61,7 +68,7 @@ export async function startPlannerConversation(options: PlannerStartOptions): Pr
   const snapshot: PlannerConversationSnapshot = {
     schemaVersion: 1, planningId: randomUUID(), workspace: store.workspace, revision: 1, status: "collecting",
     config: options.config, executionDefaults: options.executionDefaults, messages: [], turns: [], context: [],
-    activeTurnId: null, draftRevision: null, approval: null, execution: null, createdAt: now, updatedAt: now,
+    activeTurnId: null, draftRevision: null, approval: null, latestReviewId: null, execution: null, createdAt: now, updatedAt: now,
   };
   await store.create(snapshot);
   return mutateWithTurn(store, snapshot.planningId, options.planner ?? createPlanner(options.config), options.request, options.signal, false);
@@ -94,6 +101,8 @@ export async function loadPlannerConversation(planningId: string, workspace: str
   const store = new PlannerStore(workspace);
   const snapshot = await store.load(planningId);
   const draft = snapshot.draftRevision === null ? undefined : await store.loadDraft(planningId, snapshot.draftRevision);
+  const review = snapshot.latestReviewId ? await new ReviewStore(workspace).load(planningId, snapshot.latestReviewId).catch(() => undefined) : undefined;
+  const reviewIsCurrent = review?.status === "succeeded" && (await loadCurrentPlanReview(planningId, workspace))?.reviewId === review.reviewId;
   const lastTurn = snapshot.turns.at(-1);
   let reply: PlannerReply | undefined;
   if (lastTurn?.status === "succeeded") {
@@ -102,14 +111,18 @@ export async function loadPlannerConversation(planningId: string, workspace: str
       if (value.reply) reply = parsePlannerReply(value.reply);
     } catch { /* A complete conversation snapshot remains readable without optional display data. */ }
   }
-  return { snapshot, ...(draft ? { draft } : {}), ...(reply ? { reply } : {}) };
+  return { snapshot, ...(draft ? { draft } : {}), ...(reply ? { reply } : {}), ...(review ? { review, reviewIsCurrent } : {}) };
 }
 
-export async function replacePlannerDraft(options: { planningId: string; workspace: string; value: unknown }): Promise<PlannerOperationResult> {
+export async function replacePlannerDraft(options: { planningId: string; workspace: string; value: unknown; expectedDraftRevision?: number; expectedPlanHash?: string }): Promise<PlannerOperationResult> {
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
     let snapshot = await store.load(options.planningId);
+    if (options.expectedDraftRevision !== undefined && snapshot.draftRevision !== options.expectedDraftRevision) throw new Error("草案已变化，编辑文件未导入；请先查看最新差异");
+    if (options.expectedPlanHash !== undefined && snapshot.draftRevision !== null && (await store.loadDraft(options.planningId, snapshot.draftRevision)).planHash !== options.expectedPlanHash) {
+      throw new Error("草案哈希已变化，编辑文件未导入；请先查看最新差异");
+    }
     const hadActiveTurn = snapshot.activeTurnId !== null;
     snapshot = await recoverActiveTurn(store, snapshot);
     if (hadActiveTurn) throw new Error("发现中断的规划轮次，请先使用 planner retry");
@@ -119,21 +132,21 @@ export async function replacePlannerDraft(options: { planningId: string; workspa
     ensurePlanSize(plan);
     const previous = snapshot.draftRevision === null ? undefined : await store.loadDraft(options.planningId, snapshot.draftRevision);
     const hash = canonicalHash(plan);
-    if (previous?.planHash === hash) return { snapshot, draft: previous };
+    if (previous?.planHash === hash) return { snapshot, draft: previous, draftChanged: false };
     const draft: PlannerDraft = {
       schemaVersion: 1, planningId: options.planningId, draftRevision: (snapshot.draftRevision ?? 0) + 1,
       plan, message: "用户导入并编辑了计划。", source: "user", context: snapshot.context, planHash: hash, createdAt: new Date().toISOString(),
     };
     await store.writeDraft(draft);
     snapshot = nextSnapshot(snapshot, {
-      status: "draft_ready", draftRevision: draft.draftRevision, approval: null, execution: null,
+      status: "draft_ready", draftRevision: draft.draftRevision, approval: null, latestReviewId: null, execution: null,
     });
     await store.save(snapshot);
-    return { snapshot, draft };
+    return { snapshot, draft, draftChanged: true };
   } finally { await release(); }
 }
 
-export async function approvePlannerDraft(options: { planningId: string; workspace: string; draftRevision: number; signal?: AbortSignal }): Promise<PlannerOperationResult> {
+export async function approvePlannerDraft(options: { planningId: string; workspace: string; draftRevision: number; reviewId?: string; waivedFindingIds?: string[]; waiverReason?: string; signal?: AbortSignal }): Promise<PlannerOperationResult> {
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
@@ -144,14 +157,29 @@ export async function approvePlannerDraft(options: { planningId: string; workspa
     if (snapshot.status !== "draft_ready" && snapshot.status !== "approved") throw new Error("当前没有等待批准的计划草案");
     if (snapshot.draftRevision !== options.draftRevision) throw new Error("批准版本不是当前草案版本");
     const draft = await store.loadDraft(options.planningId, options.draftRevision);
+    const reviewId = options.reviewId ?? snapshot.latestReviewId;
+    if (!reviewId || reviewId !== snapshot.latestReviewId) throw new Error("批准前必须完成当前草案的审查，请运行 planner review");
     const changed = await verifyRepositoryEvidence(store.workspace, snapshot.context, options.signal);
-    if (changed.length) throw new Error("workspace_changed：调研文件已变化，请在新一轮对话中重新读取后再批准：" + changed.join(", "));
-    const approval = snapshot.approval ?? { approvalId: randomUUID(), draftRevision: draft.draftRevision, planHash: draft.planHash, approvedAt: new Date().toISOString() };
-    if (snapshot.status !== "approved") {
+    if (changed.length) throw new Error("workspace_changed：调研文件已变化，请重新调研后再批准：" + changed.join(", "));
+    const review = await loadCurrentPlanReview(options.planningId, store.workspace);
+    if (!review || review.reviewId !== reviewId) throw new Error("审查报告已过期或无效，请重新审查当前草案");
+    const waivedIds = new Set(options.waivedFindingIds ?? []);
+    const errorIds = review.findings.filter((finding) => finding.severity === "error").map((finding) => finding.findingId);
+    const unknownWaivers = [...waivedIds].filter((id) => !errorIds.includes(id));
+    if (unknownWaivers.length) throw new Error("豁免只能引用当前审查中的 error 问题：" + unknownWaivers.join(", "));
+    const unhandled = errorIds.filter((id) => !waivedIds.has(id));
+    if (unhandled.length) throw new Error("审查发现严重问题，需修订或显式豁免：" + unhandled.join(", "));
+    if (waivedIds.size && (!options.waiverReason?.trim() || Buffer.byteLength(options.waiverReason, "utf8") > 1024)) throw new Error("豁免严重问题时必须提供不超过 1 KiB 的原因");
+    const approval = snapshot.approval?.reviewId === review.reviewId ? snapshot.approval : {
+      approvalId: randomUUID(), draftRevision: draft.draftRevision, planHash: draft.planHash, approvedAt: new Date().toISOString(),
+      reviewId: review.reviewId, reportHash: review.reportHash!,
+      waivedFindings: [...waivedIds].map((findingId) => ({ findingId, reason: options.waiverReason!.trim(), waivedAt: new Date().toISOString() })),
+    };
+    if (snapshot.status !== "approved" || snapshot.approval?.reviewId !== approval.reviewId || snapshot.approval?.reportHash !== approval.reportHash) {
       snapshot = nextSnapshot(snapshot, { status: "approved", approval });
       await store.save(snapshot);
     }
-    return { snapshot, draft };
+    return { snapshot, draft, review, reviewIsCurrent: true };
   } finally { await release(); }
 }
 
@@ -182,6 +210,10 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     if (snapshot.status !== "approved" || !snapshot.approval || snapshot.draftRevision === null) throw new Error("执行前必须批准当前草案版本");
     const draft = await store.loadDraft(options.planningId, snapshot.draftRevision);
     if (draft.planHash !== snapshot.approval.planHash || canonicalHash(draft.plan) !== snapshot.approval.planHash) throw new Error("批准草案哈希校验失败");
+    const review = await loadCurrentPlanReview(options.planningId, store.workspace);
+    if (!snapshot.approval.reviewId || !snapshot.approval.reportHash || !review || review.reviewId !== snapshot.approval.reviewId || review.reportHash !== snapshot.approval.reportHash) {
+      throw new Error("执行前必须确认当前草案的有效审查报告");
+    }
     const execution: ExecutionReference = retryReservation ?? {
       sessionId: randomUUID(), approvalId: snapshot.approval.approvalId, draftRevision: draft.draftRevision,
       planHash: draft.planHash, state: "reserved" as const,
@@ -201,7 +233,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
         beforeCreateSession: async () => {
           const current = await store.load(options.planningId);
           if (current.status !== "approved" || current.approval?.approvalId !== execution.approvalId ||
-              current.draftRevision !== execution.draftRevision || current.execution?.sessionId !== execution.sessionId) {
+            current.draftRevision !== execution.draftRevision || current.execution?.sessionId !== execution.sessionId || current.approval?.reviewId !== review.reviewId) {
             throw new Error("planner_approval_changed：批准记录已变化");
           }
           const changed = await verifyRepositoryEvidence(store.workspace, draft.context, options.signal);
@@ -256,7 +288,12 @@ export function formatPlanner(result: PlannerOperationResult & { sessionStatus?:
     }
     lines.push("调研文件：" + (draft.context.length ? draft.context.map((item) => item.path).join(", ") : "无"));
   }
-  if (snapshot.approval) lines.push("批准：" + snapshot.approval.approvalId + "（draft-" + snapshot.approval.draftRevision + "）");
+  if (result.review) lines.push("最近审查：" + result.review.reviewId + "（" + result.review.status + (result.review.status === "succeeded" ? `；${result.review.findings.length} 个问题${result.reviewIsCurrent ? "；适用于当前草案" : "；已过期"}` : "") + "）");
+  else if (snapshot.latestReviewId) lines.push("审查报告：" + snapshot.latestReviewId + "（当前记录不可读）");
+  if (snapshot.approval) {
+    lines.push("批准：" + snapshot.approval.approvalId + "（draft-" + snapshot.approval.draftRevision + `；review-${snapshot.approval.reviewId ?? "缺失"}` + "）");
+    for (const waiver of snapshot.approval.waivedFindings ?? []) lines.push(`  豁免 ${waiver.findingId}：${waiver.reason}`);
+  }
   if (snapshot.execution) lines.push("执行 Session：" + snapshot.execution.sessionId + "（" + snapshot.execution.state + "）");
   if (result.sessionStatus) lines.push("Session 状态：" + result.sessionStatus);
   if (result.error) lines.push("错误：" + result.error);
@@ -390,19 +427,22 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
     }
     const assistant = { messageId: randomUUID(), role: "assistant" as const, content: JSON.stringify(reply) };
     if (Buffer.byteLength(assistant.content, "utf8") > 64 * 1024) throw new PlannerOperationError("planner_reply_too_large", "Planner 最终回复超过 64 KiB");
-    const draft = reply.kind === "draft" ? makeDraft(snapshot, reply, evidence) : undefined;
-    if (draft) await store.writeDraft(draft);
+    const newDraft = reply.kind === "draft" && (!currentDraft || currentDraft.planHash !== canonicalHash(reply.plan))
+      ? makeDraft(snapshot, reply, evidence)
+      : undefined;
+    const returnedDraft = reply.kind === "draft" ? newDraft ?? currentDraft : undefined;
+    if (newDraft) await store.writeDraft(newDraft);
     const finishedAt = new Date().toISOString();
     const doneTurn: PlannerTurnRef = { ...turn, status: "succeeded", reasonCode: null, finishedAt };
     await store.writeTurn(doneTurn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, status: "succeeded", input: userText, reply, evidence, apiRequests: counters.requests, toolCalls: counters.tools, events, createdAt: now, finishedAt });
     snapshot = nextSnapshot(snapshot, {
       status: reply.kind === "draft" ? "draft_ready" : "collecting",
       messages: [...snapshot.messages, assistant], turns: [...snapshot.turns.slice(0, -1), doneTurn],
-      context: evidence, activeTurnId: null, ...(draft ? { draftRevision: draft.draftRevision } : {}),
+      context: evidence, activeTurnId: null, ...(newDraft ? { draftRevision: newDraft.draftRevision, latestReviewId: null } : {}),
       approval: null, execution: null,
     });
     await store.save(snapshot);
-    return { snapshot, ...(draft ? { draft } : {}), reply };
+    return { snapshot, ...(returnedDraft ? { draft: returnedDraft } : {}), ...(reply.kind === "draft" ? { draftChanged: newDraft !== undefined } : {}), reply };
   } catch (error) {
     const code = timed.timedOut() ? "planner_timed_out"
       : timed.signal.aborted ? "planner_cancelled"
@@ -448,14 +488,9 @@ function parsePlannerReply(value: unknown): PlannerReply {
 }
 
 function parsePlanWithPolicy(value: unknown, execution: ExecutionConfig): PlanDefinition {
-  const plan = parsePlan(value);
-  if (plan.tasks.length === 0 || plan.tasks.length > 100) throw new PlannerOperationError("planner_plan_size", "计划必须包含 1 到 100 个任务");
-  for (const [index, entry] of plan.tasks.entries()) {
-    if (JSON.stringify(entry.task.execution) !== JSON.stringify(execution)) {
-      throw new PlannerOperationError("planner_execution_policy", "任务 " + index + " 必须使用本次指定的 Runner、模型、模式和超时");
-    }
-  }
-  return plan;
+  const result = checkPlan(value, execution);
+  if (!result.valid || !result.plan) throw new PlannerOperationError("planner_invalid_plan", result.diagnostics[0]?.message ?? "计划校验失败");
+  return result.plan;
 }
 
 function ensurePlanSize(plan: PlanDefinition): void {

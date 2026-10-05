@@ -44,6 +44,41 @@ export interface PlanApproval {
   draftRevision: number;
   planHash: string;
   approvedAt: string;
+  reviewId?: string;
+  reportHash?: string;
+  waivedFindings?: Array<{ findingId: string; reason: string; waivedAt: string }>;
+}
+
+export type PlanReviewStatus = "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
+export type PlanReviewSeverity = "error" | "warning" | "info";
+export type PlanReviewCategory = "requirements" | "dependency" | "technology" | "contract" | "testing";
+
+export interface PlanReviewFinding {
+  findingId: string;
+  severity: PlanReviewSeverity;
+  category: PlanReviewCategory;
+  taskIds: string[];
+  description: string;
+  basis: string;
+  suggestion: string;
+}
+
+export interface PlanReviewRecord {
+  schemaVersion: 1;
+  planningId: string;
+  reviewId: string;
+  status: PlanReviewStatus;
+  draftRevision: number;
+  planHash: string;
+  requirementsHash: string;
+  reviewerConfigHash: string;
+  context: RepositoryEvidence[];
+  findings: PlanReviewFinding[];
+  summary: string;
+  reportHash: string | null;
+  reasonCode: string | null;
+  createdAt: string;
+  finishedAt: string | null;
 }
 
 export interface ExecutionReference {
@@ -68,6 +103,8 @@ export interface PlannerConversationSnapshot {
   activeTurnId: string | null;
   draftRevision: number | null;
   approval: PlanApproval | null;
+  /** Optional for compatibility with Phase 3 snapshots created before review support. */
+  latestReviewId?: string | null;
   execution: ExecutionReference | null;
   createdAt: string;
   updatedAt: string;
@@ -96,6 +133,16 @@ export interface PlannerContext {
   consumeApiRequest(): number;
   consumeToolCall(): void;
   record(event: PlannerEvent): Promise<void>;
+}
+
+export interface PlanReviewInput {
+  requirements: string[];
+  plan: PlanDefinition;
+  executionDefaults: ExecutionConfig;
+}
+
+export interface PlanReviewer {
+  review(input: PlanReviewInput, context: PlannerContext): Promise<unknown>;
 }
 
 export interface Planner {

@@ -1,6 +1,10 @@
 export type { PlanDefinition, PlannedTask } from "./plan.js";
 export type { ExecutionConfig, ExecutionMode, TaskDefinition } from "./task.js";
 export { parsePlan } from "./validate-plan.js";
+export { checkPlan } from "./plan-check.js";
+export type { PlanCheckResult, PlanDiagnostic } from "./plan-check.js";
+export { diffPlans } from "./plan-diff.js";
+export type { PlanChange } from "./plan-diff.js";
 export { parseTask } from "./validate-task.js";
 export { InputValidationError } from "./validation.js";
 export type { AttemptRecord, AttemptStatus } from "./attempt.js";
@@ -17,11 +21,14 @@ export { formatSession, resumeSession, retrySession, runPlan, validateMockTaskSc
 export type { PlanRunOptions, RetryOptions, SessionOperationOptions, SessionOperationResult, TaskRunnerFactory, TaskRunnerFactoryOptions } from "./task-orchestrator.js";
 export { RepositoryReader, repositoryToolDefinitions, verifyRepositoryEvidence } from "./repository-reader.js";
 export { PlannerStore, PlannerLockError, canonicalHash, validateDraft } from "./planner-store.js";
-export { MockPlanner } from "./planners/mock-planner.js";
+export { ReviewStore, validateReviewRecord } from "./review-store.js";
+export { reviewPlannerDraft, loadCurrentPlanReview, createPlanReviewer, requirementsHash, reviewerConfigHash } from "./plan-review.js";
+export { MockPlanner, MockPlanReviewer } from "./planners/mock-planner.js";
 export { DeepSeekPlanner, PlannerApiError } from "./planners/deepseek-planner.js";
 export type {
   ConversationMessage, ExecutionReference, PlanApproval, Planner, PlannerConfig, PlannerContext, PlannerConversationSnapshot,
-  PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, PlannerTurnStatus, RepositoryEvidence,
+  PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, PlannerTurnStatus, PlanReviewFinding,
+  PlanReviewInput, PlanReviewRecord, PlanReviewSeverity, PlanReviewCategory, PlanReviewStatus, PlanReviewer, RepositoryEvidence,
 } from "./planner-types.js";
 export {
   approvePlannerDraft, createPlanner, formatPlanner, loadPlannerConversation, replacePlannerDraft,

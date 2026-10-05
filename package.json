@@ -13,6 +13,7 @@
     "build": "npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/cli",
     "typecheck": "npm run build --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/cli",
     "cli": "npm run build && node packages/cli/dist/main.js",
+    "demo:phase3.5": "npm run build && node scripts/phase3.5-demo.mjs",
     "test": "npm run build && vitest run"
   },
   "devDependencies": {

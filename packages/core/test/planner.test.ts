@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  approvePlannerDraft, canonicalHash, DeepSeekPlanner, loadPlannerConversation, MockPlanner, PlannerStore,
-  RepositoryReader, replacePlannerDraft, replyToPlanner, runApprovedPlanner, startPlannerConversation,
+  approvePlannerDraft, canonicalHash, checkPlan, DeepSeekPlanner, diffPlans, loadPlannerConversation, MockPlanReviewer, MockPlanner, PlannerStore,
+  RepositoryReader, replacePlannerDraft, replyToPlanner, reviewPlannerDraft, runApprovedPlanner, startPlannerConversation,
 } from "../src/index.js";
 import type { ExecutionConfig, PlannerContext } from "../src/index.js";
 import { MockRunner } from "../src/runners/mock-runner.js";
@@ -93,7 +93,9 @@ describe("Planner conversation and approval", () => {
     await expect(runApprovedPlanner({ planningId, workspace: root, createRunner: factory })).rejects.toThrow("必须批准");
     expect(await readdir(join(root, ".token-coupon", "sessions")).catch(() => [])).toHaveLength(0);
 
-    const approved = await approvePlannerDraft({ planningId, workspace: root, draftRevision: 1 });
+    const review = await reviewPlannerDraft({ planningId, workspace: root, reviewer: new MockPlanReviewer() });
+    await expect(approvePlannerDraft({ planningId, workspace: root, draftRevision: 1, reviewId: "00000000-0000-0000-0000-000000000000" })).rejects.toThrow("必须完成当前草案的审查");
+    const approved = await approvePlannerDraft({ planningId, workspace: root, draftRevision: 1, reviewId: review.review.reviewId });
     expect(approved.snapshot.status).toBe("approved");
     const firstRun = await runApprovedPlanner({ planningId, workspace: root, createRunner: factory });
     expect(firstRun.snapshot.status).toBe("execution_created");
@@ -122,11 +124,28 @@ describe("Planner conversation and approval", () => {
 
     const draft = await replyToPlanner({ planningId: started.snapshot.planningId, workspace: root, message: "Return Hello, ! for empty input.", planner });
     expect(draft.snapshot.status).toBe("draft_ready");
-    await approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1 });
+    const review = await reviewPlannerDraft({ planningId: started.snapshot.planningId, workspace: root, reviewer: new MockPlanReviewer() });
+    await approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1, reviewId: review.review.reviewId });
     const clarification = await replyToPlanner({ planningId: started.snapshot.planningId, workspace: root, message: "Also use the built-in Node test runner.", planner });
     expect(clarification.snapshot.status).toBe("collecting");
     expect(clarification.snapshot.approval).toBeNull();
     await expect(approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1 })).rejects.toThrow("没有等待批准");
+  });
+
+  it("reuses an unchanged generated plan without creating a duplicate revision", async () => {
+    const root = await workspace();
+    const planner = new MockPlanner([draftReply(), draftReply()]);
+    const started = await startPlannerConversation({ workspace: root, request: "Implement a greeting.", config, executionDefaults: execution(), planner });
+    const review = await reviewPlannerDraft({ planningId: started.snapshot.planningId, workspace: root, reviewer: new MockPlanReviewer() });
+    await approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1, reviewId: review.review.reviewId });
+
+    const replied = await replyToPlanner({ planningId: started.snapshot.planningId, workspace: root, message: "Add one more acceptance note.", planner });
+    expect(replied.draftChanged).toBe(false);
+    expect(replied.snapshot.draftRevision).toBe(1);
+    expect(replied.snapshot.approval).toBeNull();
+    const reopened = await loadPlannerConversation(started.snapshot.planningId, root);
+    expect(reopened.reviewIsCurrent).toBe(false);
+    await expect(approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1 })).rejects.toThrow("已过期");
   });
 
   it("imports edits as a new immutable revision and rejects approval after context changes", async () => {
@@ -155,8 +174,44 @@ describe("Planner conversation and approval", () => {
     const replaced = await replacePlannerDraft({ planningId: draft.planningId, workspace: root, value: changedPlan });
     expect(replaced.draft?.draftRevision).toBe(2);
     expect(await store.loadDraft(draft.planningId, 1)).toMatchObject({ draftRevision: 1, planHash: draft.planHash });
+    const review = await reviewPlannerDraft({ planningId: draft.planningId, workspace: root, reviewer: new MockPlanReviewer() });
     await writeFile(join(root, "README.md"), "Changed notes\n", "utf8");
-    await expect(approvePlannerDraft({ planningId: draft.planningId, workspace: root, draftRevision: 2 })).rejects.toThrow("workspace_changed");
+    await expect(approvePlannerDraft({ planningId: draft.planningId, workspace: root, draftRevision: 2, reviewId: review.review.reviewId })).rejects.toThrow("workspace_changed");
+  });
+
+  it("requires a current semantic review and records explicit waivers for error findings", async () => {
+    const root = await workspace();
+    const started = await startPlannerConversation({ workspace: root, request: "Implement and test a greeting.", config, executionDefaults: execution(), planner: new MockPlanner([draftReply()]) });
+    const reviewer = new MockPlanReviewer({
+      summary: "测试任务没有依赖实现任务。",
+      findings: [{ findingId: "F1", severity: "error", category: "dependency", taskIds: ["verify"],
+        description: "验证任务需要实现产物，但没有依赖 implement。", basis: "验证提示要求执行实现后的测试。", suggestion: "增加 dependsOn: implement。" }],
+    });
+    const first = await reviewPlannerDraft({ planningId: started.snapshot.planningId, workspace: root, reviewer });
+    await expect(approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1, reviewId: first.review.reviewId })).rejects.toThrow("需修订或显式豁免");
+
+    const approved = await approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1, reviewId: first.review.reviewId,
+      waivedFindingIds: ["F1"], waiverReason: "该任务在当前 Runner 中按顺序运行。" });
+    expect(approved.snapshot.approval).toMatchObject({ reviewId: first.review.reviewId, reportHash: first.review.reportHash,
+      waivedFindings: [{ findingId: "F1", reason: "该任务在当前 Runner 中按顺序运行。" }] });
+
+    const second = await reviewPlannerDraft({ planningId: started.snapshot.planningId, workspace: root, reviewer: new MockPlanReviewer() });
+    expect(second.snapshot.approval).toBeNull();
+    await expect(approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1, reviewId: first.review.reviewId })).rejects.toThrow("必须完成当前草案的审查");
+    await approvePlannerDraft({ planningId: started.snapshot.planningId, workspace: root, draftRevision: 1, reviewId: second.review.reviewId });
+  });
+
+  it("checks imported structure and reports semantic plan changes without formatting noise", () => {
+    const before = plan();
+    const after = structuredClone(before);
+    after.tasks[1]!.dependsOn = [];
+    after.tasks[1]!.task.prompt = "Run tests after implementation.\nReport the result.";
+    expect(checkPlan(before, execution()).valid).toBe(true);
+    expect(checkPlan({ ...before, tasks: [...before.tasks, before.tasks[0]] }, execution()).valid).toBe(false);
+    expect(diffPlans(before, after).map((change) => `${change.taskId}:${change.field}`)).toEqual(["verify:prompt", "verify:dependsOn"]);
+
+    const reorderedKeys = Object.fromEntries(Object.entries(before).reverse()) as unknown as typeof before;
+    expect(diffPlans(before, reorderedKeys)).toEqual([]);
   });
 });
 
@@ -209,5 +264,31 @@ describe("DeepSeek Planner adapter", () => {
       consumeApiRequest: () => 1, consumeToolCall: () => undefined, record: async () => undefined,
     };
     await expect(planner.generate({ messages: [], executionDefaults: execution() }, context)).rejects.toThrow("[已隐藏]");
+  });
+
+  it("uses the read-only Planner API contract for semantic reviews", async () => {
+    const root = await workspace();
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const replies = [
+      { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "I have enough information." } }] },
+      { choices: [{ finish_reason: "stop", message: { role: "assistant", content: JSON.stringify({ summary: "依赖和测试编排符合计划。", findings: [] }) } }] },
+    ];
+    const planner = new DeepSeekPlanner({
+      model: "deepseek-flash", baseUrl: "https://api.deepseek.com", apiKey: "review-secret",
+      fetchImpl: async (_input, init) => {
+        requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify(replies.shift()), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    let apiRequests = 0;
+    const result = await planner.review({ requirements: ["Add a greeting and test it."], plan: plan(), executionDefaults: execution() }, {
+      signal: new AbortController().signal, repository: new RepositoryReader(root),
+      consumeApiRequest: () => ++apiRequests, consumeToolCall: () => undefined, record: async () => undefined,
+    });
+    expect(result).toEqual({ summary: "依赖和测试编排符合计划。", findings: [] });
+    expect(apiRequests).toBe(2);
+    expect((requestBodies[0]?.tools as unknown[]).length).toBe(3);
+    expect(requestBodies[1]?.response_format).toEqual({ type: "json_object" });
+    expect(JSON.stringify(requestBodies)).not.toContain("review-secret");
   });
 });

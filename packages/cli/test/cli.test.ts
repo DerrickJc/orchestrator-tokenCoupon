@@ -2,8 +2,10 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { runCli } from "../src/main.js";
+import { runPlannerCli } from "../src/planner-cli.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -177,10 +179,21 @@ describe("CLI show commands", () => {
     expect(replaced.exitCode).toBe(0);
     expect(replaced.stdout).toContain("草案版本：draft-2");
 
+    const checked = await invokeCli("planner", "check", "--id", planningId!, "--workspace", directory);
+    expect(checked.exitCode).toBe(0);
+    expect(checked.stdout).toContain("执行配置：已与规划记录核对");
+    const diff = await invokeCli("planner", "diff", "--id", planningId!, "--from", "1", "--to", "2", "--workspace", directory);
+    expect(diff.exitCode).toBe(0);
+    expect(diff.stdout).toContain("implement-request");
+
     const unapproved = await invokeCli("planner", "run", "--id", planningId!, "--workspace", directory);
     expect(unapproved.exitCode).toBe(1);
     expect(unapproved.stderr).toContain("必须批准");
     expect(readdirSync(join(directory, ".token-coupon")).filter((entry) => entry === "sessions")).toHaveLength(0);
+
+    const reviewed = await invokeCli("planner", "review", "--id", planningId!, "--workspace", directory);
+    expect(reviewed.exitCode).toBe(0);
+    expect(reviewed.stdout).toContain("审查：");
 
     const approved = await invokeCli("planner", "approve", "--id", planningId!, "--revision", "2", "--workspace", directory);
     expect(approved.exitCode).toBe(0);
@@ -197,5 +210,142 @@ describe("CLI show commands", () => {
     const repeated = await invokeCli("planner", "run", "--id", planningId!, "--workspace", directory);
     expect(repeated.exitCode).toBe(0);
     expect(readdirSync(join(directory, ".token-coupon", "sessions"), { withFileTypes: true }).filter((entry) => entry.isDirectory())).toHaveLength(1);
+  });
+});
+
+describe("Planner interactive chat", () => {
+  const hasPosixPty = process.platform !== "win32" && spawnSync("python3", ["-c", "import pty, termios"]).status === 0;
+  for (const mode of ["save", "fail", "missing"] as const) {
+    test.skipIf(!hasPosixPty)(`hands terminal input to the editor and restores chat (${mode})`, async () => {
+      const directory = mkdtempSync(join(tmpdir(), "token-coupon-editor-pty-"));
+      temporaryDirectories.push(directory);
+      const started = await invokeCli("planner", "start", "--planner", "mock", "--runner", "mock", "--request", "Create a greeting.", "--workspace", directory);
+      const planningId = /Planning：([\da-f-]{36})/.exec(started.stdout)?.[1];
+      expect(planningId).toBeDefined();
+      const result = spawnSync("python3", [resolve("packages/cli/test/fixtures/editor-pty.py"), process.execPath,
+        resolve("packages/cli/dist/main.js"), directory, planningId!, mode], { encoding: "utf8", timeout: 20_000 });
+      expect(result.status, result.stderr).toBe(0);
+      const terminal = JSON.parse(result.stdout);
+      expect(terminal.chatRawRestored).toBe(true);
+      expect(terminal.continuedChat).toBe(true);
+      expect(terminal.exitCode).toBe(0);
+      if (mode !== "missing") {
+        expect(terminal.canonicalAtEntry).toBe(true);
+        expect(terminal.echoAtEntry).toBe(true);
+        expect(terminal.mouseInputIntact).toBe(true);
+      }
+      const current = JSON.parse(readFileSync(join(directory, ".token-coupon", "planners", planningId!, "conversation.json"), "utf8"));
+      expect(current.draftRevision).toBe(mode === "save" ? 2 : 1);
+    }, 25_000);
+  }
+
+  test("uses the configured editor with a path containing spaces and imports a new revision", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-planner-editor-"));
+    temporaryDirectories.push(directory);
+    const started = await invokeCli("planner", "start", "--planner", "mock", "--runner", "mock", "--request", "Create a greeting.", "--workspace", directory);
+    const planningId = /Planning：([\da-f-]{36})/.exec(started.stdout)?.[1];
+    expect(planningId).toBeDefined();
+    const editorPath = join(directory, "editor helper.cjs");
+    writeFileSync(editorPath, [
+      "const fs = require('node:fs');",
+      "const file = process.argv[2];",
+      "const plan = JSON.parse(fs.readFileSync(file, 'utf8'));",
+      "plan.title = 'Edited from the configured editor';",
+      "fs.writeFileSync(file, JSON.stringify(plan));",
+    ].join("\n"), "utf8");
+    const oldEditor = process.env.EDITOR;
+    process.env.EDITOR = `${process.execPath} "${editorPath}"`;
+
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => stdout.push(values.join(" ")));
+    const error = vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => stderr.push(values.join(" ")));
+    try {
+      const replies = ["/edit", "/exit"];
+      let pending = "";
+      output.on("data", (chunk: Buffer) => {
+        pending += chunk.toString();
+        if (replies.length && /planner> $/.test(pending)) {
+          pending = "";
+          input.write(replies.shift() + "\n");
+        }
+      });
+      expect(await runPlannerCli(["chat", "--id", planningId!, "--workspace", directory], { input, output, isTTY: true })).toBe(0);
+    } finally {
+      if (oldEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = oldEditor;
+      log.mockRestore();
+      error.mockRestore();
+      input.destroy();
+      output.destroy();
+    }
+
+    const current = JSON.parse(readFileSync(join(directory, ".token-coupon", "planners", planningId!, "drafts", "2.json"), "utf8")) as { plan: { title: string } };
+    expect(current.plan.title).toBe("Edited from the configured editor");
+    expect(stdout.join("\n")).toContain("计划差异：draft-1 → draft-2");
+    expect(stderr).toEqual([]);
+  });
+
+  test("treats terminal EOF as a clean exit before the first request", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-planner-eof-"));
+    temporaryDirectories.push(directory);
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const promptReady = new Promise<void>((resolve) => output.once("data", () => resolve()));
+    const running = runPlannerCli(["chat", "--planner", "mock", "--runner", "mock", "--workspace", directory], {
+      input, output, isTTY: true,
+    });
+    await promptReady;
+    input.end();
+    expect(await running).toBe(0);
+    expect(readdirSync(directory)).toEqual([]);
+    input.destroy();
+    output.destroy();
+  });
+
+  test("accepts multiple user turns in one process and shows local checks and draft diffs", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-planner-chat-"));
+    temporaryDirectories.push(directory);
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => stdout.push(values.join(" ")));
+    const error = vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => stderr.push(values.join(" ")));
+    try {
+      const replies = ["Create a greeting API.", "Also add tests for an empty name.", "/exit"];
+      let pending = "";
+      output.on("data", (chunk: Buffer) => {
+        pending += chunk.toString();
+        if (replies.length && /(?:request|planner)> $/.test(pending)) {
+          pending = "";
+          input.write(replies.shift() + "\n");
+        }
+      });
+      const running = runPlannerCli(["chat", "--planner", "mock", "--runner", "mock", "--workspace", directory], {
+        input, output, isTTY: true,
+      });
+      expect(await running, stderr.join("\n")).toBe(0);
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+      input.destroy();
+      output.destroy();
+    }
+
+    const plannerDirectory = join(directory, ".token-coupon", "planners");
+    const planningId = readdirSync(plannerDirectory)[0]!;
+    const snapshot = JSON.parse(readFileSync(join(plannerDirectory, planningId, "conversation.json"), "utf8")) as {
+      messages: Array<{ role: string; content: string }>;
+      draftRevision: number;
+    };
+    expect(snapshot.messages.filter((message) => message.role === "user").map((message) => message.content)).toEqual([
+      "Create a greeting API.", "Also add tests for an empty name.",
+    ]);
+    expect(snapshot.draftRevision).toBe(2);
+    expect(stdout.join("\n")).toContain("保存后本地校验通过");
+    expect(stdout.join("\n")).toContain("计划差异：draft-1 → draft-2");
+    expect(stderr).toEqual([]);
   });
 });
