@@ -4,6 +4,8 @@
 
 本方案补充 [Phase 3](PHASE_3_PLAN.md)，安排在 [roadmap](../roadmap.md) 的 Phase 4 隔离与交付之前。单独维护本方案；实施后新增 `PHASE_3_5_IMPLEMENTATION_GUIDE.md`，不向此前阶段的实现指南追加说明。
 
+2026-10-05 的审查循环缺陷及补充实施见 [Phase 3.5 Bugfix 方案](PHASE_3_5_BUGFIX_PLAN.md)：有效需求与原始历史分离、来源追溯、报告驱动修订、带差异的复审及问题身份追踪。
+
 ## 1. 问题、目标和范围
 
 目前用户通过 `start/reply/show/export/replace/approve/run` 操作规划。`replace` 已校验输入结构、任务依赖图和执行配置，但不能识别自然语言任务之间的方案矛盾。用户还需要反复复制 planningId、区分 Conversation revision 与 draftRevision，并人工比较修改。
@@ -130,7 +132,7 @@ interface PlanCheckResult {
 
 ### 5.1 输入与输出
 
-新增 Reviewer 契约，输入包含原始需求及用户补充、当前合法 Plan、执行配置、必要的只读仓库信息。不要把历史 assistant 中的旧完整计划再重复注入为当前要求，也不把所有旧 API 日志加入审查上下文。
+新增 Reviewer 契约，输入包含当前有效需求和待澄清项、当前合法 Plan、执行配置、必要的只读仓库信息。Bugfix 后原始对话只用于来源追溯，不能直接把全部历史用户消息视作需求。复审同时携带上一轮成功报告和计划差异，不注入所有旧完整计划或 API 日志。
 
 ```ts
 interface PlanReviewFinding {
@@ -184,7 +186,7 @@ F1 / error / dependency
 成功报告保存以下绑定：
 
 - `planningId`、`draftRevision`、`planHash`。
-- `requirementsHash`：对有序用户需求消息计算稳定哈希；不包含操作命令或旧模型回复。
+- `requirementsHash`：对有效需求及待澄清项的稳定编号、版本、内容、状态和来源计算哈希；不包含操作命令、噪声或旧模型回复。
 - `reviewerConfigHash`：审查模型配置、提示词版本与相关策略的哈希，排除凭证。
 - `context`：该草案的读取证据与本次审查新增证据的合并结果。
 - 起止时间、结果摘要、问题列表和可校验的 `reportHash`。

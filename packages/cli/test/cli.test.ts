@@ -214,6 +214,49 @@ describe("CLI show commands", () => {
 });
 
 describe("Planner interactive chat", () => {
+  test("shows requirements and provenance and revises with a report in the same chat", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "planner-bugfix-chat-"));
+    temporaryDirectories.push(directory);
+    const started = await invokeCli("planner", "start", "--planner", "mock", "--runner", "mock", "--request", "Create a greeting.", "--workspace", directory);
+    const planningId = /Planning：([\da-f-]{36})/.exec(started.stdout)![1]!;
+    const snapshotFile = join(directory, ".token-coupon", "planners", planningId, "conversation.json");
+    const initial = JSON.parse(readFileSync(snapshotFile, "utf8"));
+    const requirementId = initial.requirements.items[0].requirementId;
+    const listed = await invokeCli("planner", "requirements", "--id", planningId, "--workspace", directory);
+    expect(listed.stdout).toContain(requirementId + "@1");
+    const traced = await invokeCli("planner", "trace", "--id", planningId, "--requirement", requirementId, "--workspace", directory);
+    expect(traced.stdout).toContain("Create a greeting.");
+    expect(traced.stdout).toContain("日志目录");
+    const missing = await invokeCli("planner", "revise", "--id", planningId, "--workspace", directory);
+    expect(missing.exitCode).toBe(1);
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...values) => stdout.push(values.join(" ")));
+    const error = vi.spyOn(console, "error").mockImplementation((...values) => stderr.push(values.join(" ")));
+    try {
+      const replies = ["/requirements", `/trace ${requirementId} 1`, "/review", "/revise", "/review", "/exit"];
+      let pending = "";
+      output.on("data", (chunk: Buffer) => {
+        pending += chunk.toString();
+        if (replies.length && /planner> $/.test(pending)) { pending = ""; input.write(replies.shift() + "\n"); }
+      });
+      expect(await runPlannerCli(["chat", "--id", planningId, "--workspace", directory], { input, output, isTTY: true })).toBe(0);
+    } finally { log.mockRestore(); error.mockRestore(); input.destroy(); output.destroy(); }
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toContain("有效需求");
+    const after = JSON.parse(readFileSync(snapshotFile, "utf8"));
+    expect(after.requirements.items.filter((item: { status: string }) => item.status === "active")).toHaveLength(1);
+    expect(after.requirements.messageDecisions.at(-1).kind).toBe("operation");
+    const turn = JSON.parse(readFileSync(join(directory, ".token-coupon", "planners", planningId, "turns", after.turns.at(-1).turnId, "turn.json"), "utf8"));
+    expect(turn.reviewId).toBeDefined();
+    const single = await invokeCli("planner", "revise", "--id", planningId, "--workspace", directory);
+    expect(single.exitCode).toBe(0);
+    const refresh = await invokeCli("planner", "requirements", "--id", planningId, "--refresh", "--workspace", directory);
+    expect(refresh.exitCode).toBe(0);
+    expect(refresh.stdout).toContain("有效需求");
+  });
   const hasPosixPty = process.platform !== "win32" && spawnSync("python3", ["-c", "import pty, termios"]).status === 0;
   for (const mode of ["save", "fail", "missing"] as const) {
     test.skipIf(!hasPosixPty)(`hands terminal input to the editor and restores chat (${mode})`, async () => {

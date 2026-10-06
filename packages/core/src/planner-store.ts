@@ -3,7 +3,8 @@ import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 
 import { dirname, join, resolve } from "node:path";
 import { parsePlan } from "./validate-plan.js";
 import type { ExecutionConfig } from "./task.js";
-import type { PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerTurnRef, RepositoryEvidence } from "./planner-types.js";
+import type { PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerTurnRef, RepositoryEvidence, RequirementsState } from "./planner-types.js";
+import { validateRequirementsState } from "./requirements.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -37,6 +38,10 @@ export class PlannerStore {
     const raw = await readJson(join(this.directory(planningId), "conversation.json"));
     const snapshot = validateSnapshot(raw, this.workspace);
     if (snapshot.planningId !== planningId) throw new Error("Planner 记录 ID 与目录不匹配");
+    if (snapshot.requirements && snapshot.requirements.revision > 0) {
+      const archive = await readJson(join(this.directory(planningId), "requirements", `${snapshot.requirements.revision}.json`)) as { planningId: string; state: RequirementsState; stateHash: string };
+      if (archive.planningId !== planningId || archive.stateHash !== canonicalHash(archive.state) || archive.stateHash !== canonicalHash(snapshot.requirements)) throw new Error("当前需求状态与不可变需求版本不匹配");
+    }
     if (snapshot.draftRevision !== null) {
       const draft = await this.loadDraft(planningId, snapshot.draftRevision);
       if (snapshot.approval && (snapshot.approval.draftRevision !== draft.draftRevision || snapshot.approval.planHash !== draft.planHash)) {
@@ -83,6 +88,31 @@ export class PlannerStore {
       const existing = await this.loadDraft(draft.planningId, draft.draftRevision);
       if (existing.planHash !== draft.planHash) throw new Error("草案版本不可覆盖");
     }
+  }
+
+  async writeRequirements(planningId: string, state: RequirementsState): Promise<void> {
+    this.validateId(planningId);
+    const path = join(this.directory(planningId), "requirements", `${state.revision}.json`);
+    await mkdir(dirname(path), { recursive: true });
+    const value = { planningId, state, stateHash: canonicalHash(state) };
+    try { await writeFile(path, JSON.stringify(value, null, 2) + "\n", { flag: "wx", mode: 0o600 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existing = await readJson(path) as typeof value;
+      if (existing.stateHash !== value.stateHash || canonicalHash(existing.state) !== value.stateHash) throw new Error("需求版本不可覆盖");
+    }
+  }
+
+  async nextRequirementsRevision(planningId: string, minimum: number): Promise<number> {
+    this.validateId(planningId);
+    const names = await readdir(join(this.directory(planningId), "requirements")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const revisions = names.filter((name) => /^[1-9][0-9]*\.json$/.test(name)).map((name) => Number(name.slice(0, -5)));
+    const next = revisions.reduce((next, revision) => Math.max(next, revision + 1), minimum);
+    if (!Number.isSafeInteger(next)) throw new Error("需求版本超限");
+    return next;
   }
 
   async loadDraft(planningId: string, revision: number): Promise<PlannerDraft> {
@@ -251,7 +281,8 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
   return {
     schemaVersion: 1, planningId: raw.planningId as string, workspace, revision: raw.revision as number,
     status: raw.status as PlannerConversationSnapshot["status"], config: { provider: config.provider as "mock" | "deepseek", model: config.model as string, baseUrl: config.baseUrl as string },
-    executionDefaults, messages, turns, context, activeTurnId: active, draftRevision: raw.draftRevision as number | null, approval, latestReviewId, execution,
+    executionDefaults, messages, ...(raw.requirements === undefined ? {} : { requirements: validateRequirementsState(raw.requirements, messages) }),
+    turns, context, activeTurnId: active, draftRevision: raw.draftRevision as number | null, approval, latestReviewId, execution,
     createdAt: raw.createdAt, updatedAt: raw.updatedAt,
   };
 }
@@ -269,7 +300,7 @@ function parseTurn(value: unknown, workspace: string, planningId: string): Plann
   const raw = object(value, "Planner turn");
   if (!isUuid(raw.turnId) || !isUuid(raw.messageId) || !["running", "succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(String(raw.status)) ||
       raw.artifactDir !== join(workspace, ".token-coupon", "planners", planningId, "turns", String(raw.turnId)) || (raw.reasonCode !== null && typeof raw.reasonCode !== "string") ||
-      typeof raw.createdAt !== "string" || (raw.finishedAt !== null && typeof raw.finishedAt !== "string")) throw new Error("Planner turn 引用无效");
+      typeof raw.createdAt !== "string" || (raw.finishedAt !== null && typeof raw.finishedAt !== "string") || (raw.operation !== undefined && typeof raw.operation !== "boolean")) throw new Error("Planner turn 引用无效");
   return raw as unknown as PlannerTurnRef;
 }
 

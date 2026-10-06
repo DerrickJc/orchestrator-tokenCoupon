@@ -25,13 +25,16 @@ export { ReviewStore, validateReviewRecord } from "./review-store.js";
 export { reviewPlannerDraft, loadCurrentPlanReview, createPlanReviewer, requirementsHash, reviewerConfigHash } from "./plan-review.js";
 export { MockPlanner, MockPlanReviewer } from "./planners/mock-planner.js";
 export { DeepSeekPlanner, PlannerApiError } from "./planners/deepseek-planner.js";
+export { effectiveRequirements, traceRequirement } from "./requirements.js";
 export type {
   ConversationMessage, ExecutionReference, PlanApproval, Planner, PlannerConfig, PlannerContext, PlannerConversationSnapshot,
   PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, PlannerTurnStatus, PlanReviewFinding,
   PlanReviewInput, PlanReviewRecord, PlanReviewSeverity, PlanReviewCategory, PlanReviewStatus, PlanReviewer, RepositoryEvidence,
+  Requirement, RequirementsState, RequirementsUpdate, MessageKind, ReviewResolution,
 } from "./planner-types.js";
 export {
   approvePlannerDraft, createPlanner, formatPlanner, loadPlannerConversation, replacePlannerDraft,
   replyToPlanner, retryPlannerTurn, runApprovedPlanner, startPlannerConversation,
+  revisePlannerDraft, refreshPlannerRequirements,
 } from "./planner-conversation.js";
 export type { PlannerOperationResult, PlannerRunOptions, PlannerStartOptions } from "./planner-conversation.js";

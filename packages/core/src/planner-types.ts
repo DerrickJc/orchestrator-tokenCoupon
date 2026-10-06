@@ -3,6 +3,23 @@ import type { PlanDefinition } from "./plan.js";
 import type { RepositoryReader } from "./repository-reader.js";
 
 export type ConversationMessage = { messageId: string; role: "user" | "assistant"; content: string };
+export type MessageKind = "requirement" | "operation" | "noise";
+export interface Requirement {
+  requirementId: string;
+  revision: number;
+  text: string;
+  status: "active" | "pending" | "withdrawn" | "superseded";
+  sourceMessageIds: string[];
+}
+export interface RequirementsUpdate {
+  messageDecisions: Array<{ messageId: string; kind: MessageKind; reason: string }>;
+  changes: Array<{ requirementId: string; text: string; status: "active" | "pending" | "withdrawn"; sourceMessageIds: string[] }>;
+}
+export interface RequirementsState {
+  revision: number;
+  items: Requirement[];
+  messageDecisions: RequirementsUpdate["messageDecisions"];
+}
 export type PlannerTurnStatus = "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
 
 export interface PlannerConfig {
@@ -19,6 +36,7 @@ export interface PlannerTurnRef {
   reasonCode: string | null;
   createdAt: string;
   finishedAt: string | null;
+  operation?: boolean;
 }
 
 export interface RepositoryEvidence {
@@ -61,7 +79,13 @@ export interface PlanReviewFinding {
   description: string;
   basis: string;
   suggestion: string;
+  /** Cross-report identity, assigned by core; F numbers remain report-local. */
+  issueId?: string;
+  priorFindingId?: string;
+  requirementIds?: string[];
 }
+
+export interface ReviewResolution { findingId: string; issueId?: string; status: "resolved" | "unresolved"; basis: string }
 
 export interface PlanReviewRecord {
   schemaVersion: 1;
@@ -79,6 +103,8 @@ export interface PlanReviewRecord {
   reasonCode: string | null;
   createdAt: string;
   finishedAt: string | null;
+  previousReviewId?: string;
+  resolutions?: ReviewResolution[];
 }
 
 export interface ExecutionReference {
@@ -98,6 +124,8 @@ export interface PlannerConversationSnapshot {
   config: PlannerConfig;
   executionDefaults: ExecutionConfig;
   messages: ConversationMessage[];
+  /** Missing on legacy snapshots until explicitly reconciled. */
+  requirements?: RequirementsState;
   turns: PlannerTurnRef[];
   context: RepositoryEvidence[];
   activeTurnId: string | null;
@@ -115,6 +143,7 @@ export interface PlannerReply {
   message: string;
   questions?: string[];
   plan?: PlanDefinition;
+  requirementsUpdate?: RequirementsUpdate;
 }
 
 export type PlannerEvent = { type: string; payload: Record<string, unknown> };
@@ -125,6 +154,11 @@ export interface PlannerInput {
   currentDraft?: PlannerDraft;
   repairMessage?: string;
   repositoryNotice?: string;
+  requirements?: RequirementsState;
+  pendingMessages?: ConversationMessage[];
+  operationMessageIds?: string[];
+  reviewContext?: { review: PlanReviewRecord; current: boolean };
+  historyIndex?: Array<{ messageId: string; role: "user" | "assistant"; turnStatuses: PlannerTurnStatus[] }>;
 }
 
 export interface PlannerContext {
@@ -133,12 +167,18 @@ export interface PlannerContext {
   consumeApiRequest(): number;
   consumeToolCall(): void;
   record(event: PlannerEvent): Promise<void>;
+  readHistory?: (messageIds: string[]) => Promise<string>;
+  /** Pure application validation; lets adapters keep an already valid response. */
+  validateReply?: (value: unknown) => PlannerReply;
 }
 
 export interface PlanReviewInput {
   requirements: string[];
   plan: PlanDefinition;
   executionDefaults: ExecutionConfig;
+  requirementItems?: Requirement[];
+  previousReview?: PlanReviewRecord;
+  planChanges?: import("./plan-diff.js").PlanChange[];
 }
 
 export interface PlanReviewer {

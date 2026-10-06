@@ -4,7 +4,9 @@ import { MockPlanReviewer } from "./planners/mock-planner.js";
 import { canonicalHash, PlannerStore } from "./planner-store.js";
 import type { PlanReviewFinding, PlanReviewInput, PlanReviewRecord, PlanReviewer, PlannerConfig, PlannerContext, PlannerConversationSnapshot, PlannerEvent, RepositoryEvidence } from "./planner-types.js";
 import { RepositoryReader, verifyRepositoryEvidence } from "./repository-reader.js";
-import { ReviewStore, validateReviewRecord } from "./review-store.js";
+import { ReviewStore, reviewReportPayload, validateReviewRecord } from "./review-store.js";
+import { createHistoryReader, effectiveRequirements, requireReconciledRequirements } from "./requirements.js";
+import { diffPlans } from "./plan-diff.js";
 import { SessionStore } from "./session-store.js";
 import { InputValidationError } from "./validation.js";
 
@@ -33,8 +35,7 @@ export async function reviewPlannerDraft(options: {
     if (snapshot.execution) throw new Error("已关联执行 Session 的规划只允许查看历史审查");
     if (snapshot.draftRevision === null || !["draft_ready", "approved"].includes(snapshot.status)) throw new Error("当前没有可审查的计划草案");
     const draft = await plannerStore.loadDraft(options.planningId, snapshot.draftRevision);
-    const historyBytes = snapshot.messages.reduce((sum, message) => sum + Buffer.byteLength(message.content, "utf8"), 0);
-    if (historyBytes > HISTORY_LIMIT) throw new Error("需求历史超过审查上下文限制");
+    const requirements = requireReconciledRequirements(snapshot);
 
     const existingEvidenceChanges = await verifyRepositoryEvidence(plannerStore.workspace, draft.context, options.signal);
     if (existingEvidenceChanges.length) throw new Error("workspace_changed：计划依据已变化，请重新调研并生成草案后再审查：" + existingEvidenceChanges.join(", "));
@@ -48,12 +49,22 @@ export async function reviewPlannerDraft(options: {
       }
     }
 
+    const previousReview = (await reviewStore.list(options.planningId)).filter(({ status }) => status === "succeeded").at(-1);
+    const input: PlanReviewInput = {
+      requirements: effectiveRequirements(requirements).map(({ text }) => text),
+      requirementItems: effectiveRequirements(requirements),
+      plan: draft.plan, executionDefaults: snapshot.executionDefaults,
+      ...(previousReview ? { previousReview, planChanges: diffPlans((await plannerStore.loadDraft(options.planningId, previousReview.draftRevision)).plan, draft.plan) } : {}),
+    };
+    if (Buffer.byteLength(JSON.stringify(input), "utf8") > HISTORY_LIMIT) throw new Error("有效需求与审查输入超过 256 KiB 上下文限制");
+
     const reviewId = randomUUID();
     const startedAt = new Date().toISOString();
     const record: PlanReviewRecord = {
       schemaVersion: 1, planningId: options.planningId, reviewId, status: "running", draftRevision: draft.draftRevision,
       planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(snapshot.config),
       context: draft.context, findings: [], summary: "审查进行中", reportHash: null, reasonCode: null, createdAt: startedAt, finishedAt: null,
+      ...(previousReview ? { previousReviewId: previousReview.reviewId } : {}), resolutions: [],
     };
     await reviewStore.create(record);
 
@@ -63,6 +74,7 @@ export async function reviewPlannerDraft(options: {
     const context: PlannerContext = {
       signal: timed.signal,
       repository: reader,
+      readHistory: createHistoryReader(snapshot),
       consumeApiRequest: () => {
         counters.requests += 1;
         if (counters.requests > API_REQUEST_LIMIT) throw new Error("本轮审查 API 请求超过 8 次");
@@ -90,21 +102,16 @@ export async function reviewPlannerDraft(options: {
     };
     try {
       const reviewer = options.reviewer ?? createPlanReviewer(snapshot.config);
-      const input: PlanReviewInput = {
-        requirements: snapshot.messages.filter((message) => message.role === "user").map((message) => message.content),
-        plan: draft.plan,
-        executionDefaults: snapshot.executionDefaults,
-      };
       const raw = await reviewer.review(input, context);
       if (timed.signal.aborted) throw timed.signal.reason ?? new Error("审查已取消");
-      const parsed = parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id));
+      const parsed = parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview);
       const evidence = mergeEvidence(draft.context, reader.getEvidence());
       const changed = await verifyRepositoryEvidence(plannerStore.workspace, evidence, timed.signal);
       if (changed.length) throw new Error("workspace_changed：审查期间依据文件发生变化：" + changed.join(", "));
       const finishedAt = new Date().toISOString();
       const succeeded = validateReviewRecord({
-        ...record, status: "succeeded", context: evidence, findings: parsed.findings, summary: parsed.summary,
-        reportHash: canonicalHash({ summary: parsed.summary, findings: parsed.findings }), finishedAt,
+        ...record, status: "succeeded", context: evidence, ...parsed,
+        reportHash: canonicalHash(reviewReportPayload({ ...record, ...parsed })), finishedAt,
       });
       await reviewStore.save(succeeded);
       await reviewStore.appendEvent(options.planningId, reviewId, "review.succeeded", { findings: succeeded.findings.length });
@@ -151,6 +158,7 @@ export async function loadCurrentPlanReview(planningId: string, workspace: strin
   const plannerStore = new PlannerStore(workspace);
   const snapshot = await plannerStore.load(planningId);
   if (!snapshot.latestReviewId || snapshot.draftRevision === null) return undefined;
+  try { requireReconciledRequirements(snapshot); } catch { return undefined; }
   const [draft, record] = await Promise.all([
     plannerStore.loadDraft(planningId, snapshot.draftRevision),
     new ReviewStore(workspace).load(planningId, snapshot.latestReviewId),
@@ -162,32 +170,57 @@ export async function loadCurrentPlanReview(planningId: string, workspace: strin
 }
 
 export function requirementsHash(snapshot: PlannerConversationSnapshot): string {
-  return canonicalHash(snapshot.messages.filter((message) => message.role === "user").map(({ messageId, content }) => ({ messageId, content })));
+  return canonicalHash(effectiveRequirements(requireReconciledRequirements(snapshot)));
 }
 
 export function reviewerConfigHash(config: PlannerConfig): string {
-  return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion: 1 });
+  return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion: 2 });
 }
 
-function parseReviewReply(value: unknown, knownTaskIds: string[]): { summary: string; findings: PlanReviewFinding[] } {
+function parseReviewReply(value: unknown, knownTaskIds: string[], knownRequirementIds: string[], previous?: PlanReviewRecord): { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] } {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("审查回复必须是 JSON 对象");
   const raw = value as Record<string, unknown>;
-  if (Object.keys(raw).some((key) => !["summary", "findings"].includes(key)) || typeof raw.summary !== "string" || !raw.summary.trim() ||
+  if (Object.keys(raw).some((key) => !["summary", "findings", "resolutions"].includes(key)) || typeof raw.summary !== "string" || !raw.summary.trim() ||
       Buffer.byteLength(raw.summary, "utf8") > 16 * 1024 || !Array.isArray(raw.findings) || raw.findings.length > 100) throw new Error("审查报告结构无效");
   const findings: PlanReviewFinding[] = raw.findings.map((item, index) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`findings[${index}] 必须是对象`);
     const finding = item as Record<string, unknown>;
-    if (Object.keys(finding).some((key) => !["findingId", "severity", "category", "taskIds", "description", "basis", "suggestion"].includes(key)) ||
+    if (Object.keys(finding).some((key) => !["findingId", "severity", "category", "taskIds", "requirementIds", "description", "basis", "suggestion", "priorFindingId"].includes(key)) ||
         !["error", "warning", "info"].includes(String(finding.severity)) || !["requirements", "dependency", "technology", "contract", "testing"].includes(String(finding.category)) ||
         !Array.isArray(finding.taskIds) || finding.taskIds.some((id) => typeof id !== "string" || !knownTaskIds.includes(id)) ||
         typeof finding.description !== "string" || !finding.description.trim() || typeof finding.basis !== "string" || !finding.basis.trim() ||
         typeof finding.suggestion !== "string" || !finding.suggestion.trim()) throw new Error(`findings[${index}] 字段无效或引用了未知任务`);
     const findingId = typeof finding.findingId === "string" ? finding.findingId : `F${index + 1}`;
+    const prior = finding.priorFindingId === undefined ? undefined : previous?.findings.find(({ findingId }) => findingId === finding.priorFindingId);
+    if (finding.priorFindingId !== undefined && !prior) throw new Error("priorFindingId 引用了未知的上轮问题");
+    if (finding.requirementIds !== undefined && (!Array.isArray(finding.requirementIds) || finding.requirementIds.some((id) => typeof id !== "string" || !knownRequirementIds.includes(id)))) throw new Error("审查引用了未知需求");
     return { findingId, severity: finding.severity as PlanReviewFinding["severity"], category: finding.category as PlanReviewFinding["category"],
-      taskIds: finding.taskIds as string[], description: finding.description, basis: finding.basis, suggestion: finding.suggestion };
+      taskIds: finding.taskIds as string[], description: finding.description, basis: finding.basis, suggestion: finding.suggestion,
+      issueId: prior ? prior.issueId ?? `issue-${previous!.reviewId}-${prior.findingId}` : "issue-" + randomUUID(),
+      ...(prior ? { priorFindingId: prior.findingId } : {}), ...(finding.requirementIds ? { requirementIds: finding.requirementIds as string[] } : {}),
+    };
   });
   if (new Set(findings.map((finding) => finding.findingId)).size !== findings.length) throw new Error("审查报告包含重复 findingId");
-  return { summary: raw.summary, findings };
+  if (new Set(findings.filter(({ priorFindingId }) => priorFindingId).map(({ priorFindingId }) => priorFindingId)).size !== findings.filter(({ priorFindingId }) => priorFindingId).length) throw new Error("多个问题引用同一旧问题");
+  const resolutions = parseResolutions(raw.resolutions, previous, findings);
+  return { summary: raw.summary, findings, resolutions };
+}
+
+function parseResolutions(value: unknown, previous: PlanReviewRecord | undefined, findings: PlanReviewFinding[]): import("./planner-types.js").ReviewResolution[] {
+  if (value === undefined && !previous?.findings.length) return [];
+  if (!Array.isArray(value) || value.length !== (previous?.findings.length ?? 0)) throw new Error("复审必须逐项说明上轮问题的解决情况");
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("问题解决记录无效");
+    const item = entry as Record<string, unknown>;
+    const prior = previous?.findings.find(({ findingId }) => findingId === item.findingId);
+    if (!prior || seen.has(prior.findingId) || Object.keys(item).some((key) => !["findingId", "status", "basis"].includes(key)) || !["resolved", "unresolved"].includes(String(item.status)) ||
+        typeof item.basis !== "string" || !item.basis.trim() || Buffer.byteLength(item.basis, "utf8") > 4096) throw new Error("问题解决记录引用、状态或依据无效");
+    seen.add(prior.findingId);
+    const continued = findings.some(({ priorFindingId }) => priorFindingId === prior.findingId);
+    if (continued !== (item.status === "unresolved")) throw new Error("旧问题解决状态与本轮 findings 不一致");
+    return { findingId: prior.findingId, issueId: prior.issueId ?? `issue-${previous!.reviewId}-${prior.findingId}`, status: item.status as "resolved" | "unresolved", basis: item.basis };
+  });
 }
 
 function mergeEvidence(previous: RepositoryEvidence[], current: RepositoryEvidence[]): RepositoryEvidence[] {
