@@ -163,6 +163,7 @@ describe("Planner conversation and approval", () => {
     const initial = {
       schemaVersion: 1 as const, planningId: draft.planningId, workspace: root, revision: 1, status: "draft_ready" as const,
       config, executionDefaults: execution(), messages: [], turns: [], context: draft.context,
+      requirements: { revision: 0, items: [], messageDecisions: [] },
       activeTurnId: null, draftRevision: 1, approval: null, execution: null,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };

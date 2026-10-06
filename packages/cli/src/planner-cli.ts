@@ -9,6 +9,7 @@ import {
   loadCurrentPlanReview, loadPlannerConversation, MockPlanReviewer, MockPlanner, PlannerStore, replacePlannerDraft,
   replyToPlanner, retryPlannerTurn, reviewPlannerDraft, runApprovedPlanner, SessionStore, ReviewStore, startPlannerConversation,
   retrySession, resumeSession,
+  effectiveRequirements, traceRequirement, revisePlannerDraft, refreshPlannerRequirements,
 } from "@token-coupon/core";
 import type { PlanChange, PlanReviewRecord, PlannerConfig, PlannerOperationResult, Runner, TaskRunnerFactory } from "@token-coupon/core";
 import { ClaudeCodeRunner, MockRunner } from "@token-coupon/core";
@@ -25,6 +26,9 @@ const HELP = [
   "  token-coupon planner check (--id <planningId>|--file <plan.json>) [--workspace <目录>]",
   "  token-coupon planner diff --id <planningId> [--from <版本>] [--to <版本>] [--full] [--workspace <目录>]",
   "  token-coupon planner review --id <planningId> [--review-id <reviewId>] [--workspace <目录>]",
+  "  token-coupon planner revise --id <planningId> [--message <处理说明>] [--review-id <reviewId>] [--workspace <目录>]",
+  "  token-coupon planner requirements --id <planningId> [--refresh] [--workspace <目录>]",
+  "  token-coupon planner trace --id <planningId> --requirement <requirementId> [--revision <版本>] [--workspace <目录>]",
   "  token-coupon planner chat [--id <planningId>] [--planner <mock|deepseek> --runner <mock|claude-code>] [--workspace <目录>]",
   "  token-coupon planner export --id <planningId> --file <计划.json> [--workspace <目录>]",
   "  token-coupon planner replace --id <planningId> --file <计划.json> [--workspace <目录>]",
@@ -36,7 +40,7 @@ const HELP = [
   "Planner 模型与任务 Runner 的 --task-model 分开配置。",
 ].join("\n");
 
-type Action = "start" | "reply" | "retry" | "show" | "list" | "check" | "diff" | "review" | "chat" | "export" | "replace" | "approve" | "run" | "help";
+type Action = "start" | "reply" | "retry" | "show" | "list" | "check" | "diff" | "review" | "revise" | "requirements" | "trace" | "chat" | "export" | "replace" | "approve" | "run" | "help";
 interface Command { action: Action; values: Map<string, string>; acceptEdits: boolean; mockClarify: boolean; full: boolean; json: boolean; }
 export interface PlannerChatIO { input: NodeJS.ReadableStream; output: NodeJS.WritableStream; isTTY: boolean; }
 
@@ -125,6 +129,27 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
       else printPlanDiff(from, to, changes, command.full);
       return 0;
     }
+    if (command.action === "requirements") {
+      if (get("--refresh")) {
+        const result = await cancellable((signal) => refreshPlannerRequirements({ planningId, workspace, signal }));
+        console.log(formatPlanner(result));
+        await printDraftUpdate(result, workspace);
+        if (result.error) return turnExitCode(result.snapshot.turns.at(-1)?.status);
+      }
+      printRequirements((await new PlannerStore(workspace).load(planningId)).requirements);
+      return 0;
+    }
+    if (command.action === "trace") {
+      const revision = get("--revision");
+      printRequirementTrace(traceRequirement(await new PlannerStore(workspace).load(planningId), get("--requirement")!, revision === undefined ? undefined : Number(revision)));
+      return 0;
+    }
+    if (command.action === "revise") {
+      const result = await cancellable((signal) => revisePlannerDraft({ planningId, workspace, signal, ...(get("--message") ? { message: get("--message")! } : {}), ...(get("--review-id") ? { reviewId: get("--review-id")! } : {}) }));
+      console.log(formatPlanner(result));
+      await printDraftUpdate(result, workspace);
+      return result.error ? turnExitCode(result.snapshot.turns.at(-1)?.status) : 0;
+    }
     if (command.action === "review") {
       const reviewId = get("--review-id");
       if (reviewId) {
@@ -210,7 +235,7 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
 function parse(args: string[]): Command {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) return { action: "help", values: new Map(), acceptEdits: false, mockClarify: false, full: false, json: false };
   const [actionValue, ...options] = args;
-  const actions: Action[] = ["start", "reply", "retry", "show", "list", "check", "diff", "review", "chat", "export", "replace", "approve", "run"];
+  const actions: Action[] = ["start", "reply", "retry", "show", "list", "check", "diff", "review", "revise", "requirements", "trace", "chat", "export", "replace", "approve", "run"];
   if (!actions.includes(actionValue as Action)) throw new Error("planner 子命令无效。请运行 token-coupon planner --help 查看用法。");
   const action = actionValue as Action;
   const allowedByAction: Record<Action, string[]> = {
@@ -219,6 +244,7 @@ function parse(args: string[]): Command {
     retry: ["--id", "--workspace"], show: ["--id", "--workspace"],
     list: ["--workspace"], check: ["--id", "--file", "--workspace"], diff: ["--id", "--from", "--to", "--workspace"],
     review: ["--id", "--review-id", "--workspace"],
+    revise: ["--id", "--message", "--review-id", "--workspace"], requirements: ["--id", "--workspace"], trace: ["--id", "--requirement", "--revision", "--workspace"],
     chat: ["--id", "--planner", "--runner", "--workspace", "--planner-model", "--task-model", "--timeout-ms"],
     export: ["--id", "--file", "--workspace"], replace: ["--id", "--file", "--workspace"],
     approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace"],
@@ -232,6 +258,11 @@ function parse(args: string[]): Command {
   let json = false;
   for (let index = 0; index < options.length; index += 1) {
     const key = options[index]!;
+    if (key === "--refresh") {
+      if (action !== "requirements" || values.has(key)) throw new Error("--refresh 只适用于 planner requirements，且只能指定一次");
+      values.set(key, "true");
+      continue;
+    }
     if (key === "--mock-clarify") {
       if (action !== "start" || mockClarify) throw new Error("--mock-clarify 只适用于 planner start，且只能指定一次");
       mockClarify = true;
@@ -256,7 +287,7 @@ function parse(args: string[]): Command {
   }
   const required: Record<Action, string[]> = {
     start: ["--planner", "--runner", "--request"], reply: ["--id", "--message"], retry: ["--id"], show: ["--id"],
-    list: [], check: [], diff: ["--id"], review: ["--id"], chat: [],
+    list: [], check: [], diff: ["--id"], review: ["--id"], revise: ["--id"], requirements: ["--id"], trace: ["--id", "--requirement"], chat: [],
     export: ["--id", "--file"], replace: ["--id", "--file"], approve: ["--id", "--revision"], run: ["--id"], help: [],
   };
   for (const key of required[action]) if (!values.has(key)) throw new Error("缺少 " + key + " 参数");
@@ -290,6 +321,7 @@ function parse(args: string[]): Command {
   if (action === "diff") {
     for (const flag of ["--from", "--to"]) if (values.has(flag) && (!Number.isSafeInteger(Number(values.get(flag))) || Number(values.get(flag)) < 1)) throw new Error(flag + " 必须是正整数");
   }
+  if (action === "trace" && values.has("--revision") && (!Number.isSafeInteger(Number(values.get("--revision"))) || Number(values.get("--revision")) < 1)) throw new Error("--revision 必须是正整数");
   if (action === "chat" && values.has("--timeout-ms")) {
     const timeout = Number(values.get("--timeout-ms"));
     if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000) throw new Error("--timeout-ms 必须在 1000 到 3600000 之间");
@@ -376,11 +408,29 @@ function formatReview(record: PlanReviewRecord, current: boolean): string {
     `摘要：${record.summary}`,
   ];
   for (const finding of record.findings) {
-    lines.push(`\n${finding.findingId} [${finding.severity}/${finding.category}] ${finding.taskIds.join(", ") || "需求范围"}`);
+    lines.push(`\n${finding.findingId} [${finding.severity}/${finding.category}] ${finding.taskIds.join(", ") || "需求范围"}${finding.issueId ? " · " + finding.issueId : ""}`);
     lines.push(`  问题：${finding.description}`, `  依据：${finding.basis}`, `  建议：${finding.suggestion}`);
   }
+  for (const item of record.resolutions ?? []) lines.push(`\n上轮 ${item.findingId}：${item.status === "resolved" ? "已解决" : "未解决"} · ${item.issueId ?? ""}\n  依据：${item.basis}`);
   if (record.reasonCode) lines.push(`原因：${record.reasonCode}`);
   return lines.join("\n");
+}
+
+function printRequirements(state: import("@token-coupon/core").RequirementsState | undefined): void {
+  if (!state) { console.log("有效需求尚未整理，请运行 /requirements refresh。"); return; }
+  console.log(`有效需求 · revision-${state.revision}`);
+  for (const item of effectiveRequirements(state)) console.log(`${item.requirementId}@${item.revision} [${item.status}] ${item.text}`);
+  if (!effectiveRequirements(state).length) console.log("当前没有有效需求。");
+}
+
+function printRequirementTrace(trace: ReturnType<typeof traceRequirement>): void {
+  const { requirement } = trace;
+  console.log(`${requirement.requirementId}@${requirement.revision} [${requirement.status}] ${requirement.text}`);
+  console.log("版本链：" + trace.versions.map((item) => `${item.revision}(${item.status})`).join(" → "));
+  for (const source of trace.sources) {
+    console.log(`来源 ${source.message.messageId}：${source.message.content}`);
+    for (const turn of source.turns) console.log(`  Turn ${turn.turnId} [${turn.status}]\n  日志目录：${turn.artifactDir}`);
+  }
 }
 
 async function printDraftUpdate(result: PlannerOperationResult, workspace: string): Promise<void> {
@@ -604,7 +654,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       const [name, ...args] = line.slice(1).split(/\s+/);
       try {
         if (name === "exit" || name === "quit") break;
-        if (name === "help") console.log("输入自然语言继续规划；/plan /history /edit /check /diff /review /approve /run /status /resume /retry <taskId> /exit");
+        if (name === "help") console.log("输入自然语言继续规划；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run /status /resume /retry <taskId> /exit");
         else if (name === "status") {
           const loaded = await loadPlannerConversation(planningId, workspace);
           console.log(formatPlanner(loaded));
@@ -624,7 +674,21 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
         }
         else if (name === "history") {
           const snapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
-          for (const message of snapshot.messages) console.log(`${message.role === "user" ? "用户" : "Planner"}：${message.content}`);
+          for (const message of snapshot.messages) console.log(`${message.role === "user" ? "用户" : "Planner"} [${message.messageId}]：${message.content}`);
+        } else if (name === "requirements") {
+          if (args[0] === "refresh") {
+            const result = await cancellable((signal) => refreshPlannerRequirements({ planningId: planningId!, workspace, signal }), chatAbort.signal);
+            console.log(formatPlanner(result));
+            await printDraftUpdate(result, workspace);
+          } else if (args.length) throw new Error("用法：/requirements [refresh]");
+          printRequirements((await new PlannerStore(workspace).load(planningId)).requirements);
+        } else if (name === "trace") {
+          if (!args[0] || args.length > 2 || (args[1] !== undefined && (!Number.isSafeInteger(Number(args[1])) || Number(args[1]) < 1))) throw new Error("用法：/trace <requirementId> [revision]");
+          printRequirementTrace(traceRequirement(await new PlannerStore(workspace).load(planningId), args[0], args[1] === undefined ? undefined : Number(args[1])));
+        } else if (name === "revise") {
+          const result = await cancellable((signal) => revisePlannerDraft({ planningId: planningId!, workspace, message: args.join(" "), signal }), chatAbort.signal);
+          console.log(formatPlanner(result));
+          await printDraftUpdate(result, workspace);
         } else if (name === "edit") await edit();
         else if (name === "check") {
           const loaded = await loadPlannerConversation(planningId, workspace);

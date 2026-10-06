@@ -99,8 +99,12 @@ export function validateReviewRecord(value: unknown): PlanReviewRecord {
       typeof raw.createdAt !== "string" || (raw.finishedAt !== null && typeof raw.finishedAt !== "string")) throw new Error("Planner 审查记录字段无效");
   const context = raw.context.map(parseEvidence);
   const findings = raw.findings.map(parseFinding);
+  if (new Set(findings.map(({ findingId }) => findingId)).size !== findings.length || new Set(findings.filter(({ issueId }) => issueId).map(({ issueId }) => issueId)).size !== findings.filter(({ issueId }) => issueId).length) throw new Error("审查问题身份重复");
+  const resolutions = raw.resolutions === undefined ? undefined : parseStoredResolutions(raw.resolutions);
+  if (raw.previousReviewId !== undefined && (typeof raw.previousReviewId !== "string" || !UUID.test(raw.previousReviewId))) throw new Error("前一审查引用无效");
   if (raw.status === "succeeded") {
-    if (raw.finishedAt === null || !raw.reportHash || canonicalHash({ summary: raw.summary, findings }) !== raw.reportHash) throw new Error("Planner 审查报告哈希无效");
+    if (Buffer.byteLength(JSON.stringify(reviewReportPayload({ summary: raw.summary, findings, ...(resolutions ? { resolutions } : {}) })), "utf8") > 64 * 1024) throw new Error("审查报告超过 64 KiB");
+    if (raw.finishedAt === null || !raw.reportHash || canonicalHash(reviewReportPayload({ summary: raw.summary, findings, ...(resolutions ? { resolutions } : {}), ...(raw.previousReviewId ? { previousReviewId: raw.previousReviewId as string } : {}) })) !== raw.reportHash) throw new Error("Planner 审查报告哈希无效");
   } else if (raw.reportHash !== null) throw new Error("未成功的审查不能包含有效报告哈希");
   return {
     schemaVersion: 1, planningId: raw.planningId as string, reviewId: raw.reviewId as string, status: raw.status as PlanReviewRecord["status"],
@@ -108,8 +112,28 @@ export function validateReviewRecord(value: unknown): PlanReviewRecord {
     reviewerConfigHash: raw.reviewerConfigHash as string, context, findings, summary: raw.summary,
     reportHash: raw.reportHash as string | null, reasonCode: raw.reasonCode as string | null,
     createdAt: raw.createdAt, finishedAt: raw.finishedAt as string | null,
+    ...(resolutions ? { resolutions } : {}), ...(raw.previousReviewId ? { previousReviewId: raw.previousReviewId as string } : {}),
   };
 }
+
+export function reviewReportPayload(record: Pick<PlanReviewRecord, "summary" | "findings" | "resolutions" | "previousReviewId">) {
+  return { summary: record.summary, findings: record.findings, ...(record.resolutions ? { resolutions: record.resolutions } : {}), ...(record.previousReviewId ? { previousReviewId: record.previousReviewId } : {}) };
+}
+
+function parseStoredResolutions(value: unknown): NonNullable<PlanReviewRecord["resolutions"]> {
+  if (!Array.isArray(value) || value.length > 100) throw new Error("问题解决记录无效");
+  const result = value.map((entry) => {
+    if (!entry || typeof entry !== "object") throw new Error("问题解决记录无效");
+    const item = entry as Record<string, unknown>;
+    if (typeof item.findingId !== "string" || !/^[A-Z][A-Z0-9_-]{0,31}$/.test(item.findingId) || !["resolved", "unresolved"].includes(String(item.status)) ||
+        typeof item.basis !== "string" || !item.basis.trim() || Buffer.byteLength(item.basis, "utf8") > 4096 || (item.issueId !== undefined && !validIssueId(item.issueId))) throw new Error("问题解决记录字段无效");
+    return { findingId: item.findingId, status: item.status as "resolved" | "unresolved", basis: item.basis, ...(item.issueId ? { issueId: item.issueId as string } : {}) };
+  });
+  if (new Set(result.map(({ findingId }) => findingId)).size !== result.length) throw new Error("问题解决记录重复");
+  return result;
+}
+
+function validIssueId(value: unknown): value is string { return typeof value === "string" && /^issue-[A-Za-z0-9_-]{1,100}$/.test(value); }
 
 function parseEvidence(value: unknown): RepositoryEvidence {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("审查仓库证据无效");
@@ -128,7 +152,11 @@ function parseFinding(value: unknown): PlanReviewFinding {
       typeof item.description !== "string" || !item.description.trim() || Buffer.byteLength(item.description, "utf8") > 4096 ||
       typeof item.basis !== "string" || !item.basis.trim() || Buffer.byteLength(item.basis, "utf8") > 4096 ||
       typeof item.suggestion !== "string" || !item.suggestion.trim() || Buffer.byteLength(item.suggestion, "utf8") > 4096) throw new Error("审查问题字段无效");
-  return { findingId: item.findingId, severity: item.severity as PlanReviewFinding["severity"], category: item.category as PlanReviewFinding["category"], taskIds: item.taskIds as string[], description: item.description, basis: item.basis, suggestion: item.suggestion };
+  if ((item.issueId !== undefined && !validIssueId(item.issueId)) || (item.priorFindingId !== undefined && (typeof item.priorFindingId !== "string" || !/^[A-Z][A-Z0-9_-]{0,31}$/.test(item.priorFindingId))) ||
+      (item.requirementIds !== undefined && (!Array.isArray(item.requirementIds) || item.requirementIds.some((id) => typeof id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(id))))) throw new Error("审查问题关联无效");
+  return { findingId: item.findingId, severity: item.severity as PlanReviewFinding["severity"], category: item.category as PlanReviewFinding["category"], taskIds: item.taskIds as string[], description: item.description, basis: item.basis, suggestion: item.suggestion,
+    ...(item.issueId ? { issueId: item.issueId as string } : {}), ...(item.priorFindingId ? { priorFindingId: item.priorFindingId as string } : {}), ...(item.requirementIds ? { requirementIds: item.requirementIds as string[] } : {}),
+  };
 }
 
 function isHash(value: unknown): value is string { return typeof value === "string" && HASH.test(value); }
