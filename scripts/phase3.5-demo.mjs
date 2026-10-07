@@ -107,7 +107,7 @@ assert.equal(repeated.snapshot.execution?.sessionId, run.snapshot.execution?.ses
 const loaded = await loadPlannerConversation(started.snapshot.planningId, workspace);
 const session = await new SessionStore(workspace).load(run.snapshot.execution.sessionId);
 const reviews = await readdir(join(workspace, ".token-coupon", "planners", started.snapshot.planningId, "reviews"));
-assert.deepEqual(session.plan, fixedPlan, "Session 执行计划必须等于最终批准草案");
+assert.deepEqual(session.plan, fixed.draft.plan, "Session 执行计划必须等于最终批准草案");
 const report = {
   planningId: started.snapshot.planningId,
   conversationTurns: loaded.snapshot.turns.length,

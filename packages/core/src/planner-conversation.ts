@@ -6,7 +6,7 @@ import { DeepSeekPlanner, PlannerApiError } from "./planners/deepseek-planner.js
 import { parsePlannerReply, PlannerReplyValidationError } from "./planner-reply.js";
 import { MockPlanner } from "./planners/mock-planner.js";
 import { canonicalHash, PlannerStore, readJson } from "./planner-store.js";
-import type { ExecutionReference, Planner, PlannerConfig, PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, RepositoryEvidence } from "./planner-types.js";
+import type { ExecutionReference, Planner, PlannerConfig, PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, RepositoryEvidence, PlanningAssessment } from "./planner-types.js";
 import { RepositoryReader, verifyRepositoryEvidence } from "./repository-reader.js";
 import type { ExecutionConfig } from "./task.js";
 import { InputValidationError } from "./validation.js";
@@ -18,6 +18,9 @@ import { loadCurrentPlanReview } from "./plan-review.js";
 import { ReviewStore } from "./review-store.js";
 import type { PlanReviewRecord } from "./planner-types.js";
 import { applyRequirementsUpdate, createHistoryReader, effectiveRequirements, emptyRequirements, pendingRequirementMessages, planningMessages, requireReconciledRequirements } from "./requirements.js";
+import { assertClarificationNeeded, assertPlanningReady, defaultPlanningProposals, hasPendingPlanningDecisions, parsePlanningAssessment, syncPlanningDecisionRequirements, validatePlanningAssessment } from "./planning-readiness.js";
+import { applyCommittedConfirmations, assertNoRepeatedConfirmationClarification, makeConfirmationProposal, mergeConfirmationEvents, parseConfirmationInput } from "./confirmation.js";
+import { bindPlanDecisions, plannerPlanStructure } from "./plan-decisions.js";
 
 const USER_MESSAGE_LIMIT = 8 * 1024;
 const REQUEST_CONTEXT_LIMIT = 256 * 1024;
@@ -54,6 +57,7 @@ export interface PlannerRunOptions {
   signal?: AbortSignal;
   acceptEdits?: boolean;
   onOutput?: Parameters<typeof runPlan>[0]["onOutput"];
+  onIdleState?: Parameters<typeof runPlan>[0]["onIdleState"];
 }
 
 export function createPlanner(config: PlannerConfig, options: { fetchImpl?: typeof fetch } = {}): Planner {
@@ -71,7 +75,8 @@ export async function startPlannerConversation(options: PlannerStartOptions): Pr
   const snapshot: PlannerConversationSnapshot = {
     schemaVersion: 1, planningId: randomUUID(), workspace: store.workspace, revision: 1, status: "collecting",
     config: options.config, executionDefaults: options.executionDefaults, messages: [], turns: [], context: [],
-    activeTurnId: null, draftRevision: null, approval: null, latestReviewId: null, execution: null, createdAt: now, updatedAt: now,
+    activeTurnId: null, draftRevision: null, approval: null, latestReviewId: null, execution: null,
+    confirmationState: { schemaVersion: 1, activeProposal: null, events: [] }, createdAt: now, updatedAt: now,
   };
   await store.create(snapshot);
   return mutateWithTurn(store, snapshot.planningId, options.planner ?? createPlanner(options.config), options.request, options.signal, false);
@@ -156,9 +161,11 @@ export async function replacePlannerDraft(options: { planningId: string; workspa
     if (hadActiveTurn) throw new Error("发现中断的规划轮次，请先使用 planner retry");
     if (snapshot.activeTurnId) throw new Error("规划轮次已中断，请先使用 planner retry");
     if (snapshot.execution) throw new Error("规划已关联执行 Session，不能替换计划");
-    const plan = parsePlanWithPolicy(options.value, snapshot.executionDefaults);
-    ensurePlanSize(plan);
     const previous = snapshot.draftRevision === null ? undefined : await store.loadDraft(options.planningId, snapshot.draftRevision);
+    const parsed = parsePlanWithPolicy(options.value, snapshot.executionDefaults);
+    const plan = bindPlanDecisions(parsed, snapshot.planningAssessment!, previous?.plan, snapshot.confirmationState);
+    ensurePlanSize(plan);
+    assertPlanningReady(snapshot.planningAssessment, plan);
     const hash = canonicalHash(plan);
     if (previous?.planHash === hash) return { snapshot, draft: previous, draftChanged: false };
     const draft: PlannerDraft = {
@@ -187,6 +194,7 @@ export async function approvePlannerDraft(options: { planningId: string; workspa
     const requirements = requireReconciledRequirements(snapshot);
     if (effectiveRequirements(requirements).some(({ status }) => status === "pending")) throw new Error("仍有待澄清需求，不能批准，请先回答澄清问题");
     const draft = await store.loadDraft(options.planningId, options.draftRevision);
+    assertPlanningReady(snapshot.planningAssessment, draft.plan);
     const reviewId = options.reviewId ?? snapshot.latestReviewId;
     if (!reviewId || reviewId !== snapshot.latestReviewId) throw new Error("批准前必须完成当前草案的审查，请运行 planner review");
     const changed = await verifyRepositoryEvidence(store.workspace, snapshot.context, options.signal);
@@ -239,6 +247,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     }
     if (snapshot.status !== "approved" || !snapshot.approval || snapshot.draftRevision === null) throw new Error("执行前必须批准当前草案版本");
     const draft = await store.loadDraft(options.planningId, snapshot.draftRevision);
+    assertPlanningReady(snapshot.planningAssessment, draft.plan);
     if (draft.planHash !== snapshot.approval.planHash || canonicalHash(draft.plan) !== snapshot.approval.planHash) throw new Error("批准草案哈希校验失败");
     const review = await loadCurrentPlanReview(options.planningId, store.workspace);
     if (!snapshot.approval.reviewId || !snapshot.approval.reportHash || !review || review.reviewId !== snapshot.approval.reviewId || review.reportHash !== snapshot.approval.reportHash) {
@@ -260,6 +269,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.acceptEdits ? { acceptEdits: true } : {}),
         ...(options.onOutput ? { onOutput: options.onOutput } : {}),
+        ...(options.onIdleState ? { onIdleState: options.onIdleState } : {}),
         beforeCreateSession: async () => {
           const current = await store.load(options.planningId);
           if (current.status !== "approved" || current.approval?.approvalId !== execution.approvalId ||
@@ -303,6 +313,28 @@ export function formatPlanner(result: PlannerOperationResult & { sessionStatus?:
     "规划轮次：" + snapshot.turns.length,
     snapshot.requirements ? `有效需求：revision-${snapshot.requirements.revision}；待澄清 ${effectiveRequirements(snapshot.requirements).filter(({ status }) => status === "pending").length} 项（/requirements 查看）` : "有效需求：尚未整理（/requirements refresh）",
   ];
+  if (snapshot.planningAssessment) {
+    const pendingDecisions = snapshot.planningAssessment.decisions.filter(({ status }) => status === "pending");
+    lines.push("规划类型：" + snapshot.planningAssessment.profile + (pendingDecisions.length ? "；待确认决策：" + pendingDecisions.map(({ decisionId }) => decisionId).join(", ") : "；关键决策已记录"));
+    for (const decision of snapshot.planningAssessment.decisions.filter(({ status }) => status !== "pending")) {
+      lines.push(`  ${decision.decisionId} [${decision.status}]：${decision.value}`);
+    }
+    const proposals = defaultPlanningProposals(snapshot.planningAssessment);
+    if (proposals.length) {
+      lines.push("具体默认提案（输入‘同意该默认方案’将接受下列值）：");
+      for (const proposal of proposals) lines.push("  " + proposal.decisionId + "：" + proposal.value);
+    }
+  }
+  if (snapshot.confirmationState?.activeProposal) {
+    lines.push("当前确认提案：" + snapshot.confirmationState.activeProposal.proposalId + "@" + snapshot.confirmationState.activeProposal.revision);
+    for (const question of snapshot.confirmationState.activeProposal.questions) {
+      lines.push(`  ${question.displayIndex}. [${question.answerMode}] ${question.text}（${question.decisionIds.join(", ")}）`);
+    }
+  }
+  const latestConfirmations = new Map<string, import("./planner-types.js").ConfirmationEvent>();
+  for (const event of snapshot.confirmationState?.events ?? []) for (const id of event.decisionIds) latestConfirmations.set(id, event);
+  if (latestConfirmations.size) lines.push("已保存确认：" + [...latestConfirmations].map(([id, event]) =>
+    `${id}=${event.action}${event.values?.find((item) => item.decisionId === id) ? `(${event.values.find((item) => item.decisionId === id)!.value})` : ""}`).join("；"));
   for (const turn of snapshot.turns) lines.push("  " + turn.turnId + "：" + turn.status + (turn.reasonCode ? "（" + turn.reasonCode + "）" : ""));
   if (snapshot.messages.length) {
     const recentMessages = snapshot.messages.slice(-20);
@@ -314,7 +346,8 @@ export function formatPlanner(result: PlannerOperationResult & { sessionStatus?:
     lines.push("Plan：" + draft.plan.id + " — " + draft.plan.title);
     for (const entry of draft.plan.tasks) {
       lines.push("  " + entry.task.id + " — " + entry.task.title + "；依赖：" + (entry.dependsOn.join(", ") || "无"));
-      lines.push("    Runner：" + entry.task.execution.runnerId + "；模型：" + (entry.task.execution.modelId ?? "未指定") + "；超时：" + entry.task.execution.timeoutMs + " ms");
+      lines.push("    Runner：" + entry.task.execution.runnerId + "；模型：" + (entry.task.execution.modelId ?? "未指定") + "；" +
+        (entry.task.execution.timeoutMs === undefined ? "无总时限；60 秒无输出时提示" : `历史 timeoutMs ${entry.task.execution.timeoutMs}（不生效）；60 秒无输出时提示`));
       lines.push("    描述：" + entry.task.prompt);
     }
     lines.push("调研文件：" + (draft.context.length ? draft.context.map((item) => item.path).join(", ") : "无"));
@@ -396,6 +429,18 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
   const initialEvidenceBytes = snapshot.context.reduce((sum, item) => sum + item.sizeBytes, 0);
   const reader = new RepositoryReader(store.workspace, timed.signal, initialEvidenceBytes);
   try {
+    let confirmationState = snapshot.confirmationState ?? { schemaVersion: 1 as const, activeProposal: null, events: [] };
+    if (!operation) {
+      const parsedEvents = parseConfirmationInput(userText, messageId, confirmationState);
+      if (parsedEvents?.length) {
+        for (const event of parsedEvents) await store.writeConfirmationEvent(snapshot.planningId, event);
+        confirmationState = mergeConfirmationEvents(confirmationState, parsedEvents);
+        snapshot = nextSnapshot(snapshot, { confirmationState });
+        await store.save(snapshot);
+      }
+    }
+    const committedEvents = confirmationState.events.filter(({ sourceMessageId }) =>
+      pendingRequirementMessages(snapshot).some(({ messageId: pendingId }) => pendingId === sourceMessageId));
     const previouslyChanged = await verifyRepositoryEvidence(store.workspace, snapshot.context, timed.signal);
     const contextNotice = previouslyChanged.length
       ? "以下先前调研过的文件已变化，生成新草案前必须重新读取这些路径；不要只更新哈希：" + previouslyChanged.join(", ")
@@ -407,23 +452,63 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
     const messages = planningMessages(snapshot);
     const pendingMessages = pendingRequirementMessages(snapshot);
     const historyIndex = snapshot.messages.filter(({ role }) => role === "user").map(({ messageId, role }) => ({ messageId, role, turnStatuses: snapshot.turns.filter((turn) => turn.messageId === messageId).map(({ status }) => status) }));
-    const historyBytes = Buffer.byteLength(JSON.stringify({ messages, requirements: requirementsInput, pendingMessages, historyIndex, plan: currentDraft?.plan, review: latestReview }), "utf8");
+    const historyBytes = Buffer.byteLength(JSON.stringify({ messages, requirements: requirementsInput, pendingMessages, historyIndex, planningAssessment: snapshot.planningAssessment, confirmationState, plan: currentDraft?.plan, review: latestReview }), "utf8");
     if (historyBytes > REQUEST_CONTEXT_LIMIT) throw new PlannerOperationError("context_budget_exceeded", "规划历史超过 256 KiB，请创建新的规划记录");
     // Validate without publishing anything; adapters can accept a complete research reply directly.
     const validateReply = (output: unknown): PlannerReply => {
-      let result = parsePlannerReply(output, planner.id !== "mock");
+      let result = parsePlannerReply(output, planner.id !== "mock", planner.id !== "mock");
       if (!result.requirementsUpdate) {
         result = { ...result, requirementsUpdate: {
           messageDecisions: pendingMessages.map((item) => ({ messageId: item.messageId, kind: operation && item.messageId === messageId ? "operation" : "requirement", reason: "Mock 输入分类；不代表真实语义审查" })),
           changes: pendingMessages.filter((item) => !(operation && item.messageId === messageId)).map((item) => ({ requirementId: "R-" + item.messageId, text: item.content, status: "active", sourceMessageIds: [item.messageId] })),
         } };
       }
-      try { applyRequirementsUpdate(snapshot, result.requirementsUpdate!, operation ? [messageId] : []); }
+      if (!result.planningAssessment && planner.id === "mock") {
+        const source = snapshot.messages.find((message) => message.messageId === messageId && message.role === "user");
+        if (!source) throw new PlannerReplyValidationError("planner_readiness_invalid", "Mock 规划缺少当前用户消息来源");
+        result = { ...result, planningAssessment: {
+          profile: "general",
+          classification: { rationale: "Mock 场景使用通用规划类型", sourceMessageId: messageId, quote: source.content.slice(0, 256) },
+          decisions: [],
+        } };
+      }
+      result = mergeConfirmationRequirements(result, pendingMessages, committedEvents);
+      let candidateRequirements: import("./planner-types.js").RequirementsState;
+      try { candidateRequirements = applyRequirementsUpdate(snapshot, result.requirementsUpdate!, operation ? [messageId] : [], committedEvents.map(({ sourceMessageId }) => sourceMessageId)); }
       catch (error) { throw new PlannerReplyValidationError("planner_requirements_invalid", safeError(error)); }
+      const normalizedAssessment = applyCommittedConfirmations(parsePlanningAssessment(result.planningAssessment), confirmationState, [messageId]);
+      // Reserved R-decision-* records are derived from the assessment atomically.
+      // Do not require the model to duplicate each change in both structures.
+      candidateRequirements = syncPlanningDecisionRequirements(candidateRequirements,
+        snapshot.requirements ?? emptyRequirements(), normalizedAssessment, snapshot.messages);
+      const assessment = validatePlanningAssessment(normalizedAssessment, {
+        messages: snapshot.messages,
+        requirements: candidateRequirements,
+        evidence: mergeEvidence(snapshot.context, reader.getEvidence()),
+        ...(snapshot.planningAssessment ? { previous: snapshot.planningAssessment } : {}),
+        currentMessageIds: [messageId],
+        confirmationState,
+      });
+      result = { ...result, planningAssessment: assessment };
+      if (result.kind === "clarification") {
+        assertNoRepeatedConfirmationClarification(assessment, result, confirmationState);
+        if (hasPendingPlanningDecisions(assessment) && !result.questionBindings) {
+          throw new PlannerReplyValidationError("planner_readiness_invalid", "澄清必须提供 questionBindings，将每个待确认 decisionId 关联到具体问题和回答模式");
+        }
+        if (result.questionBindings && hasPendingPlanningDecisions(assessment)) {
+          try { makeConfirmationProposal(result, messageId, (confirmationState.activeProposal?.revision ?? 0) + 1); }
+          catch (error) { throw new PlannerReplyValidationError("planner_readiness_invalid", safeError(error)); }
+        }
+        const currentRequirements = candidateRequirements.messageDecisions.filter((item) => item.messageId === messageId && item.kind === "requirement").map(({ messageId }) => messageId);
+        assertClarificationNeeded(assessment, snapshot.messages, currentRequirements);
+      }
       if (result.kind === "draft") {
         try {
-          const plan = parsePlanWithPolicy(result.plan, snapshot.executionDefaults);
+          const parsedPlan = parsePlanWithPolicy(plannerPlanStructure(result.plan), snapshot.executionDefaults);
+          if (hasPendingPlanningDecisions(assessment)) throw new Error("关键实施决策仍待澄清，必须返回 clarification");
+          const plan = bindPlanDecisions(parsedPlan, assessment, currentDraft?.plan, confirmationState);
           ensurePlanSize(plan);
+          assertPlanningReady(assessment, plan);
           result = { ...result, plan };
         } catch (error) { throw new PlannerReplyValidationError("planner_plan_invalid", safeError(error)); }
       }
@@ -461,13 +546,18 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
           operationMessageIds: operation ? [messageId] : [],
           ...(latestReview ? { reviewContext: { review: latestReview, current: reviewBeforeTurn?.reviewId === latestReview.reviewId } } : {}),
           executionDefaults: snapshot.executionDefaults,
+          ...(snapshot.planningAssessment ? { planningAssessment: snapshot.planningAssessment } : {}),
+          confirmationState,
           ...(currentDraft ? { currentDraft } : {}),
           ...(repairMessage ? { repairMessage } : {}),
           ...(contextNotice ? { repositoryNotice: contextNotice } : {}),
         }, context);
         if (timed.signal.aborted) throw timed.signal.reason ?? new Error("规划轮次已取消");
         reply = validateReply(output);
-        updatedRequirements = applyRequirementsUpdate(snapshot, reply.requirementsUpdate!, operation ? [messageId] : []);
+        updatedRequirements = syncPlanningDecisionRequirements(
+          applyRequirementsUpdate(snapshot, reply.requirementsUpdate!, operation ? [messageId] : [], committedEvents.map(({ sourceMessageId }) => sourceMessageId)),
+          snapshot.requirements ?? emptyRequirements(), reply.planningAssessment!, snapshot.messages,
+        );
         break;
       } catch (error) {
         validationError = error;
@@ -492,6 +582,16 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
       : undefined;
     const returnedDraft = reply.kind === "draft" ? newDraft ?? currentDraft : undefined;
     if (newDraft) await store.writeDraft(newDraft);
+    let nextConfirmationState = confirmationState;
+    if (reply.kind === "clarification" && reply.questionBindings && hasPendingPlanningDecisions(reply.planningAssessment)) {
+      const proposal = makeConfirmationProposal(reply, assistant.messageId, (confirmationState.activeProposal?.revision ?? 0) + 1);
+      if (proposal) {
+        await store.writeConfirmationProposal(snapshot.planningId, proposal);
+        nextConfirmationState = { ...confirmationState, activeProposal: proposal };
+      }
+    } else if (reply.kind === "draft" && confirmationState.activeProposal) {
+      nextConfirmationState = { ...confirmationState, activeProposal: null };
+    }
     updatedRequirements = { ...updatedRequirements, revision: await store.nextRequirementsRevision(snapshot.planningId, updatedRequirements.revision) };
     await store.writeRequirements(snapshot.planningId, updatedRequirements);
     const finishedAt = new Date().toISOString();
@@ -500,7 +600,8 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
     snapshot = nextSnapshot(snapshot, {
       status: reply.kind === "draft" ? "draft_ready" : "collecting",
       messages: [...snapshot.messages, assistant], turns: [...snapshot.turns.slice(0, -1), doneTurn],
-      requirements: updatedRequirements, context: evidence, activeTurnId: null, ...(newDraft ? { draftRevision: newDraft.draftRevision, latestReviewId: null } : {}),
+      requirements: updatedRequirements, planningAssessment: reply.planningAssessment!, confirmationState: nextConfirmationState,
+      context: evidence, activeTurnId: null, ...(newDraft ? { draftRevision: newDraft.draftRevision, latestReviewId: null } : {}),
       approval: null, execution: null,
     });
     await store.save(snapshot);
@@ -512,8 +613,11 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
           : "planner_failed";
     const failedTurn: PlannerTurnRef = { ...turn, status: timed.timedOut() ? "timed_out" : timed.signal.aborted ? "cancelled" : "failed", reasonCode: code, finishedAt: new Date().toISOString() };
     await store.writeTurn(failedTurn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, status: failedTurn.status, input: userText, reasonCode: code, error: safeError(error), context: reader.getEvidence(), apiRequests: counters.requests, toolCalls: counters.tools, events, createdAt: now, finishedAt: failedTurn.finishedAt });
-    snapshot = nextSnapshot(snapshot, {
-      status: "collecting", turns: [...snapshot.turns.slice(0, -1), failedTurn], context: mergeEvidence(snapshot.context, reader.getEvidence()),
+    const persisted = await store.load(snapshot.planningId);
+    snapshot = nextSnapshot(persisted, {
+      status: "collecting", turns: persisted.turns.map((item) => item.turnId === turnId ? failedTurn : item),
+      context: mergeEvidence(persisted.context, reader.getEvidence()),
+      ...((snapshot.confirmationState ?? persisted.confirmationState) ? { confirmationState: snapshot.confirmationState ?? persisted.confirmationState } : {}),
       activeTurnId: null, approval: null, execution: null,
     });
     await store.save(snapshot);
@@ -542,6 +646,43 @@ function ensurePlanSize(plan: PlanDefinition): void {
   if (Buffer.byteLength(JSON.stringify(plan), "utf8") > PLAN_LIMIT) throw new PlannerOperationError("planner_plan_size", "计划 JSON 超过 48 KiB");
 }
 
+function mergeConfirmationRequirements(
+  reply: PlannerReply,
+  pendingMessages: import("./planner-types.js").ConversationMessage[],
+  events: import("./planner-types.js").ConfirmationEvent[],
+): PlannerReply {
+  if (!events.length || !reply.requirementsUpdate) return reply;
+  const affected = new Set(events.map(({ sourceMessageId }) => sourceMessageId));
+  const messageDecisions = reply.requirementsUpdate.messageDecisions.map((item) => affected.has(item.messageId)
+    ? { ...item, kind: "requirement" as const, reason: "用户确认或委托了当前提案中的关键决策" }
+    : item);
+  for (const message of pendingMessages) {
+    if (affected.has(message.messageId) && !messageDecisions.some(({ messageId }) => messageId === message.messageId)) {
+      messageDecisions.push({ messageId: message.messageId, kind: "requirement", reason: "用户确认或委托了当前提案中的关键决策" });
+    }
+  }
+  const latest = new Map<string, import("./planner-types.js").ConfirmationEvent>();
+  for (const event of events) for (const decisionId of event.decisionIds) latest.set(decisionId, event);
+  const touched = new Set([...latest.keys()].map((decisionId) => "R-decision-" + decisionId));
+  const changes = reply.requirementsUpdate.changes.filter(({ requirementId }) => !touched.has(requirementId));
+  for (const [decisionId, event] of latest) {
+      const value = event.values?.find((item) => item.decisionId === decisionId)?.value;
+      const text = event.action === "accept" && value
+        ? `关键实施决策 ${decisionId}：${value}`
+        : event.action === "provide_value" && value
+          ? `关键实施决策 ${decisionId}：${value}`
+        : event.action === "delegate"
+          ? `关键实施决策 ${decisionId}：用户委托 Planner 在该决策范围内选择${event.preference ? `；偏好：${event.preference}` : ""}`
+        : event.action === "revoke"
+          ? `关键实施决策 ${decisionId}：用户撤回此前授权，需要重新确认`
+        : event.action === "reject"
+          ? `关键实施决策 ${decisionId}：用户拒绝提案，需提供不同方案`
+          : `关键实施决策 ${decisionId}：用户给出新的具体取值`;
+      changes.push({ requirementId: "R-decision-" + decisionId, text, status: event.action === "reject" || event.action === "revoke" ? "pending" : "active", sourceMessageIds: [event.sourceMessageId] });
+  }
+  return { ...reply, requirementsUpdate: { ...reply.requirementsUpdate, messageDecisions, changes } };
+}
+
 function makeDraft(snapshot: PlannerConversationSnapshot, reply: PlannerReply, evidence: RepositoryEvidence[]): PlannerDraft {
   if (reply.kind !== "draft" || !reply.plan) throw new Error("内部错误：draft 缺少计划");
   const previousRevision = snapshot.draftRevision ?? 0;
@@ -568,7 +709,7 @@ function validateRequest(value: string): void {
 
 function validateExecutionDefaults(value: ExecutionConfig): void {
   if (!value || !["mock", "claude-code"].includes(value.runnerId) || value.mode !== "non_interactive" ||
-      !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1000 || value.timeoutMs > 3_600_000 ||
+      (value.timeoutMs !== undefined && (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1000 || value.timeoutMs > 3_600_000)) ||
       (value.runnerId === "mock" && value.modelId !== undefined)) throw new InputValidationError("planner.execution", "执行默认配置无效");
 }
 

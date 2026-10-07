@@ -32,6 +32,7 @@ export interface PlanRunOptions {
   sessionId?: string;
   beforeCreateSession?: () => Promise<void>;
   onOutput?: (taskId: string, output: RunnerOutput) => void;
+  onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
 export interface SessionOperationOptions {
@@ -42,9 +43,10 @@ export interface SessionOperationOptions {
   acceptEdits?: boolean;
   mockTaskScenarios?: Map<string, string>;
   onOutput?: (taskId: string, output: RunnerOutput) => void;
+  onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
-type ExecutionOptions = Pick<SessionOperationOptions, "workspace" | "createRunner" | "signal" | "acceptEdits" | "mockTaskScenarios" | "onOutput">;
+type ExecutionOptions = Pick<SessionOperationOptions, "workspace" | "createRunner" | "signal" | "acceptEdits" | "mockTaskScenarios" | "onOutput" | "onIdleState">;
 
 export interface RetryOptions extends SessionOperationOptions { taskId: string; }
 
@@ -127,7 +129,10 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
     const state = snapshot.tasks[index]!;
     lines.push(`  ${entry.task.id} — ${entry.task.title}：${state.status}`);
     lines.push(`    依赖：${entry.dependsOn.length ? entry.dependsOn.join(", ") : "无"}`);
-    for (const attempt of state.attempts) lines.push(`    Attempt ${attempt.attemptId}：${attempt.outcome}；${attempt.artifactDir}`);
+    for (const attempt of state.attempts) {
+      lines.push(`    Attempt ${attempt.attemptId}：${attempt.outcome}；${attempt.artifactDir}`);
+      if (attempt.idleSince) lines.push("      暂无输出，仍在运行（自 " + attempt.idleSince + "）；最近活动 " + (attempt.lastActivityAt ?? "未知"));
+    }
     if (state.reasonCode) lines.push(`    原因：${state.reasonCode}`);
     if (state.result) lines.push(`    结果：${state.result.summary || "无文本摘要"}${state.result.truncated ? "（已截断）" : ""}`);
   }
@@ -144,18 +149,31 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
     snapshot = next;
     states = nextStates;
   };
+  const persistActivity = async (taskId: string, attemptId: string, activity: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => {
+    const nextStates = states.map((state) => state.taskId !== taskId ? state : {
+      ...state,
+      attempts: state.attempts.map((attempt) => {
+        if (attempt.attemptId !== attemptId) return attempt;
+        const nextAttempt = { ...attempt, lastActivityAt: activity.lastActivityAt };
+        if (activity.idle && activity.idleSince) nextAttempt.idleSince = activity.idleSince;
+        else delete nextAttempt.idleSince;
+        return nextAttempt;
+      }),
+    });
+    await save(nextStates, "running");
+  };
 
   if (retry) {
     const attemptId = randomUUID();
     const entry = record.plan.tasks.find(({ task }) => task.id === retry.taskId)!;
     const reserved = planStore.beginAttempt(retry.taskId, attemptId, attemptDirectory(store.workspace, attemptId), retry.allowRetry);
     await save(reserved, "running");
-    await runOne(entry, attemptId, states, store, options, async (status, reasonCode, result, recorded) => {
+    await runOne(entry, attemptId, states, record.plan, store, options, async (status, reasonCode, result, recorded) => {
       let finished = planStore.finishAttempt(retry.taskId, attemptId, status, reasonCode, result, states);
       if (!recorded) finished = finished.map((item) => item.taskId === retry.taskId ? { ...item, attempts: item.attempts.map((attempt) => attempt.attemptId === attemptId ? { ...attempt, outcome: "record_missing" as const } : attempt) } : item);
       const sessionStatus = status === "cancelled" ? "cancelled" : sessionStatusFor(finished);
       await save(finished, sessionStatus);
-    });
+    }, (activity) => persistActivity(retry.taskId, attemptId, activity));
     const retryState = states.find((item) => item.taskId === retry.taskId);
     return { snapshot, operationStatus: retryState?.status === "succeeded" ? "succeeded" : retryState?.status === "timed_out" ? "timed_out" : retryState?.status === "cancelled" ? "cancelled" : "failed" };
   }
@@ -172,12 +190,12 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
     const attemptId = randomUUID();
     const reserved = freshStore.beginAttempt(entry.task.id, attemptId, attemptDirectory(store.workspace, attemptId));
     await save(reserved, "running");
-    await runOne(entry, attemptId, states, store, options, async (status, reasonCode, result, recorded) => {
+    await runOne(entry, attemptId, states, record.plan, store, options, async (status, reasonCode, result, recorded) => {
       const after = new PlanStore(record.plan, snapshot);
       let finished = after.finishAttempt(entry.task.id, attemptId, status, reasonCode, result, states);
       if (!recorded) finished = finished.map((item) => item.taskId === entry.task.id ? { ...item, attempts: item.attempts.map((attempt) => attempt.attemptId === attemptId ? { ...attempt, outcome: "record_missing" as const } : attempt) } : item);
       await save(finished, status === "cancelled" ? "cancelled" : sessionStatusFor(finished));
-    });
+    }, (activity) => persistActivity(entry.task.id, attemptId, activity));
     const state = states.find((item) => item.taskId === entry.task.id);
     if (state?.status !== "succeeded") break;
   }
@@ -196,13 +214,15 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
   return { snapshot };
 }
 
-async function runOne(entry: PlannedTask, attemptId: string, states: SessionTaskState[], store: SessionStore, options: ExecutionOptions,
+async function runOne(entry: PlannedTask, attemptId: string, states: SessionTaskState[], plan: PlanDefinition, store: SessionStore, options: ExecutionOptions,
   finish: (status: "succeeded" | "failed" | "cancelled" | "timed_out", reasonCode: string | null, result: TaskResult | null, recorded: boolean) => Promise<void>,
+  persistActivity: (state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => Promise<void>,
 ): Promise<void> {
   const effectiveTask = withDependencyContext(entry, states);
   const scenario = options.mockTaskScenarios?.get(entry.task.id);
   const allowEdits = options.acceptEdits && entry.task.execution.runnerId === "claude-code";
   const runner = options.createRunner(entry.task, { ...(allowEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}) });
+  const decisionConstraints = resolveTaskDecisions(plan, entry);
   const collector = new OutputCollector();
   let result: Awaited<ReturnType<typeof executeTask>>;
   try {
@@ -211,8 +231,13 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
       cwd: store.workspace,
       runner,
       attemptId,
+      ...(decisionConstraints.length ? { decisionConstraints } : {}),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       onOutput: (output) => { collector.push(output); options.onOutput?.(entry.task.id, output); },
+      onIdleState: (state) => {
+        options.onIdleState?.(entry.task.id, state);
+        return persistActivity(state);
+      },
     });
   } catch (error) {
     await finish("failed", "attempt_or_handoff_record_failed", null, false);
@@ -233,6 +258,19 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
     const mapped = status === "timed_out" ? "timed_out" : status === "cancelled" ? "cancelled" : "failed";
     await finish(mapped, result.attempt.reasonCode, null, true);
   }
+}
+
+function resolveTaskDecisions(plan: PlanDefinition, entry: PlannedTask): NonNullable<PlanDefinition["decisionContext"]>["decisions"] {
+  if (plan.schemaVersion === 1) return [];
+  const context = plan.decisionContext;
+  if (!context || !entry.decisionRefs) throw new Error("decision_context_missing：Plan v2 的 Session 缺少决策上下文或任务引用");
+  return entry.decisionRefs.map((reference) => {
+    const decision = context.decisions.find(({ decisionId }) => decisionId === reference.decisionId);
+    if (!decision || decision.revision !== reference.revision || decision.valueHash !== reference.valueHash) {
+      throw new Error(`decision_context_invalid：任务 ${entry.task.id} 的决策引用 ${reference.decisionId} 无法解析`);
+    }
+    return decision;
+  });
 }
 
 function withDependencyContext(entry: PlannedTask, states: SessionTaskState[]): TaskDefinition {

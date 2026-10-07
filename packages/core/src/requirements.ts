@@ -55,7 +55,7 @@ export function validateRequirementsState(value: unknown, messages: Conversation
   return { revision: raw.revision as number, items, messageDecisions };
 }
 
-export function applyRequirementsUpdate(snapshot: PlannerConversationSnapshot, value: unknown, operationMessageIds: string[] = []): RequirementsState {
+export function applyRequirementsUpdate(snapshot: PlannerConversationSnapshot, value: unknown, operationMessageIds: string[] = [], confirmationMessageIds: string[] = []): RequirementsState {
   const raw = object(value);
   if (Object.keys(raw).some((key) => !["messageDecisions", "changes"].includes(key)) || !Array.isArray(raw.messageDecisions) || !Array.isArray(raw.changes) || raw.changes.length > 128) fail("更新字段无效");
   const initial = snapshot.requirements ?? emptyRequirements();
@@ -84,7 +84,7 @@ export function applyRequirementsUpdate(snapshot: PlannerConversationSnapshot, v
     items.push({ requirementId: change.requirementId, revision: (previous?.revision ?? 0) + 1, text: text(change.text), status: change.status as Requirement["status"], sourceMessageIds: sources });
   }
   for (const decision of decisions.filter(({ kind }) => kind === "requirement")) {
-    if (!raw.changes.some((entry) => (object(entry).sourceMessageIds as string[]).includes(decision.messageId))) fail("业务输入没有关联需求变化");
+    if (!raw.changes.some((entry) => (object(entry).sourceMessageIds as string[]).includes(decision.messageId)) && !confirmationMessageIds.includes(decision.messageId)) fail("业务输入没有关联需求变化或已核验确认");
   }
   return validateRequirementsState({ revision: initial.revision + 1, items, messageDecisions: [...initial.messageDecisions, ...decisions] }, snapshot.messages);
 }

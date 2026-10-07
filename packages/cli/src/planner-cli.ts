@@ -18,7 +18,7 @@ const HELP = [
   "用法：",
   "  token-coupon planner start --planner <mock|deepseek> --runner <mock|claude-code>",
   "      --request <需求> [--workspace <目录>] [--planner-model <modelId>]",
-  "      [--task-model <modelId>] [--timeout-ms <毫秒>] [--mock-clarify]",
+  "      [--task-model <modelId>] [--mock-clarify]",
   "  token-coupon planner reply --id <planningId> --message <补充要求> [--workspace <目录>]",
   "  token-coupon planner retry --id <planningId> [--workspace <目录>]",
   "  token-coupon planner show --id <planningId> [--workspace <目录>]",
@@ -77,7 +77,7 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
       const modelId = get("--task-model");
       const result = await cancellable((signal) => startPlannerConversation({
           workspace, request: get("--request")!, config,
-          executionDefaults: { runnerId, mode: "non_interactive", timeoutMs: Number(get("--timeout-ms") ?? 180_000), ...(modelId ? { modelId } : {}) },
+          executionDefaults: { runnerId, mode: "non_interactive", ...(modelId ? { modelId } : {}) },
           ...(provider === "mock" ? {
             planner: new MockPlanner(command.mockClarify
               ? [{ kind: "clarification", message: "在生成计划前，我需要确认实现范围。", questions: ["是否需要同时补充自动化测试？"] }]
@@ -215,6 +215,7 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
             if (visible) process.stdout.write(visible);
             else if (output.stream === "stderr" && output.text) process.stderr.write(output.text);
           },
+          onIdleState: (taskId, state) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`),
         }));
       console.log(formatPlanner(result));
       if (result.snapshot.execution) {
@@ -239,13 +240,13 @@ function parse(args: string[]): Command {
   if (!actions.includes(actionValue as Action)) throw new Error("planner 子命令无效。请运行 token-coupon planner --help 查看用法。");
   const action = actionValue as Action;
   const allowedByAction: Record<Action, string[]> = {
-    start: ["--planner", "--runner", "--request", "--workspace", "--planner-model", "--task-model", "--timeout-ms"],
+    start: ["--planner", "--runner", "--request", "--workspace", "--planner-model", "--task-model"],
     reply: ["--id", "--message", "--workspace"],
     retry: ["--id", "--workspace"], show: ["--id", "--workspace"],
     list: ["--workspace"], check: ["--id", "--file", "--workspace"], diff: ["--id", "--from", "--to", "--workspace"],
     review: ["--id", "--review-id", "--workspace"],
     revise: ["--id", "--message", "--review-id", "--workspace"], requirements: ["--id", "--workspace"], trace: ["--id", "--requirement", "--revision", "--workspace"],
-    chat: ["--id", "--planner", "--runner", "--workspace", "--planner-model", "--task-model", "--timeout-ms"],
+    chat: ["--id", "--planner", "--runner", "--workspace", "--planner-model", "--task-model"],
     export: ["--id", "--file", "--workspace"], replace: ["--id", "--file", "--workspace"],
     approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace"],
     help: [],
@@ -278,6 +279,7 @@ function parse(args: string[]): Command {
       if (key === "--full") full = true; else json = true;
       continue;
     }
+    if (key === "--timeout-ms") throw new Error("--timeout-ms 已废弃：任务没有执行总时限，连续 60 秒无输出会提示；按 Ctrl+C 可取消");
     if (!allowed.includes(key)) throw new Error("不支持的参数：" + key);
     const value = options[index + 1];
     if (!value || value.startsWith("--")) throw new Error(key + " 后需要提供值");
@@ -300,17 +302,11 @@ function parse(args: string[]): Command {
     if (!["mock", "claude-code"].includes(values.get("--runner")!)) throw new Error("--runner 只能是 mock 或 claude-code");
     if (values.has("--task-model") && values.get("--runner") !== "claude-code") throw new Error("--task-model 只适用于 claude-code Runner");
     if (mockClarify && values.get("--planner") !== "mock") throw new Error("--mock-clarify 只适用于 mock Planner");
-    const timeout = Number(values.get("--timeout-ms") ?? 180_000);
-    if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000) throw new Error("--timeout-ms 必须在 1000 到 3600000 之间");
-    values.set("--timeout-ms", String(timeout));
   }
   if (action === "chat" && !values.has("--id")) {
     if (!["mock", "deepseek"].includes(values.get("--planner")!)) throw new Error("--planner 只能是 mock 或 deepseek");
     if (!["mock", "claude-code"].includes(values.get("--runner")!)) throw new Error("--runner 只能是 mock 或 claude-code");
     if (values.has("--task-model") && values.get("--runner") !== "claude-code") throw new Error("--task-model 只适用于 claude-code Runner");
-    const timeout = Number(values.get("--timeout-ms") ?? 180_000);
-    if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000) throw new Error("--timeout-ms 必须在 1000 到 3600000 之间");
-    values.set("--timeout-ms", String(timeout));
   }
   if (action === "approve" && Boolean(values.get("--waive-findings")) !== Boolean(values.get("--waiver-reason"))) throw new Error("--waive-findings 和 --waiver-reason 必须同时提供");
   if (action === "approve") {
@@ -322,11 +318,6 @@ function parse(args: string[]): Command {
     for (const flag of ["--from", "--to"]) if (values.has(flag) && (!Number.isSafeInteger(Number(values.get(flag))) || Number(values.get(flag)) < 1)) throw new Error(flag + " 必须是正整数");
   }
   if (action === "trace" && values.has("--revision") && (!Number.isSafeInteger(Number(values.get("--revision"))) || Number(values.get("--revision")) < 1)) throw new Error("--revision 必须是正整数");
-  if (action === "chat" && values.has("--timeout-ms")) {
-    const timeout = Number(values.get("--timeout-ms"));
-    if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000) throw new Error("--timeout-ms 必须在 1000 到 3600000 之间");
-    values.set("--timeout-ms", String(timeout));
-  }
   return { action, values, acceptEdits, mockClarify, full, json };
 }
 
@@ -503,6 +494,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
         if (visible) chatIO.output.write(visible);
         else if (output.stream === "stderr" && output.text) console.error(output.text);
       },
+      onIdleState: (taskId, state) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`),
     }), chatAbort.signal);
     console.log(formatPlanner(result));
     if (result.snapshot.execution) {
@@ -629,7 +621,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
         const taskModel = get("--task-model");
         const result = await cancellable((signal) => startPlannerConversation({
           workspace, request: line, config,
-          executionDefaults: { runnerId, mode: "non_interactive", timeoutMs: Number(get("--timeout-ms") ?? 180_000), ...(taskModel ? { modelId: taskModel } : {}) },
+          executionDefaults: { runnerId, mode: "non_interactive", ...(taskModel ? { modelId: taskModel } : {}) },
           ...(provider === "mock" ? { planner: new MockPlanner() } : {}), signal,
         }), chatAbort.signal);
         planningId = result.snapshot.planningId;
@@ -654,7 +646,14 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       const [name, ...args] = line.slice(1).split(/\s+/);
       try {
         if (name === "exit" || name === "quit") break;
-        if (name === "help") console.log("输入自然语言继续规划；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run /status /resume /retry <taskId> /exit");
+        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run /status /resume /retry <taskId> /exit");
+        else if (name === "confirm" || name === "delegate" || name === "reject" || name === "revoke") {
+          if (!args.length) throw new Error(`用法：/${name} ${name === "confirm" ? "all|编号[,编号]" : name === "revoke" ? "all|decisionId[,decisionId]" : "编号[,编号]"}`);
+          const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: `/${name} ${args.join(" ")}`, signal }), chatAbort.signal);
+          console.log(formatPlanner(result));
+          await printDraftUpdate(result, workspace);
+          if (result.error) console.error(result.error);
+        }
         else if (name === "status") {
           const loaded = await loadPlannerConversation(planningId, workspace);
           console.log(formatPlanner(loaded));
@@ -681,7 +680,12 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
             console.log(formatPlanner(result));
             await printDraftUpdate(result, workspace);
           } else if (args.length) throw new Error("用法：/requirements [refresh]");
-          printRequirements((await new PlannerStore(workspace).load(planningId)).requirements);
+          const requirementsSnapshot = await new PlannerStore(workspace).load(planningId);
+          printRequirements(requirementsSnapshot.requirements);
+          if (requirementsSnapshot.planningAssessment) {
+            console.log("规划决策：");
+            for (const decision of requirementsSnapshot.planningAssessment.decisions) console.log(`  ${decision.decisionId} [${decision.status}]：${decision.value}`);
+          }
         } else if (name === "trace") {
           if (!args[0] || args.length > 2 || (args[1] !== undefined && (!Number.isSafeInteger(Number(args[1])) || Number(args[1]) < 1))) throw new Error("用法：/trace <requirementId> [revision]");
           printRequirementTrace(traceRequirement(await new PlannerStore(workspace).load(planningId), args[0], args[1] === undefined ? undefined : Number(args[1])));
@@ -720,7 +724,8 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           if (!snapshot.execution) throw new Error("规划还没有执行 Session");
           const sessionId = snapshot.execution.sessionId;
           const operation = { sessionId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
-            onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write(visible); } };
+            onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write(visible); },
+            onIdleState: (taskId: string, state: { idle: boolean }) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`) };
           const result = await cancellable((signal) => name === "retry"
             ? retrySession({ ...operation, taskId: args[0] ?? "", signal })
             : resumeSession({ ...operation, signal }), chatAbort.signal);

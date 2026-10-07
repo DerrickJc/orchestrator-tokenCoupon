@@ -32,7 +32,7 @@ export function checkPlan(value: unknown, executionDefaults?: ExecutionConfig): 
     if (executionDefaults) {
       for (const [index, entry] of plan.tasks.entries()) {
         if (!sameExecution(entry.task.execution, executionDefaults)) {
-          throw new InputValidationError(`plan.tasks[${index}].task.execution`, `任务 ${entry.task.id} 必须使用本次指定的 Runner、模型、模式和超时`);
+          throw new InputValidationError(`plan.tasks[${index}].task.execution`, `任务 ${entry.task.id} 必须使用本次指定的 Runner、模型和模式`);
         }
       }
     }
@@ -50,5 +50,5 @@ export function checkPlan(value: unknown, executionDefaults?: ExecutionConfig): 
 }
 
 function sameExecution(left: ExecutionConfig, right: ExecutionConfig): boolean {
-  return left.runnerId === right.runnerId && left.mode === right.mode && left.timeoutMs === right.timeoutMs && left.modelId === right.modelId;
+  return left.runnerId === right.runnerId && left.mode === right.mode && left.modelId === right.modelId;
 }

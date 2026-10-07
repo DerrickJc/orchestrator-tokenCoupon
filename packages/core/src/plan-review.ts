@@ -9,6 +9,8 @@ import { createHistoryReader, effectiveRequirements, requireReconciledRequiremen
 import { diffPlans } from "./plan-diff.js";
 import { SessionStore } from "./session-store.js";
 import { InputValidationError } from "./validation.js";
+import { assertPlanningReady } from "./planning-readiness.js";
+import { validateReviewReply } from "./review-reply.js";
 
 const REVIEW_TIMEOUT_MS = 120_000;
 const API_REQUEST_LIMIT = 8;
@@ -35,6 +37,7 @@ export async function reviewPlannerDraft(options: {
     if (snapshot.execution) throw new Error("已关联执行 Session 的规划只允许查看历史审查");
     if (snapshot.draftRevision === null || !["draft_ready", "approved"].includes(snapshot.status)) throw new Error("当前没有可审查的计划草案");
     const draft = await plannerStore.loadDraft(options.planningId, snapshot.draftRevision);
+    assertPlanningReady(snapshot.planningAssessment, draft.plan);
     const requirements = requireReconciledRequirements(snapshot);
 
     const existingEvidenceChanges = await verifyRepositoryEvidence(plannerStore.workspace, draft.context, options.signal);
@@ -53,6 +56,7 @@ export async function reviewPlannerDraft(options: {
     const input: PlanReviewInput = {
       requirements: effectiveRequirements(requirements).map(({ text }) => text),
       requirementItems: effectiveRequirements(requirements),
+      ...(snapshot.planningAssessment ? { planningAssessment: snapshot.planningAssessment } : {}),
       plan: draft.plan, executionDefaults: snapshot.executionDefaults,
       ...(previousReview ? { previousReview, planChanges: diffPlans((await plannerStore.loadDraft(options.planningId, previousReview.draftRevision)).plan, draft.plan) } : {}),
     };
@@ -62,7 +66,7 @@ export async function reviewPlannerDraft(options: {
     const startedAt = new Date().toISOString();
     const record: PlanReviewRecord = {
       schemaVersion: 1, planningId: options.planningId, reviewId, status: "running", draftRevision: draft.draftRevision,
-      planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(snapshot.config),
+      planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment),
       context: draft.context, findings: [], summary: "审查进行中", reportHash: null, reasonCode: null, createdAt: startedAt, finishedAt: null,
       ...(previousReview ? { previousReviewId: previousReview.reviewId } : {}), resolutions: [],
     };
@@ -75,6 +79,7 @@ export async function reviewPlannerDraft(options: {
       signal: timed.signal,
       repository: reader,
       readHistory: createHistoryReader(snapshot),
+      validateReviewReply: (value) => validateReviewReply(value, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview),
       consumeApiRequest: () => {
         counters.requests += 1;
         if (counters.requests > API_REQUEST_LIMIT) throw new Error("本轮审查 API 请求超过 8 次");
@@ -164,17 +169,24 @@ export async function loadCurrentPlanReview(planningId: string, workspace: strin
     new ReviewStore(workspace).load(planningId, snapshot.latestReviewId),
   ]);
   if (record.status !== "succeeded" || record.draftRevision !== draft.draftRevision || record.planHash !== draft.planHash ||
-      record.requirementsHash !== requirementsHash(snapshot) || record.reviewerConfigHash !== reviewerConfigHash(snapshot.config)) return undefined;
+      record.requirementsHash !== requirementsHash(snapshot) || record.reviewerConfigHash !== reviewerConfigHash(snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment)) return undefined;
   const changed = await verifyRepositoryEvidence(workspace, record.context);
   return changed.length ? undefined : record;
 }
 
 export function requirementsHash(snapshot: PlannerConversationSnapshot): string {
-  return canonicalHash(effectiveRequirements(requireReconciledRequirements(snapshot)));
+  const requirements = effectiveRequirements(requireReconciledRequirements(snapshot));
+  if (!snapshot.planningAssessment) return canonicalHash(requirements);
+  const decisions = snapshot.planningAssessment ? {
+    profile: snapshot.planningAssessment.profile,
+    decisions: [...snapshot.planningAssessment.decisions].sort((a, b) => a.decisionId.localeCompare(b.decisionId)),
+  } : null;
+  return canonicalHash({ requirements, planningAssessment: decisions });
 }
 
-export function reviewerConfigHash(config: PlannerConfig): string {
-  return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion: 2 });
+export function reviewerConfigHash(config: PlannerConfig, planSchemaVersion: 1 | 2 = 1, hasStructuredAssessment = true): string {
+  const reviewPromptVersion = planSchemaVersion === 2 ? 4 : hasStructuredAssessment ? 3 : 2;
+  return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion });
 }
 
 function parseReviewReply(value: unknown, knownTaskIds: string[], knownRequirementIds: string[], previous?: PlanReviewRecord): { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] } {

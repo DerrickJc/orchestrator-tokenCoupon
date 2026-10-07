@@ -4,7 +4,8 @@ export interface ExecutionConfig {
   runnerId: string;
   modelId?: string;
   mode: ExecutionMode;
-  timeoutMs: number;
+  /** Deprecated historical field. It is preserved in old plans but never limits an Attempt. */
+  timeoutMs?: number;
 }
 
 export interface TaskDefinition {

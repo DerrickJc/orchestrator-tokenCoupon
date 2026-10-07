@@ -34,6 +34,8 @@ export interface RunnerContext {
   signal: AbortSignal;
   onStarted: () => void;
   onOutput: (output: RunnerOutput) => void;
+  /** Raw process activity, called before adapters parse or filter chunks. */
+  onActivity?: () => void;
 }
 
 export interface Runner {

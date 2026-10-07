@@ -16,6 +16,8 @@ export interface AttemptRecord {
   cwd: string;
   runnerId: string;
   execution: ExecutionConfig;
+  /** Policy actually used by this new Attempt; legacy timeoutMs is informational only. */
+  executionPolicy?: { mode: "idle_notice"; idleAfterMs: number };
   completionToken: string;
   createdAt: string;
   startedAt: string | null;
@@ -28,4 +30,7 @@ export interface AttemptRecord {
   artifactDir: string;
   inputBytes: number;
   outputBytes: number;
+  /** Persisted when the idle state changes; ordinary output does not rewrite the snapshot. */
+  lastActivityAt?: string;
+  idleSince?: string;
 }

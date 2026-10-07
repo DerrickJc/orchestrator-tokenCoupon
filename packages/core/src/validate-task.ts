@@ -24,10 +24,11 @@ export function parseTask(value: unknown, path = "task"): TaskDefinition {
   }
 
   const modelId = expectOptionalNonEmptyString(execution, "modelId", `${path}.execution`);
+  const legacyTimeout = execution.timeoutMs === undefined ? undefined : expectPositiveInteger(execution.timeoutMs, `${path}.execution.timeoutMs`);
   const executionConfig: ExecutionConfig = {
     runnerId: expectNonEmptyString(execution.runnerId, `${path}.execution.runnerId`),
     mode: "non_interactive",
-    timeoutMs: expectPositiveInteger(execution.timeoutMs, `${path}.execution.timeoutMs`),
+    ...(legacyTimeout === undefined ? {} : { timeoutMs: legacyTimeout }),
     ...(modelId === undefined ? {} : { modelId }),
   };
 

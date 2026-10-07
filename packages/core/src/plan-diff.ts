@@ -15,6 +15,13 @@ export function diffPlans(beforeValue: unknown, afterValue: unknown): PlanChange
   const changes: PlanChange[] = [];
   if (before.id !== after.id) changes.push({ kind: "plan", field: "id", before: before.id, after: after.id });
   if (before.title !== after.title) changes.push({ kind: "plan", field: "title", before: before.title, after: after.title });
+  const oldDecisions = new Map(before.decisionContext?.decisions.map((item) => [item.decisionId, item]));
+  const newDecisions = new Map(after.decisionContext?.decisions.map((item) => [item.decisionId, item]));
+  for (const id of [...new Set([...oldDecisions.keys(), ...newDecisions.keys()])].sort()) {
+    const oldValue = oldDecisions.get(id);
+    const newValue = newDecisions.get(id);
+    if (stable(oldValue) !== stable(newValue)) changes.push({ kind: "plan", field: `decision:${id}`, before: oldValue && { value: oldValue.value, status: oldValue.status, revision: oldValue.revision }, after: newValue && { value: newValue.value, status: newValue.status, revision: newValue.revision } });
+  }
 
   const oldTasks = new Map(before.tasks.map((entry) => [entry.task.id, entry]));
   const newTasks = new Map(after.tasks.map((entry) => [entry.task.id, entry]));

@@ -40,6 +40,8 @@ node --env-file="$HOME/.config/token-coupon/planner.env" \
 
 自然语言输入可继续补充需求。修改草案后必须重新 `/review`、`/approve`；审查有 error 时需修订或明确豁免并记录原因。`/run` 执行当前批准的计划，重复调用复用原 Session。
 
+任务执行没有总时限。运行期间连续 60 秒没有进程输出时会显示一次 idle 提示；这只是活动状态提醒，不代表失败，也不会自动停止任务。新 Attempt 会记录 `executionPolicy: idle_notice`。旧 plan/task 中的 `timeoutMs` 作为历史字段保留但不再生效；新建任务不需要配置 timeout。用户仍可用 Ctrl+C 取消，退出码、完成标记和执行记录仍共同决定结果。
+
 `chat` 在启动后收集需求，不传 `--request`，且需要交互终端。Claude Code 使用自身的认证与模型配置；`--accept-edits` 设置其文件编辑权限模式，测试命令仍受其权限策略控制。只验证规划和审查时，将 `--runner claude-code` 改为 `--runner mock` 并去掉 `--accept-edits`；Mock 不生成业务文件。
 
 ### 修改草案
@@ -160,7 +162,15 @@ Conversation 仍是 schemaVersion 1；`latestReviewId` 和 `requirements` 为可
 
 [revisePlannerDraft](../packages/core/src/planner-conversation.ts) 在规划锁内确认当前有效报告，随后把完整 findings、报告身份及适用状态传给 Planner。普通修订对话也携带最近成功报告，过期报告明确标为参考。`/revise` 的输入被程序标记为操作；新的业务约束应通过普通对话提出。
 
-[reviewPlannerDraft](../packages/core/src/plan-review.ts) 将上一轮报告和 `diffPlans` 结果一起提供给复审模型。每个旧问题必须提交 resolved/unresolved 及依据；unresolved 必须在本轮 findings 中通过 priorFindingId 继续报告。程序分配稳定 issueId，并验证旧问题处理记录完整且与 findings 一致。F1/F2 仍是本报告编号，用于原有批准/豁免接口；跨轮追踪使用 issueId。报告哈希覆盖问题、解决记录和上一轮报告引用。模型可以发现新问题，这些记录不构成正确性证明。
+[reviewPlannerDraft](../packages/core/src/plan-review.ts) 将上一轮报告和 `diffPlans` 结果一起提供给复审模型。每个旧问题必须提交 resolved/unresolved 及依据；unresolved 必须在本轮 findings 中通过 priorFindingId 继续报告。程序分配稳定 issueId，并验证旧问题处理记录完整且与 findings 一致。若模型漏项或输出不一致，[review-reply.ts](../packages/core/src/review-reply.ts) 返回具体诊断，例如“遗漏：F4”；`DeepSeekPlanner.review` 在同一个 reviewId 和预算内最多修正两次，不再开放只读工具，也不重新扩大审查。只有完整候选通过校验后才绑定 issueId 并保存成功报告。F1/F2 仍是本报告编号，用于原有批准/豁免接口；跨轮追踪使用 issueId。报告哈希覆盖问题、解决记录和上一轮报告引用。模型可以发现新问题，这些记录不构成正确性证明。
+
+## 关键实施决策与澄清门禁
+
+[planning-readiness.ts](../packages/core/src/planning-readiness.ts) 定义规划类型及其必需决策清单。`backend_crud` 需要记录语言/运行时、Web 框架、数据库、文档深度、测试方式和业务规则；纯文档、脚本、既有项目变更分别有适用清单，简单通用任务可归入 `general`。Planner 的 `planningAssessment` 为每项记录具体值、状态、理由和依据。
+
+`confirmed` 必须指向有效需求和真实用户原文，`repository` 必须指向本轮读取且哈希匹配的文件，`defaulted` 必须有用户明确授权，`pending` 必须带待回答的问题。core 校验这些来源并要求每个必需项都存在；必需决策会同步到版本化 Requirements，使用 `R-decision-<decisionId>` 稳定 ID。仍待确认的版本显示为 pending，用户回答后同一 ID 会更新为 active，同时保留旧版本。必需决策仍 pending 时只能进入 collecting 澄清状态，不能保存可执行草案。`assertPlanningReady` 还会检查草案是否包含已经确认的具体选择。
+
+门禁不只在首次生成时运行。手工草案导入、复审、批准和启动执行也会检查决策记录，避免通过 `/edit` 跳过澄清。新对话无需运行 `/requirements refresh`；用户回答后沿用同一需求与决策身份更新状态。它能拦截缺少结构记录、来源无效或决策未就绪的情形，但“这项选择是否真的影响实现”仍由模型判断，需在 `/requirements`、`/review` 中核对。
 
 ## 常驻 CLI 与编辑流程
 
@@ -210,6 +220,10 @@ npm run typecheck
 npm test
 npm run demo:phase3.5
 npm run demo:phase3.5-bugfix
+npm run demo:phase3.5-bugfix-2
+npm run demo:phase3.5-bugfix-3
+npm run demo:phase3.5-bugfix-4
+npm run demo:phase3.5-bugfix-5
 ```
 
 演示脚本 [phase3.5-demo.mjs](../scripts/phase3.5-demo.mjs) 使用 Mock Planner、Mock Reviewer 和进程内确定性 Runner。每次运行在 `demo-workspace/phase3.5/run-<时间>/` 建立独立工作区及 `demo-report.json`，不会清理之前的演示。报告包括初次问题、当前审查、批准和 Session 的 ID/状态；完整 review 与 session 文件可在 `.token-coupon/` 下检查。这个演示验证应用内状态流转，不代表真实 DeepSeek 审查，也没有调用 Claude Code。
@@ -219,6 +233,22 @@ npm run demo:phase3.5-bugfix
 Bugfix 演示覆盖需求替换与来源追溯、噪声排除、注入技术/依赖冲突、携带报告修订、逐项复审和批准，以及 CLI 的 requirements/trace。产物位于 `demo-workspace/phase3.5-bugfix/<mock或real>-<时间>/.token-coupon/bugfix-report.json`。真实模型模式为 `node --env-file="$HOME/.config/token-coupon/planner.env" scripts/phase3.5-bugfix-demo.mjs --real`，需要凭证；该演示不执行业务 Runner，也不自动豁免 error。
 
 2026-10-05 Bugfix 验收：类型检查通过，最终全量回归 7 个文件、63 项测试通过；离线与真实 DeepSeek 演示各 7 项检查通过。真实演示发现注入的 2 个 error，报告驱动修订后复审逐项 resolved，批准成功；成功报告在 `demo-workspace/phase3.5-bugfix/real-2026-10-05T15-40-18.987Z/.token-coupon/bugfix-report.json`。
+
+Bugfix 2 离线演示 [phase3.5-bugfix-2-demo.mjs](../scripts/phase3.5-bugfix-2-demo.mjs) 用本地假 Runner 和假 API 响应覆盖三项变更：低于实际运行耗时的历史 timeout 不再停止 Attempt；排课 CRUD 的六项关键决策未确认时不发布草案；复审遗漏 F4 时同轮补齐 resolutions 且保留 issueId。运行 `npm run demo:phase3.5-bugfix-2`，产物写入 `demo-workspace/phase3.5-bugfix-2/offline-<时间>/bugfix-2-demo-report.json`。2026-10-06 类型检查通过，全量测试 8 个文件、80 项通过，三项离线检查全部通过；未发起真实模型调用。成功报告位于 `demo-workspace/phase3.5-bugfix-2/offline-2026-10-06T06-02-07.186Z/bugfix-2-demo-report.json`。
+
+Bugfix 3 离线演示 [phase3.5-bugfix-3-demo.mjs](../scripts/phase3.5-bugfix-3-demo.mjs) 回归委托表达、默认提案上下文确认与有限 JSON 修正。运行 `npm run demo:phase3.5-bugfix-3`，报告位于 `demo-workspace/phase3.5-bugfix-3/offline-<时间>/bugfix-3-demo-report.json`。
+
+Bugfix 4 将用户看到的问题、决策值及回答动作绑定为版本化确认记录。CLI 可使用 `/confirm all|编号[,编号]` 接受具体提案、`/delegate all|编号[,编号]` 委托对应选择、`/reject all|编号[,编号]` 拒绝提案；自然语言编号答复也会按当前提案的回答模式解析。对 `provide_value` 问题，用户可给出取值，也可明确说“授权由你决定”；这会成为限定在该问题决策范围内的委托。计划生成前可用 `/revoke all|decisionId[,decisionId]` 撤回已接受或已委托的决策，相关约束重新变为 pending，原批准随之失效。接受某些问题后，未回答项仍保持 pending，Planner 只应询问剩余事项。`Plan v2` 将所选值放入 `decisionContext`，每个任务通过 `decisionRefs` 引用它们；Runner 实际 prompt 会包含这些约束及可追溯偏好。v2 本地校验检查决策 ID、版本和哈希，Reviewer 再检查任务正文的语义是否符合选择，因此正文可自然改写，但不能与 SQLite、框架或业务规则冲突。尚无结构化决策记录的旧 v1 保留原审查提示和需求哈希版本；已有结构化决策的 v1 延续当前 v1 版本，v2 使用新的审查提示与哈希版本。
+
+运行离线闭环：`npm run demo:phase3.5-bugfix-4`。演示先用 `/confirm 1` 接受技术提案，再按当前剩余问题编号委托业务与文档选择；随后检查确认快照、Plan v2 的完整引用、正文改写、Session 和每个 Runner prompt 中的决策约束。报告在 `demo-workspace/phase3.5-bugfix-4/offline-<时间>/bugfix-4-demo-report.json`，对话、计划和 Attempt 记录在该演示工作区的 `.token-coupon/` 下。配置 Planner 凭证后可运行 `node --env-file="$HOME/.config/token-coupon/planner.env" scripts/phase3.5-bugfix-4-demo.mjs --real`，在独立 workspace 验证真实模型的澄清及编号确认；真实模式只生成草案，不运行用户业务任务。
+
+2026-10-07 验收：类型检查通过，全量回归 11 个文件、130 项测试通过；Bugfix 2、3、4 离线演示均通过。真实 `deepseek-flash` 冒烟取得 2 个结构化问题，用户按编号委托后生成 Plan v2 的 draft-1；没有批准或启动 Runner。离线报告位于 `demo-workspace/phase3.5-bugfix-4/offline-2026-10-07T03-43-22.983Z/bugfix-4-demo-report.json`，真实报告位于 `demo-workspace/phase3.5-bugfix-4/real-2026-10-07T03-42-13.844Z/bugfix-4-demo-report.json`。
+
+Bugfix 5 修复草案修订时的决策镜像与内部字段衔接。模型生成和修订均输出 Plan v1 的任务结构；应用基于有效决策生成 Plan v2 的上下文、版本、哈希和任务引用。修订响应即使沿用 v2、遗漏上下文或复制旧哈希，也会先提取任务结构，再重建内部字段；未知字段、非法依赖和 Runner 不匹配仍会拒绝。用户手动导入 v2 的哈希和引用仍须完整有效。`R-decision-*` 在来源校验前同步，引用的消息必须是真实且已分类的业务输入；操作、噪声和未采用的失败输入不能借此变为有效约束。
+
+运行 `npm run demo:phase3.5-bugfix-5` 重放 `phase3.5-new4` 最近失败轮次中的三份响应，覆盖修订、复审、批准、模拟 Runner 执行和持久化。真实修订与复审使用 `node --env-file="$HOME/.config/token-coupon/planner.env" scripts/phase3.5-bugfix-5-demo.mjs --real`。两种模式均使用独立副本，报告位于 `demo-workspace/phase3.5-bugfix-5/<offline或real>-<时间>/bugfix-5-demo-report.json`；Runner 始终为模拟，不执行排课业务项目。已有失败轮次可使用 `planner retry --id <planningId> --workspace <原工作区>` 重试，无需重复输入需求，也不会重复追加原始用户消息。原错误和失败轮次仍保留用于追溯。
+
+2026-10-07 Bugfix 5 验收：类型检查通过，全量回归 12 个文件、143 项测试通过；Phase 3.5 及 Bugfix 1—4 离线演示通过。历史三份失败响应均以 2 次假 API 调用、2 次只读工具查询、0 次自动修正生成 draft-3；真实 DeepSeek 修订亦为 2 次 API 调用、0 次修正，复审逐项回应上轮三项问题，保留一项 warning 与一项 info，无 error。真实副本的 6 个任务通过模拟 Runner 完成状态流转；未调用真实 Claude Code 或 MySQL。报告位于 `demo-workspace/phase3.5-bugfix-5/real-2026-10-07T04-20-55.563Z/bugfix-5-demo-report.json`。
 
 ## 真实规划与审查调用测试
 

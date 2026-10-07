@@ -151,8 +151,10 @@ function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, 
     const attempts = task.attempts.map((attempt, attemptIndex) => {
       if (!attempt || typeof attempt !== "object" || Array.isArray(attempt)) throw new Error(`Session tasks[${index}].attempts[${attemptIndex}] 无效`);
       const ref = attempt as Record<string, unknown>;
-      if (typeof ref.attemptId !== "string" || !UUID.test(ref.attemptId) || ref.artifactDir !== join(workspace, ".token-coupon", "runs", ref.attemptId) || !["pending", "recorded", "record_missing"].includes(String(ref.outcome))) throw new Error(`Session tasks[${index}].attempts[${attemptIndex}] 引用无效`);
-      return { attemptId: ref.attemptId, artifactDir: ref.artifactDir as string, outcome: ref.outcome as "pending" | "recorded" | "record_missing" };
+      if (typeof ref.attemptId !== "string" || !UUID.test(ref.attemptId) || ref.artifactDir !== join(workspace, ".token-coupon", "runs", ref.attemptId) || !["pending", "recorded", "record_missing"].includes(String(ref.outcome)) ||
+          (ref.lastActivityAt !== undefined && typeof ref.lastActivityAt !== "string") || (ref.idleSince !== undefined && typeof ref.idleSince !== "string")) throw new Error(`Session tasks[${index}].attempts[${attemptIndex}] 引用无效`);
+      return { attemptId: ref.attemptId, artifactDir: ref.artifactDir as string, outcome: ref.outcome as "pending" | "recorded" | "record_missing",
+        ...(ref.lastActivityAt === undefined ? {} : { lastActivityAt: ref.lastActivityAt }), ...(ref.idleSince === undefined ? {} : { idleSince: ref.idleSince }) };
     });
     if (new Set(attempts.map((attempt) => attempt.attemptId)).size !== attempts.length) throw new Error(`Session tasks[${index}] 存在重复 Attempt`);
     let result: SessionTaskState["result"] = null;

@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -154,6 +155,7 @@ describe("Planner conversation and approval", () => {
     const reader = new RepositoryReader(root);
     const evidence = JSON.parse(await reader.invoke("repo_read", { path: "README.md" })) as { sha256: string };
     const draftPlan = plan();
+    const sourceMessageId = randomUUID();
     const draft = {
       schemaVersion: 1 as const, planningId: "56f207ed-6dbf-4ac3-8aee-8bd0f86b3bc6", draftRevision: 1,
       plan: draftPlan, message: "Review.", source: "model" as const,
@@ -162,13 +164,19 @@ describe("Planner conversation and approval", () => {
     };
     const initial = {
       schemaVersion: 1 as const, planningId: draft.planningId, workspace: root, revision: 1, status: "draft_ready" as const,
-      config, executionDefaults: execution(), messages: [], turns: [], context: draft.context,
-      requirements: { revision: 0, items: [], messageDecisions: [] },
+      config, executionDefaults: execution(), messages: [{ messageId: sourceMessageId, role: "user", content: "Implement a greeting" }], turns: [], context: draft.context,
+      requirements: {
+        revision: 1,
+        items: [{ requirementId: "R-greeting", revision: 1, text: "Implement a greeting", status: "active", sourceMessageIds: [sourceMessageId] }],
+        messageDecisions: [{ messageId: sourceMessageId, kind: "requirement", reason: "Test fixture requirement" }],
+      },
+      planningAssessment: { profile: "general", classification: { rationale: "Simple greeting request", sourceMessageId, quote: "Implement a greeting" }, decisions: [] },
       activeTurnId: null, draftRevision: 1, approval: null, execution: null,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     const store = new PlannerStore(root);
     await store.create(initial);
+    await store.writeRequirements(draft.planningId, initial.requirements);
     await store.writeDraft(draft);
 
     const changedPlan = plan("Implement a greeting with an explicit empty-name behavior.");

@@ -1,4 +1,6 @@
 export type { PlanDefinition, PlannedTask } from "./plan.js";
+export type { DecisionReference, PlanDecisionContext, SelectedDecision } from "./plan.js";
+export { decisionValueHash } from "./plan.js";
 export type { ExecutionConfig, ExecutionMode, TaskDefinition } from "./task.js";
 export { parsePlan } from "./validate-plan.js";
 export { checkPlan } from "./plan-check.js";
@@ -11,7 +13,7 @@ export type { AttemptRecord, AttemptStatus } from "./attempt.js";
 export type { Runner, RunnerInput, RunnerOutput, RunnerContext, ProcessResult } from "./runner.js";
 export { CompletionMarkerDetector, createCompletionProtocol } from "./completion-marker.js";
 export { determineVerdict } from "./verdict.js";
-export { executeTask } from "./execute-task.js";
+export { executeTask, IDLE_NOTICE_AFTER_MS } from "./execute-task.js";
 export { MockRunner } from "./runners/mock-runner.js";
 export { ClaudeCodeRunner } from "./runners/claude-runner.js";
 export type { SessionSnapshot, SessionStatus, SessionTaskStatus, SessionTaskState, TaskResult } from "./session-types.js";
@@ -26,11 +28,15 @@ export { reviewPlannerDraft, loadCurrentPlanReview, createPlanReviewer, requirem
 export { MockPlanner, MockPlanReviewer } from "./planners/mock-planner.js";
 export { DeepSeekPlanner, PlannerApiError } from "./planners/deepseek-planner.js";
 export { effectiveRequirements, traceRequirement } from "./requirements.js";
+export { assertPlanningReady, hasPendingPlanningDecisions, parsePlanningAssessment, REQUIRED_DECISIONS, syncPlanningDecisionRequirements, validatePlanningAssessment } from "./planning-readiness.js";
+export { applyCommittedConfirmations, makeConfirmationProposal, parseConfirmationInput, validateConfirmationState } from "./confirmation.js";
 export type {
   ConversationMessage, ExecutionReference, PlanApproval, Planner, PlannerConfig, PlannerContext, PlannerConversationSnapshot,
   PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, PlannerTurnStatus, PlanReviewFinding,
   PlanReviewInput, PlanReviewRecord, PlanReviewSeverity, PlanReviewCategory, PlanReviewStatus, PlanReviewer, RepositoryEvidence,
   Requirement, RequirementsState, RequirementsUpdate, MessageKind, ReviewResolution,
+  PlanningAssessment, PlanningDecision, PlanningDecisionId, PlanningDecisionStatus, PlanningProfile,
+  ConfirmationAnswerMode, ConfirmationEvent, ConfirmationProposalSet, ConfirmationQuestion, ConfirmationState,
 } from "./planner-types.js";
 export {
   approvePlannerDraft, createPlanner, formatPlanner, loadPlannerConversation, replacePlannerDraft,
