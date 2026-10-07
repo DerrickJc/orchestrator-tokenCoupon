@@ -20,6 +20,67 @@ export interface RequirementsState {
   items: Requirement[];
   messageDecisions: RequirementsUpdate["messageDecisions"];
 }
+export type PlanningProfile = "backend_crud" | "documentation" | "script" | "existing_project" | "general";
+export type PlanningDecisionStatus = "confirmed" | "repository" | "defaulted" | "pending";
+export type PlanningDecisionId = "language_runtime" | "web_framework" | "database" | "documentation" | "testing" | "business_rules" |
+  "document_scope" | "audience" | "source_of_truth" | "acceptance" | "inputs_outputs" | "side_effects" |
+  "change_scope" | "compatibility" | "validation" | "scope";
+export interface PlanningDecision {
+  decisionId: PlanningDecisionId;
+  value: string;
+  status: PlanningDecisionStatus;
+  rationale: string;
+  requirementId?: string;
+  sourceMessageId?: string;
+  quote?: string;
+  evidence?: { path: string; sha256: string };
+  authorizationQuote?: string;
+  question?: string;
+}
+export interface PlanningAssessment {
+  profile: PlanningProfile;
+  classification: { rationale: string; sourceMessageId: string; quote: string };
+  decisions: PlanningDecision[];
+}
+export type ConfirmationAnswerMode = "accept_proposal" | "delegate_choice" | "provide_value";
+export interface ConfirmationQuestion {
+  questionId: string;
+  displayIndex: number;
+  text: string;
+  decisionIds: PlanningDecisionId[];
+  answerMode: ConfirmationAnswerMode;
+}
+export interface ConfirmationProposalSet {
+  schemaVersion: 1;
+  proposalId: string;
+  revision: number;
+  hash: string;
+  sourceMessageId: string;
+  questions: ConfirmationQuestion[];
+  candidates: Array<{ decisionId: PlanningDecisionId; value: string; concrete: boolean }>;
+  createdAt: string;
+}
+export interface ConfirmationEvent {
+  schemaVersion: 1;
+  eventId: string;
+  sourceMessageId: string;
+  sourceText: string;
+  proposalId: string;
+  proposalRevision: number;
+  proposalHash: string;
+  questionId: string;
+  decisionIds: PlanningDecisionId[];
+  action: "accept" | "delegate" | "reject" | "provide_value" | "revoke";
+  quote: string;
+  preference?: string;
+  values?: Array<{ decisionId: PlanningDecisionId; value: string }>;
+  createdAt: string;
+}
+export interface ConfirmationState {
+  schemaVersion: 1;
+  activeProposal: ConfirmationProposalSet | null;
+  events: ConfirmationEvent[];
+}
 export type PlannerTurnStatus = "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
 
 export interface PlannerConfig {
@@ -126,6 +187,10 @@ export interface PlannerConversationSnapshot {
   messages: ConversationMessage[];
   /** Missing on legacy snapshots until explicitly reconciled. */
   requirements?: RequirementsState;
+  /** Effective structured implementation decisions for the current conversation. */
+  planningAssessment?: PlanningAssessment;
+  /** Versioned question bindings and committed user confirmation events. */
+  confirmationState?: ConfirmationState;
   turns: PlannerTurnRef[];
   context: RepositoryEvidence[];
   activeTurnId: string | null;
@@ -142,8 +207,10 @@ export interface PlannerReply {
   kind: "clarification" | "draft";
   message: string;
   questions?: string[];
+  questionBindings?: Array<Omit<ConfirmationQuestion, "text"> & { text?: string }>;
   plan?: PlanDefinition;
   requirementsUpdate?: RequirementsUpdate;
+  planningAssessment?: PlanningAssessment;
 }
 
 export type PlannerEvent = { type: string; payload: Record<string, unknown> };
@@ -155,6 +222,8 @@ export interface PlannerInput {
   repairMessage?: string;
   repositoryNotice?: string;
   requirements?: RequirementsState;
+  planningAssessment?: PlanningAssessment;
+  confirmationState?: ConfirmationState;
   pendingMessages?: ConversationMessage[];
   operationMessageIds?: string[];
   reviewContext?: { review: PlanReviewRecord; current: boolean };
@@ -170,6 +239,8 @@ export interface PlannerContext {
   readHistory?: (messageIds: string[]) => Promise<string>;
   /** Pure application validation; lets adapters keep an already valid response. */
   validateReply?: (value: unknown) => PlannerReply;
+  /** Pure review validation reused by the model adapter during bounded repairs. */
+  validateReviewReply?: (value: unknown) => unknown;
 }
 
 export interface PlanReviewInput {
@@ -177,6 +248,7 @@ export interface PlanReviewInput {
   plan: PlanDefinition;
   executionDefaults: ExecutionConfig;
   requirementItems?: Requirement[];
+  planningAssessment?: PlanningAssessment;
   previousReview?: PlanReviewRecord;
   planChanges?: import("./plan-diff.js").PlanChange[];
 }

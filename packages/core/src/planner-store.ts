@@ -5,6 +5,9 @@ import { parsePlan } from "./validate-plan.js";
 import type { ExecutionConfig } from "./task.js";
 import type { PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerTurnRef, RepositoryEvidence, RequirementsState } from "./planner-types.js";
 import { validateRequirementsState } from "./requirements.js";
+import { parsePlanningAssessment, validatePlanningAssessment } from "./planning-readiness.js";
+import { validateConfirmationState } from "./confirmation.js";
+import type { ConfirmationEvent, ConfirmationProposalSet } from "./planner-types.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -38,6 +41,17 @@ export class PlannerStore {
     const raw = await readJson(join(this.directory(planningId), "conversation.json"));
     const snapshot = validateSnapshot(raw, this.workspace);
     if (snapshot.planningId !== planningId) throw new Error("Planner 记录 ID 与目录不匹配");
+    if (snapshot.confirmationState) {
+      for (const event of snapshot.confirmationState.events) {
+        const archived = await readJson(this.confirmationEventPath(planningId, event.eventId));
+        if (canonicalHash(archived) !== canonicalHash(event)) throw new Error("确认事件存档与当前确认状态不匹配");
+      }
+      const proposal = snapshot.confirmationState.activeProposal;
+      if (proposal) {
+        const archived = await readJson(this.proposalPath(planningId, proposal.proposalId, proposal.revision));
+        if (canonicalHash(archived) !== canonicalHash(proposal)) throw new Error("当前确认提案与不可变提案版本不匹配");
+      }
+    }
     if (snapshot.requirements && snapshot.requirements.revision > 0) {
       const archive = await readJson(join(this.directory(planningId), "requirements", `${snapshot.requirements.revision}.json`)) as { planningId: string; state: RequirementsState; stateHash: string };
       if (archive.planningId !== planningId || archive.stateHash !== canonicalHash(archive.state) || archive.stateHash !== canonicalHash(snapshot.requirements)) throw new Error("当前需求状态与不可变需求版本不匹配");
@@ -100,6 +114,32 @@ export class PlannerStore {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const existing = await readJson(path) as typeof value;
       if (existing.stateHash !== value.stateHash || canonicalHash(existing.state) !== value.stateHash) throw new Error("需求版本不可覆盖");
+    }
+  }
+
+  async writeConfirmationProposal(planningId: string, proposal: ConfirmationProposalSet): Promise<void> {
+    this.validateId(planningId);
+    const path = this.proposalPath(planningId, proposal.proposalId, proposal.revision);
+    await mkdir(dirname(path), { recursive: true });
+    const contents = JSON.stringify(proposal, null, 2) + "\n";
+    try { await writeFile(path, contents, { flag: "wx", mode: 0o600 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const current = await readJson(path);
+      if (canonicalHash(current) !== canonicalHash(proposal)) throw new Error("确认提案版本不可覆盖");
+    }
+  }
+
+  async writeConfirmationEvent(planningId: string, event: ConfirmationEvent): Promise<void> {
+    this.validateId(planningId); this.validateId(event.eventId);
+    const path = this.confirmationEventPath(planningId, event.eventId);
+    await mkdir(dirname(path), { recursive: true });
+    const contents = JSON.stringify(event, null, 2) + "\n";
+    try { await writeFile(path, contents, { flag: "wx", mode: 0o600 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const current = await readJson(path);
+      if (canonicalHash(current) !== canonicalHash(event)) throw new Error("确认事件不可覆盖");
     }
   }
 
@@ -194,6 +234,15 @@ export class PlannerStore {
   }
   private directory(planningId: string): string { this.validateId(planningId); return join(this.root, planningId); }
   private draftPath(planningId: string, revision: number): string { return join(this.directory(planningId), "drafts", String(revision) + ".json"); }
+  private proposalPath(planningId: string, proposalId: string, revision: number): string {
+    this.validateId(proposalId);
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("确认提案版本无效");
+    return join(this.directory(planningId), "proposals", proposalId, `${revision}.json`);
+  }
+  private confirmationEventPath(planningId: string, eventId: string): string {
+    this.validateId(eventId);
+    return join(this.directory(planningId), "confirmations", `${eventId}.json`);
+  }
   private validateId(value: string): void { if (!UUID.test(value)) throw new Error("planningId/turnId 必须是 UUID"); }
 }
 
@@ -271,6 +320,15 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
   const active = raw.activeTurnId as string | null;
   if ((active !== null) !== turns.some((turn) => turn.turnId === active && turn.status === "running")) throw new Error("Planner activeTurnId 与轮次状态不一致");
   const approval = raw.approval === null ? null : parseApproval(raw.approval);
+  const requirements = raw.requirements === undefined ? undefined : validateRequirementsState(raw.requirements, messages);
+  const confirmationState = raw.confirmationState === undefined ? undefined : validateConfirmationState(raw.confirmationState, messages);
+  let planningAssessment = raw.planningAssessment === undefined ? undefined : parsePlanningAssessment(raw.planningAssessment);
+  if (planningAssessment && requirements) {
+    planningAssessment = validatePlanningAssessment(planningAssessment, {
+      messages, requirements, evidence: context, currentMessageIds: messages.filter(({ role }) => role === "user").map(({ messageId }) => messageId),
+      ...(confirmationState ? { confirmationState } : {}),
+    });
+  }
   const latestReviewId = raw.latestReviewId === undefined || raw.latestReviewId === null ? null : raw.latestReviewId;
   if (latestReviewId !== null && !isUuid(latestReviewId)) throw new Error("Planner latestReviewId 无效");
   const execution = raw.execution === null ? null : parseExecutionReference(raw.execution);
@@ -281,7 +339,9 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
   return {
     schemaVersion: 1, planningId: raw.planningId as string, workspace, revision: raw.revision as number,
     status: raw.status as PlannerConversationSnapshot["status"], config: { provider: config.provider as "mock" | "deepseek", model: config.model as string, baseUrl: config.baseUrl as string },
-    executionDefaults, messages, ...(raw.requirements === undefined ? {} : { requirements: validateRequirementsState(raw.requirements, messages) }),
+    executionDefaults, messages, ...(requirements === undefined ? {} : { requirements }),
+    ...(planningAssessment === undefined ? {} : { planningAssessment }),
+    ...(confirmationState === undefined ? {} : { confirmationState }),
     turns, context, activeTurnId: active, draftRevision: raw.draftRevision as number | null, approval, latestReviewId, execution,
     createdAt: raw.createdAt, updatedAt: raw.updatedAt,
   };
@@ -289,11 +349,12 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
 
 function parseExecution(value: unknown): ExecutionConfig {
   const raw = object(value, "executionDefaults");
+  const timeoutMs = raw.timeoutMs;
   if (typeof raw.runnerId !== "string" || !["mock", "claude-code"].includes(raw.runnerId) || raw.mode !== "non_interactive" ||
-      !Number.isSafeInteger(raw.timeoutMs) || (raw.timeoutMs as number) < 1000 || (raw.timeoutMs as number) > 3_600_000 ||
+      (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) < 1000 || (timeoutMs as number) > 3_600_000)) ||
       (raw.modelId !== undefined && (typeof raw.modelId !== "string" || !raw.modelId || Buffer.byteLength(raw.modelId, "utf8") > 256)) ||
       (raw.runnerId === "mock" && raw.modelId !== undefined)) throw new Error("Planner executionDefaults 无效");
-  return { runnerId: raw.runnerId, mode: "non_interactive", timeoutMs: raw.timeoutMs as number, ...(raw.modelId === undefined ? {} : { modelId: raw.modelId as string }) };
+  return { runnerId: raw.runnerId, mode: "non_interactive", ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }), ...(raw.modelId === undefined ? {} : { modelId: raw.modelId as string }) };
 }
 
 function parseTurn(value: unknown, workspace: string, planningId: string): PlannerTurnRef {

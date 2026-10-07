@@ -134,7 +134,7 @@ function formatTask(task: TaskDefinition, status?: string, dependsOn?: string[])
     `  模型：${task.execution.modelId ?? "未指定"}`,
     `  模式：${task.execution.mode}`,
     ...(status === undefined ? [] : [`  状态：${status}`]),
-    `  超时：${task.execution.timeoutMs} ms`,
+    task.execution.timeoutMs === undefined ? "  执行时限：无；60 秒无输出时提示" : `  执行时限：历史 timeoutMs ${task.execution.timeoutMs}（不生效）；60 秒无输出时提示`,
   ];
 }
 
@@ -208,7 +208,8 @@ export async function runCli(args: string[]): Promise<number> {
       const cancellation = bindCancellation();
       let result: Awaited<ReturnType<typeof executeTask>>;
       try {
-        result = await executeTask({ task, cwd: command.workspace!, runner, signal: cancellation.signal, onOutput: (output) => showRunnerOutput(task.id, output) });
+        result = await executeTask({ task, cwd: command.workspace!, runner, signal: cancellation.signal, onOutput: (output) => showRunnerOutput(task.id, output),
+          onIdleState: (state) => console.error(state.idle ? `\n[${task.id}] 暂无输出，任务仍在运行。` : `\n[${task.id}] 输出已恢复。`) });
       } finally { cancellation.dispose(); }
       printAttempt(result);
       return resultExitCode(result.attempt.status);
@@ -227,7 +228,7 @@ export async function runCli(args: string[]): Promise<number> {
             const firstForTask = taskId !== currentOutputTask;
             currentOutputTask = taskId;
             showRunnerOutput(taskId, output, firstForTask);
-          } });
+          }, onIdleState: (taskId, state) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`) });
       } finally { cancellation.dispose(); }
       console.log(formatSession(result.snapshot, plan));
       return sessionExitCode(result.snapshot);
@@ -249,7 +250,7 @@ export async function runCli(args: string[]): Promise<number> {
           const firstForTask = taskId !== currentOutputTask;
           currentOutputTask = taskId;
           showRunnerOutput(taskId, output, firstForTask);
-        } };
+        }, onIdleState: (taskId: string, state: { idle: boolean }) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`) };
       result = command.action === "retry"
         ? await retrySession({ ...operation, taskId: command.taskId! })
         : await resumeSession(operation);

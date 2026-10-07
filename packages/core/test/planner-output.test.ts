@@ -24,7 +24,10 @@ function pending(body: Body): Array<{ messageId: string; content: string }> {
 }
 function draft(body: Body, kind: "requirement" | "operation" | "noise" = "requirement") {
   const sources = pending(body);
-  return { kind: "draft", message: "Prepared plan", plan: plan(), requirementsUpdate: {
+  const classificationSource = sources.at(-1)!;
+  return { kind: "draft", message: "Prepared plan", plan: plan(), planningAssessment: {
+    profile: "general", classification: { rationale: "Generic greeting change", sourceMessageId: classificationSource.messageId, quote: classificationSource.content }, decisions: [],
+  }, requirementsUpdate: {
     messageDecisions: sources.map(({ messageId }) => ({ messageId, kind, reason: "Classified current input" })),
     changes: kind === "requirement" ? [{ requirementId: "R-greet", text: "Implement greeting and tests", status: "active", sourceMessageIds: sources.map(({ messageId }) => messageId) }] : [],
   } };
@@ -46,6 +49,89 @@ async function start(root: string, planner: DeepSeekPlanner) {
 }
 
 describe("new conversation output and bounded correction", () => {
+  it("recovers the logged extra root brace without a new API request and preserves the raw response", async () => {
+    const root = await workspace();
+    let raw = "";
+    const { planner, bodies } = fake((body) => {
+      raw = JSON.stringify(draft(body)).replace(',"requirementsUpdate":', '},"requirementsUpdate":');
+      return { role: "assistant", content: raw };
+    });
+    const result = await start(root, planner);
+    expect(result.error).toBeUndefined();
+    expect(result.snapshot.status).toBe("draft_ready");
+    expect(bodies).toHaveLength(1);
+    const directory = result.snapshot.turns.at(-1)!.artifactDir;
+    const response = JSON.parse(await readFile(join(directory, "calls", "0001.response.json"), "utf8"));
+    expect(JSON.parse(response.body).choices[0].message.content).toBe(raw);
+    const turn = JSON.parse(await readFile(join(directory, "turn.json"), "utf8"));
+    expect(turn.events).toContainEqual({ type: "planner.json_repaired", payload: expect.objectContaining({ code: "premature_root_close", field: "requirementsUpdate" }) });
+    expect((await loadPlannerConversation(result.snapshot.planningId, root)).draft!.plan).toEqual(result.draft!.plan);
+  });
+
+  it("fully validates a recovered candidate and gives a precise missing-kind repair instruction", async () => {
+    const root = await workspace();
+    const { planner, bodies } = fake((body, index) => {
+      if (index === 0) {
+        const reply = { ...draft(body), plan: plan(["missing-task"]) };
+        return { role: "assistant", content: JSON.stringify(reply).replace(',"requirementsUpdate":', '},"requirementsUpdate":') };
+      }
+      if (index === 1) { const { kind: _kind, ...reply } = draft(body); return assistant(reply); }
+      return assistant(draft(body));
+    });
+    const result = await start(root, planner);
+    expect(result.error).toBeUndefined();
+    expect(result.draft!.plan.tasks[1]!.dependsOn).toEqual(["implement"]);
+    expect(bodies).toHaveLength(3);
+    expect(bodies.slice(1).every((body) => !body.tools)).toBe(true);
+    expect(bodies[2]!.messages.some(({ content }) => content?.includes("缺少 kind 字段"))).toBe(true);
+    expect(bodies[2]!.messages.filter(({ role }) => role === "system").slice(1).every(({ content }) => !content?.includes("完整 JSON 格式示例"))).toBe(true);
+  });
+
+  it.each(["同意", "同意该默认方案", "全部由你完成模拟，技术栈和细节我暂时不关注"])("resolves and reloads pending defaults after contextual authorization: %s", async (answer) => {
+    const root = await workspace();
+    const values = { language_runtime: "Java 21", web_framework: "Spring Boot", database: "SQLite", documentation: "Markdown", testing: "JUnit", business_rules: "基础 CRUD" };
+    const { planner, bodies } = fake((body, index) => {
+      const base = draft(body);
+      const source = pending(body).at(-1)!;
+      // The second response repeats already-authorized questions; the application
+      // must request a correction in this turn rather than publish another pending state.
+      const pendingPhase = index < 2;
+      const decisions = Object.entries(values).map(([decisionId, value]) => pendingPhase
+        ? { decisionId, value, status: "pending", rationale: "待确认默认值", question: `是否授权采用${value}作为默认方案？` }
+        : { decisionId, value, status: "defaulted", rationale: "用户授权", sourceMessageId: source.messageId, authorizationQuote: source.content });
+      const planningAssessment = { profile: "backend_crud", classification: { rationale: "后端 CRUD", sourceMessageId: source.messageId, quote: source.content }, decisions };
+      if (pendingPhase) {
+        const { plan: _plan, ...reply } = base;
+        return assistant({ ...reply, kind: "clarification", questions: ["是否同意这些默认值？"], questionBindings: [{
+          questionId: "defaults", displayIndex: 1, decisionIds: Object.keys(values), answerMode: "accept_proposal",
+        }], planningAssessment });
+      }
+      const adopted = plan();
+      adopted.tasks[0]!.task.prompt = Object.values(values).join("；");
+      return assistant({ ...base, plan: adopted, planningAssessment });
+    });
+    const initial = await start(root, planner);
+    expect(initial.error).toBeUndefined();
+    expect(initial.snapshot.status).toBe("collecting");
+    expect(formatPlanner(initial)).toContain("具体默认提案（输入‘同意该默认方案’将接受下列值）");
+    const result = await replyToPlanner({ planningId: initial.snapshot.planningId, workspace: root, message: answer, planner });
+    expect(result.error).toBeUndefined();
+    expect(result.snapshot.status).toBe("draft_ready");
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]!.tools).toBeUndefined();
+    const confirmationTurn = JSON.parse(await readFile(join(result.snapshot.turns.at(-1)!.artifactDir, "turn.json"), "utf8")) as { events: Array<{ type: string; payload: Record<string, unknown> }> };
+    expect(confirmationTurn.events.some(({ type, payload }) => type === "planner.validation_failed" &&
+      /重复询问已接受的决策|重复询问已委托的决策|已获得本轮明确委托或默认提案确认/.test(String(payload.message)))).toBe(true);
+    const loaded = await loadPlannerConversation(initial.snapshot.planningId, root);
+    expect(loaded.snapshot.planningAssessment!.decisions.every(({ status }) => status === "defaulted")).toBe(true);
+    for (const decisionId of Object.keys(values)) {
+      expect(loaded.snapshot.requirements!.items.filter(({ requirementId }) => requirementId === "R-decision-" + decisionId).map(({ status }) => status)).toEqual(["superseded", "active"]);
+    }
+    const firstSystem = bodies[1]!.messages[0]!.content!;
+    const sample = JSON.parse(/草案：([^\n]+)/.exec(firstSystem)![1]!);
+    expect(sample.planningAssessment.decisions).toEqual([]);
+  });
+
   it("accepts a valid clarification, draft and operation revision directly, preserving requirements", async () => {
     const root = await workspace();
     const { planner, bodies } = fake((body, index) => {
@@ -105,6 +191,98 @@ describe("new conversation output and bounded correction", () => {
     expect(bodies).toHaveLength(2);
     expect(bodies[1]!.tools).toBeUndefined();
     expect(bodies[1]!.messages.some(({ role, content }) => role === "user" && content?.includes("未通过应用校验"))).toBe(true);
+  });
+
+  it("rejects an abstract backend CRUD draft until every critical decision is clarified", async () => {
+    const root = await workspace();
+    const decisionIds = ["language_runtime", "web_framework", "database", "documentation", "testing", "business_rules"];
+    const backendReply = (body: Body, asDraft: boolean) => {
+      const source = pending(body).at(-1)!;
+      const base = draft(body);
+      const { plan: _plan, ...clarification } = base;
+      return {
+        ...(asDraft ? base : clarification),
+        kind: asDraft ? "draft" : "clarification",
+        ...(asDraft ? {} : {
+          questions: ["请确认语言、框架、数据库、文档深度、测试方式和冲突规则。"],
+          questionBindings: [{ questionId: "backend-decisions", displayIndex: 1, decisionIds, answerMode: "provide_value" }],
+        }),
+        planningAssessment: {
+          profile: "backend_crud",
+          classification: { rationale: "用户明确要求后端 CRUD", sourceMessageId: source.messageId, quote: source.content },
+          decisions: decisionIds.map((decisionId) => ({
+            decisionId, value: "尚未确认", status: "pending", rationale: "用户没有给出此实现选择",
+            question: "请确认 " + decisionId,
+          })),
+        },
+      };
+    };
+    const { planner, bodies } = fake((body, index) => assistant(backendReply(body, index === 0)));
+    const result = await start(root, planner);
+    expect(result.error).toBeUndefined();
+    expect(result.snapshot.status).toBe("collecting");
+    expect(result.snapshot.draftRevision).toBeNull();
+    expect(result.snapshot.planningAssessment?.profile).toBe("backend_crud");
+    expect(result.snapshot.planningAssessment?.decisions.filter(({ status }) => status === "pending")).toHaveLength(6);
+    expect(result.snapshot.requirements?.items.filter(({ requirementId, status }) => requirementId.startsWith("R-decision-") && status === "pending")).toHaveLength(6);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.messages.some(({ content }) => content?.includes("关键实施决策仍待澄清"))).toBe(true);
+  });
+
+  it("resolves pending decision requirements under the same IDs after the user confirms choices", async () => {
+    const root = await workspace();
+    const decisionValues = {
+      language_runtime: "Java 8",
+      web_framework: "Spring Boot",
+      database: "SQLite",
+      documentation: "表结构说明、ER 图和 DDL",
+      testing: "JUnit 5",
+      business_rules: "基础 CRUD，不做排课冲突校验",
+    };
+    const answer = "使用 Java 8、Spring Boot、SQLite；交付表结构说明、ER 图和 DDL；用 JUnit 5 测试；范围是基础 CRUD，不做排课冲突校验。";
+    const ids = Object.keys(decisionValues) as Array<keyof typeof decisionValues>;
+    const { planner } = fake((body, index) => {
+      const source = pending(body).at(-1)!;
+      const requirementsUpdate = {
+        messageDecisions: pending(body).map(({ messageId }) => ({ messageId, kind: "requirement", reason: "用户确认排课实现决策" })),
+        changes: [{ requirementId: "R-course-backend", text: source.content, status: "active", sourceMessageIds: [source.messageId] }],
+      };
+      if (source.content === answer) {
+        const prompt = Object.values(decisionValues).join("；");
+        const confirmedPlan = plan();
+        confirmedPlan.tasks[0]!.task.prompt = prompt;
+        requirementsUpdate.changes[0]!.text = source.content;
+        return assistant({ kind: "draft", message: "决策已落实", plan: confirmedPlan, planningAssessment: {
+          profile: "backend_crud",
+          classification: { rationale: "用户确认后端技术与交付范围", sourceMessageId: source.messageId, quote: source.content },
+          decisions: ids.map((decisionId) => ({
+            decisionId, value: decisionValues[decisionId], status: "confirmed", rationale: "用户在本轮明确确认",
+            requirementId: "R-course-backend", sourceMessageId: source.messageId, quote: source.content,
+          })),
+        }, requirementsUpdate });
+      }
+      const base = draft(body);
+      const assessment = {
+          profile: "backend_crud",
+          classification: { rationale: "用户明确要求后端 CRUD", sourceMessageId: source.messageId, quote: source.content },
+          decisions: ids.map((decisionId) => ({ decisionId, value: "尚未确认", status: "pending", rationale: "用户没有确认此项", question: `请确认 ${decisionId}` })),
+      };
+      if (index === 0) return assistant({ ...base, planningAssessment: assessment, requirementsUpdate });
+      return assistant({ kind: "clarification", message: "需要确认六项实现决策。", questions: ["请确认 Java 版本、框架、数据库、文档、测试和业务规则。"],
+        questionBindings: [{ questionId: "backend-decisions", displayIndex: 1, decisionIds: ids, answerMode: "provide_value" }], planningAssessment: assessment, requirementsUpdate });
+    });
+    const first = await start(root, planner);
+    expect(first.snapshot.status).toBe("collecting");
+    const pendingIds = first.snapshot.requirements!.items.filter(({ requirementId, status }) => requirementId.startsWith("R-decision-") && status === "pending").map(({ requirementId }) => requirementId);
+    expect(pendingIds).toHaveLength(6);
+
+    const confirmed = await replyToPlanner({ planningId: first.snapshot.planningId, workspace: root, message: answer, planner });
+    expect(confirmed.error).toBeUndefined();
+    expect(confirmed.snapshot.status).toBe("draft_ready");
+    for (const requirementId of pendingIds) {
+      const versions = confirmed.snapshot.requirements!.items.filter((item) => item.requirementId === requirementId);
+      expect(versions.map(({ revision, status }) => ({ revision, status }))).toEqual([{ revision: 1, status: "superseded" }, { revision: 2, status: "active" }]);
+    }
   });
 
   it("reports malformed JSON accurately and stops after two corrections without publishing", async () => {

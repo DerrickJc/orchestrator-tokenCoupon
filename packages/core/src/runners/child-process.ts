@@ -44,6 +44,7 @@ export function runChildProcess(options: ChildProcessOptions): Promise<ProcessRe
     let abortListener: (() => void) | undefined;
     const emit = (stream: "stdout" | "stderr", text: string) => {
       if (!text) return;
+      options.context.onActivity?.();
       try {
         options.onOutput?.({ stream, text });
       } catch (error) {

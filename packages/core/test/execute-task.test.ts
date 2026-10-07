@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { executeTask } from "../src/execute-task.js";
 import { MockRunner } from "../src/runners/mock-runner.js";
 import type { Runner } from "../src/runner.js";
@@ -52,11 +52,59 @@ describe("executeTask", () => {
     expect(result.attempt.reasonCode).toBe(reasonCode);
   });
 
-  it("times out and waits for the runner process to close", async () => {
-    const result = await executeTask({ task: task(80), cwd: await workspace(), runner: new MockRunner("marker-then-hang") });
-    expect(result.attempt.status).toBe("timed_out");
-    expect(result.attempt.markerSeen).toBe(true);
-    expect(result.attempt.signal).toBe("SIGTERM");
+  it("does not terminate an attempt when its legacy total-time field elapses", async () => {
+    const runner: Runner = {
+      id: "mock", supportsModel: false, checkAvailable: async () => undefined,
+      run: async (input, context) => {
+        context.onStarted();
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        context.onOutput({ stream: "stdout", text: input.completionMarker, agentText: input.completionMarker });
+        return { started: true, exitCode: 0, signal: null };
+      },
+    };
+    const result = await executeTask({ task: task(40), cwd: await workspace(), runner });
+    expect(result.attempt.status).toBe("succeeded");
+    expect(result.attempt.executionPolicy).toEqual({ mode: "idle_notice", idleAfterMs: 60_000 });
+  });
+
+  it("records idle and active transitions without stopping the attempt", async () => {
+    vi.useFakeTimers();
+    try {
+      let ready!: (context: import("../src/runner.js").RunnerContext) => void;
+      let finish!: (result: import("../src/runner.js").ProcessResult) => void;
+      let marker = "";
+      const contextReady = new Promise<import("../src/runner.js").RunnerContext>((resolve) => { ready = resolve; });
+      const idleTransitions: Array<{ idle: boolean; idleSince: string | null }> = [];
+      const runner: Runner = {
+        id: "mock", supportsModel: false, checkAvailable: async () => undefined,
+        run: (input, context) => {
+          marker = input.completionMarker;
+          context.onStarted();
+          ready(context);
+          return new Promise((resolve) => { finish = resolve; });
+        },
+      };
+      const execution = executeTask({
+        task: task(80), cwd: await workspace(), runner,
+        onIdleState: ({ idle, idleSince }) => idleTransitions.push({ idle, idleSince }),
+      });
+      const context = await contextReady;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(idleTransitions).toHaveLength(1);
+      expect(idleTransitions[0]?.idle).toBe(true);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(idleTransitions).toHaveLength(1);
+      context.onActivity?.();
+      await Promise.resolve();
+      expect(idleTransitions[1]).toMatchObject({ idle: false, idleSince: null });
+      context.onOutput({ stream: "stdout", text: marker, agentText: marker });
+      finish({ started: true, exitCode: 0, signal: null });
+      const result = await execution;
+      expect(result.attempt.status).toBe("succeeded");
+      const events = (await readFile(join(result.artifactDir, "events.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type: string });
+      expect(events.filter(({ type }) => type === "attempt.idle")).toHaveLength(1);
+      expect(events.filter(({ type }) => type === "attempt.active")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it("cancels a running runner and records the cancelled terminal state", async () => {

@@ -111,6 +111,51 @@ describe("Phase 3.5 review repair and requirement provenance", () => {
     await expect(revisePlannerDraft(options)).rejects.toThrow("当前有效");
   });
 
+  it("repairs a missing prior finding resolution in the same review with a precise diagnostic", async () => {
+    const root = await workspace();
+    const first = await start(root);
+    const options = { planningId: first.snapshot.planningId, workspace: root };
+    const priorFindings = ["F1", "F2", "F3", "F4", "F5"].map((findingId) => ({
+      ...finding, findingId, severity: findingId === "F4" ? "info" as const : "warning" as const,
+      description: "Prior issue " + findingId,
+    }));
+    const previous = await reviewPlannerDraft({
+      ...options, reviewer: new MockPlanReviewer({ summary: "Prior review", findings: priorFindings }),
+    });
+    const findingF4 = previous.review.findings.find(({ findingId }) => findingId === "F4")!;
+    const missingF4 = {
+      summary: "F4 remains open",
+      findings: [{ findingId: "F4", severity: "info", category: "dependency", taskIds: ["verify"],
+        description: findingF4.description, basis: findingF4.basis, suggestion: findingF4.suggestion, priorFindingId: "F4" }],
+      resolutions: ["F1", "F2", "F3", "F5"].map((findingId) => ({ findingId, status: "resolved", basis: "The plan addresses " + findingId })),
+    };
+    const complete = {
+      ...missingF4,
+      resolutions: ["F1", "F2", "F3", "F4", "F5"].map((findingId) => ({
+        findingId, status: findingId === "F4" ? "unresolved" : "resolved",
+        basis: findingId === "F4" ? "The previous recommendation remains informational and is still tracked" : "The plan addresses " + findingId,
+      })),
+    };
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const replies = ["Research complete", JSON.stringify(missingF4), JSON.stringify(complete)];
+    const reviewer = new DeepSeekPlanner({
+      model: "fake", baseUrl: "https://api.deepseek.com", apiKey: "fake-key",
+      fetchImpl: async (_url, init) => {
+        requestBodies.push(JSON.parse(String(init!.body)) as Record<string, unknown>);
+        const content = replies.shift()!;
+        return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { role: "assistant", content } }] }));
+      },
+    });
+    const repaired = await reviewPlannerDraft({ ...options, reviewer });
+    expect(repaired.review.status).toBe("succeeded");
+    expect(repaired.review.resolutions).toHaveLength(5);
+    expect(repaired.review.resolutions?.find(({ findingId }) => findingId === "F4")).toMatchObject({ status: "unresolved", issueId: findingF4.issueId });
+    expect(repaired.review.findings.find(({ priorFindingId }) => priorFindingId === "F4")?.issueId).toBe(findingF4.issueId);
+    expect(requestBodies).toHaveLength(3);
+    expect(requestBodies.slice(1).every((body) => body.tools === undefined)).toBe(true);
+    expect(JSON.stringify(requestBodies[2]?.messages)).toContain("遗漏：F4");
+  });
+
   it("rejects invented provenance and does not publish partial updates after invalid responses", async () => {
     const root = await workspace();
     const first = await start(root);

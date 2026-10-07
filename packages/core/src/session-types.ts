@@ -17,6 +17,8 @@ export interface TaskAttemptRef {
   attemptId: string;
   artifactDir: string;
   outcome: "pending" | "recorded" | "record_missing";
+  lastActivityAt?: string;
+  idleSince?: string;
 }
 
 export interface SessionTaskState {
