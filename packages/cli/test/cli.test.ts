@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -143,6 +143,64 @@ describe("CLI show commands", () => {
     expect(resumed.exitCode).toBe(0);
     expect(resumed.stdout).toContain("状态：succeeded");
     expect(resumed.stdout).toContain("verify — verify：succeeded");
+  });
+
+  test("runs a Git-isolated plan, prints delivery instructions, and cleans successful Attempt worktrees", async () => {
+    const root = mkdtempSync(join(tmpdir(), "token-coupon-cli-worktree-"));
+    temporaryDirectories.push(root);
+    const workspace = join(root, "repo");
+    const hooks = join(root, "empty-hooks");
+    mkdirSync(workspace);
+    mkdirSync(hooks);
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    git("init", "--initial-branch=main", "--quiet");
+    git("config", "user.name", "Token Coupon CLI Test");
+    git("config", "user.email", "token-coupon-cli@example.invalid");
+    git("config", "core.hooksPath", hooks);
+    writeFileSync(join(workspace, ".gitignore"), ".token-coupon/\n", "utf8");
+    writeFileSync(join(workspace, "README.md"), "Clean Git worktree CLI fixture.\n", "utf8");
+    git("add", ".gitignore", "README.md");
+    git("commit", "--quiet", "-m", "initial fixture");
+    const baseCommit = git("rev-parse", "HEAD");
+    const task = (id: string) => ({ schemaVersion: 1, id, title: id, prompt: `Execute ${id}`,
+      execution: { runnerId: "mock", mode: "non_interactive", timeoutMs: 3000 } });
+    const planFile = join(root, "plan.json");
+    writeFileSync(planFile, JSON.stringify({
+      schemaVersion: 1, id: "phase4-cli-test", title: "Phase 4 CLI test",
+      tasks: [
+        { task: task("implement"), dependsOn: [], status: "planned" },
+        { task: task("verify"), dependsOn: ["implement"], status: "planned" },
+      ],
+    }), "utf8");
+
+    const executed = await invokeCli("plan", "run", "--file", planFile, "--workspace", workspace,
+      "--isolation", "git-worktree", "--verification-task", "verify");
+    expect(executed.exitCode).toBe(0);
+    expect(executed.stdout).toContain("隔离：git-worktree");
+    expect(executed.stdout).toContain("verify — verify：succeeded");
+    const sessionId = /Session：([\da-f-]{36})/.exec(executed.stdout)?.[1];
+    expect(sessionId).toBeDefined();
+    const snapshot = JSON.parse(readFileSync(join(workspace, ".token-coupon", "sessions", sessionId!, "session.json"), "utf8"));
+    const attemptId = snapshot.tasks[0].attempts[0].attemptId;
+    const attempt = JSON.parse(readFileSync(join(workspace, ".token-coupon", "runs", attemptId, "attempt.json"), "utf8"));
+    expect(attempt.cwd).toContain(join(".token-coupon", "worktrees", sessionId!, "attempts", attemptId));
+    expect(attempt.artifactDir).toBe(join(workspace, ".token-coupon", "runs", attemptId));
+    expect(git("rev-parse", "HEAD")).toBe(baseCommit);
+    expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+
+    const delivery = await invokeCli("session", "delivery", "--id", sessionId!, "--workspace", workspace);
+    expect(delivery.exitCode).toBe(0);
+    expect(delivery.stdout).toContain("Delivery：");
+    expect(delivery.stdout).toContain("人工合并");
+    expect(delivery.stdout).toContain("变更文件（0）：无");
+    const cleanup = await invokeCli("session", "cleanup", "--id", sessionId!, "--workspace", workspace);
+    expect(cleanup.exitCode).toBe(0);
+    expect(cleanup.stdout).toContain("已移除 worktree：");
+    expect(git("rev-parse", "HEAD")).toBe(baseCommit);
   });
 
   test("reopens, edits, approves, and runs a planner draft once", async () => {

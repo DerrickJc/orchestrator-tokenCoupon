@@ -13,7 +13,10 @@ export const IDLE_NOTICE_AFTER_MS = 60_000;
 
 export interface ExecuteTaskOptions {
   task: TaskDefinition;
+  /** Runner working directory. */
   cwd: string;
+  /** Stable Session workspace for attempt records when cwd is an isolated worktree. */
+  artifactWorkspace?: string;
   runner: Runner;
   signal?: AbortSignal;
   onOutput?: (output: RunnerOutput) => void;
@@ -59,7 +62,8 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
     inputBytes: Buffer.byteLength(protocol.prompt, "utf8"),
     outputBytes: 0,
   };
-  const recorder = await RunRecorder.create({ cwd, attemptId, task, prompt: protocol.prompt, initialAttempt: attempt });
+  const artifactWorkspace = options.artifactWorkspace === undefined ? cwd : resolve(options.artifactWorkspace);
+  const recorder = await RunRecorder.create({ cwd, artifactWorkspace, attemptId, task, prompt: protocol.prompt, initialAttempt: attempt });
   attempt.artifactDir = recorder.artifactDir;
   if (options.decisionConstraints?.length) {
     const decisionContext = options.decisionConstraints.map(({ decisionId, revision, valueHash }) => ({ decisionId, revision, valueHash }));

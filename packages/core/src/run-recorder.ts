@@ -6,6 +6,7 @@ import type { TaskDefinition } from "./task.js";
 
 export interface RunRecorderOptions {
   cwd: string;
+  artifactWorkspace?: string;
   attemptId: string;
   task: TaskDefinition;
   prompt: string;
@@ -37,7 +38,7 @@ export class RunRecorder {
   }
 
   static async create(options: RunRecorderOptions): Promise<RunRecorder> {
-    const artifactDir = join(options.cwd, ".token-coupon", "runs", options.attemptId);
+    const artifactDir = join(options.artifactWorkspace ?? options.cwd, ".token-coupon", "runs", options.attemptId);
     const recorder = new RunRecorder(artifactDir, options.attemptId, options.maxQueuedBytes ?? 1024 * 1024);
 
     await mkdir(artifactDir, { recursive: true });
@@ -50,6 +51,7 @@ export class RunRecorder {
     await recorder.appendEvent("attempt.created", {
       taskId: options.task.id,
       cwd: options.cwd,
+      artifactWorkspace: options.artifactWorkspace ?? options.cwd,
       runnerId: options.task.execution.runnerId,
       inputBytes: options.initialAttempt.inputBytes,
     });

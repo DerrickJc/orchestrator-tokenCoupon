@@ -386,6 +386,16 @@ function parseExecutionReference(value: unknown): NonNullable<PlannerConversatio
   const raw = object(value, "Planner execution");
   if (!isUuid(raw.sessionId) || !isUuid(raw.approvalId) || !Number.isSafeInteger(raw.draftRevision) || typeof raw.planHash !== "string" || !HASH.test(raw.planHash) ||
       !["reserved", "created"].includes(String(raw.state))) throw new Error("Planner execution 引用无效");
+  if (raw.isolation !== undefined) {
+    const isolation = object(raw.isolation, "Planner execution isolation");
+    if (isolation.mode === "shared") {
+      if (Object.keys(isolation).some((key) => key !== "mode")) throw new Error("Planner shared isolation 无效");
+    } else if (isolation.mode === "git-worktree") {
+      if (Object.keys(isolation).some((key) => !["mode", "verificationTaskId", "setupHash"].includes(key)) ||
+          typeof isolation.verificationTaskId !== "string" || !isolation.verificationTaskId ||
+          (isolation.setupHash !== null && (typeof isolation.setupHash !== "string" || !/^[0-9a-f]{64}$/i.test(isolation.setupHash)))) throw new Error("Planner git-worktree isolation 无效");
+    } else throw new Error("Planner execution isolation mode 无效");
+  }
   return raw as unknown as NonNullable<PlannerConversationSnapshot["execution"]>;
 }
 
