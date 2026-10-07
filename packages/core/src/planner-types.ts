@@ -174,6 +174,8 @@ export interface ExecutionReference {
   draftRevision: number;
   planHash: string;
   state: "reserved" | "created";
+  /** Optional on legacy reservations; new reservations freeze execution isolation before Session creation. */
+  isolation?: { mode: "shared" } | { mode: "git-worktree"; verificationTaskId: string; setupHash: string | null };
 }
 
 export interface PlannerConversationSnapshot {

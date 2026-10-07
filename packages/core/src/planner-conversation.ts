@@ -21,6 +21,8 @@ import { applyRequirementsUpdate, createHistoryReader, effectiveRequirements, em
 import { assertClarificationNeeded, assertPlanningReady, defaultPlanningProposals, hasPendingPlanningDecisions, parsePlanningAssessment, syncPlanningDecisionRequirements, validatePlanningAssessment } from "./planning-readiness.js";
 import { applyCommittedConfirmations, assertNoRepeatedConfirmationClarification, makeConfirmationProposal, mergeConfirmationEvents, parseConfirmationInput } from "./confirmation.js";
 import { bindPlanDecisions, plannerPlanStructure } from "./plan-decisions.js";
+import { parseWorktreeSetupProfile, worktreeSetupHash } from "./worktree-setup.js";
+import type { WorktreeSetupProfile } from "./worktree-setup.js";
 
 const USER_MESSAGE_LIMIT = 8 * 1024;
 const REQUEST_CONTEXT_LIMIT = 256 * 1024;
@@ -56,6 +58,9 @@ export interface PlannerRunOptions {
   createRunner: TaskRunnerFactory;
   signal?: AbortSignal;
   acceptEdits?: boolean;
+  isolation?: "git-worktree";
+  verificationTaskId?: string;
+  setupProfile?: WorktreeSetupProfile;
   onOutput?: Parameters<typeof runPlan>[0]["onOutput"];
   onIdleState?: Parameters<typeof runPlan>[0]["onIdleState"];
 }
@@ -222,6 +227,7 @@ export async function approvePlannerDraft(options: { planningId: string; workspa
 }
 
 export async function runApprovedPlanner(options: PlannerRunOptions): Promise<PlannerOperationResult & { sessionStatus?: string }> {
+  if (Boolean(options.isolation) !== Boolean(options.verificationTaskId)) throw new Error("--isolation git-worktree 与 verificationTaskId 必须同时提供");
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
@@ -229,10 +235,17 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     let retryReservation: ExecutionReference | null = null;
     if (snapshot.execution) {
       const execution = snapshot.execution;
-      const sessionStore = new SessionStore(store.workspace);
-      try {
-        const record = await sessionStore.load(execution.sessionId);
-        if (canonicalHash(record.plan) !== execution.planHash) throw new Error("已关联 Session 的计划哈希不匹配");
+        const sessionStore = new SessionStore(store.workspace);
+        try {
+          const record = await sessionStore.load(execution.sessionId);
+          if (canonicalHash(record.plan) !== execution.planHash) throw new Error("已关联 Session 的计划哈希不匹配");
+          if (options.isolation && record.snapshot.isolation?.mode !== options.isolation) throw new Error("已关联 Session 的隔离模式与本次请求不一致；执行配置不可更换");
+          if (options.verificationTaskId && (record.snapshot.isolation?.mode !== "git-worktree" || record.snapshot.isolation.verificationTaskId !== options.verificationTaskId)) {
+            throw new Error("已关联 Session 的最终验证任务与本次请求不一致；执行配置不可更换");
+          }
+          if (options.setupProfile && (record.snapshot.isolation?.mode !== "git-worktree" || record.snapshot.isolation.setupHash !== worktreeSetupHash(parseWorktreeSetupProfile(options.setupProfile)))) {
+            throw new Error("已关联 Session 的 setup 配置与本次请求不一致；执行配置不可更换");
+          }
         if (execution.state === "reserved") {
           snapshot = nextSnapshot(snapshot, { status: "execution_created", execution: { ...execution, state: "created" } });
           await store.save(snapshot);
@@ -253,19 +266,35 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     if (!snapshot.approval.reviewId || !snapshot.approval.reportHash || !review || review.reviewId !== snapshot.approval.reviewId || review.reportHash !== snapshot.approval.reportHash) {
       throw new Error("执行前必须确认当前草案的有效审查报告");
     }
-    const execution: ExecutionReference = retryReservation ?? {
-      sessionId: randomUUID(), approvalId: snapshot.approval.approvalId, draftRevision: draft.draftRevision,
-      planHash: draft.planHash, state: "reserved" as const,
-    };
-    if (!retryReservation) {
-      snapshot = nextSnapshot(snapshot, { status: "approved", execution });
-      await store.save(snapshot);
+    const setupProfile = options.setupProfile ? parseWorktreeSetupProfile(options.setupProfile) : undefined;
+    if (setupProfile && options.isolation !== "git-worktree" && !retryReservation) throw new Error("setup 配置只适用于 --isolation git-worktree");
+    const requestedIsolation: NonNullable<ExecutionReference["isolation"]> = options.isolation === "git-worktree"
+      ? { mode: "git-worktree", verificationTaskId: options.verificationTaskId ?? "", setupHash: setupProfile ? worktreeSetupHash(setupProfile) : null }
+      : { mode: "shared" };
+    const executionIsolation = retryReservation?.isolation ?? requestedIsolation;
+    if (setupProfile && executionIsolation.mode !== "git-worktree") throw new Error("setup 配置只适用于 --isolation git-worktree");
+    if (executionIsolation.mode === "git-worktree" && !executionIsolation.verificationTaskId) throw new Error("git-worktree 运行需要 verificationTaskId");
+    if (executionIsolation.mode === "git-worktree" && executionIsolation.setupHash !== null && !setupProfile) throw new Error("setup_file_required：此执行 reservation 需要原 setup 配置，请通过 --setup-file 重新提交");
+    if (retryReservation?.isolation && options.isolation && retryReservation.isolation.mode !== options.isolation) throw new Error("执行隔离模式已保存在 reservation 中，不能更换");
+    if (retryReservation?.isolation?.mode === "git-worktree" && options.verificationTaskId && retryReservation.isolation.verificationTaskId !== options.verificationTaskId) {
+      throw new Error("最终验证任务已保存在 reservation 中，不能更换");
     }
+    if (retryReservation?.isolation?.mode === "git-worktree" && setupProfile && retryReservation.isolation.setupHash !== worktreeSetupHash(setupProfile)) {
+      throw new Error("setup 配置已保存在 reservation 中，不能更换");
+    }
+    const execution: ExecutionReference = retryReservation ? { ...retryReservation, isolation: executionIsolation } : {
+      sessionId: randomUUID(), approvalId: snapshot.approval.approvalId, draftRevision: draft.draftRevision,
+      planHash: draft.planHash, state: "reserved" as const, isolation: executionIsolation,
+    };
+    snapshot = nextSnapshot(snapshot, { status: "approved", execution });
+    await store.save(snapshot);
 
     const sessions = new SessionStore(store.workspace);
     try {
       const result = await runPlan({
         plan: draft.plan, workspace: store.workspace, createRunner: options.createRunner, sessionId: execution.sessionId,
+        ...(executionIsolation.mode === "git-worktree" ? { isolation: "git-worktree" as const, verificationTaskId: executionIsolation.verificationTaskId } : {}),
+        ...(setupProfile ? { setupProfile } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.acceptEdits ? { acceptEdits: true } : {}),
         ...(options.onOutput ? { onOutput: options.onOutput } : {}),

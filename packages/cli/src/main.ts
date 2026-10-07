@@ -5,22 +5,26 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ClaudeCodeRunner, executeTask, formatSession, InputValidationError, MockRunner, parsePlan, parseTask,
-  resumeSession, retrySession, runPlan, SessionLockError, SessionStore,
+  cleanupSessionWorktrees, continueSessionLanding, createSessionDelivery, formatSessionDelivery, parseWorktreeSetupProfile, resumeSession, retrySession, runPlan, SessionLockError, SessionStore,
 } from "@token-coupon/core";
-import type { PlanDefinition, Runner, RunnerOutput, TaskDefinition, TaskRunnerFactoryOptions } from "@token-coupon/core";
+import type { PlanDefinition, Runner, RunnerOutput, TaskDefinition, TaskRunnerFactoryOptions, WorktreeSetupProfile } from "@token-coupon/core";
 import { runPlannerCli } from "./planner-cli.js";
 
 const usage = `用法：
   token-coupon plan show --file <计划.json>
   token-coupon plan run --file <计划.json> [--workspace <目录>] [--accept-edits]
+      [--isolation git-worktree --verification-task <taskId>] [--setup-file <setup.json>]
       [--mock-task-scenario <taskId>=<场景> ...]
   token-coupon task show --file <任务.json>
   token-coupon task run --file <任务.json> [--workspace <目录>] [--mock-scenario <场景>] [--accept-edits]
   token-coupon session show --id <sessionId> [--workspace <目录>]
+  token-coupon session delivery --id <sessionId> [--workspace <目录>]
+  token-coupon session cleanup --id <sessionId> [--workspace <目录>]
+  token-coupon session land --id <sessionId> --task <taskId> --continue [--workspace <目录>]
   token-coupon session resume --id <sessionId> [--workspace <目录>] [--accept-edits]
-      [--mock-task-scenario <taskId>=<场景> ...]
+      [--mock-task-scenario <taskId>=<场景> ...] [--setup-file <setup.json>]
   token-coupon session retry --id <sessionId> --task <taskId> [--workspace <目录>]
-      [--accept-edits] [--mock-task-scenario <taskId>=<场景> ...]
+      [--accept-edits] [--mock-task-scenario <taskId>=<场景> ...] [--setup-file <setup.json>]
   token-coupon planner <start|reply|retry|show|export|replace|approve|run> [选项]
   token-coupon --help
 
@@ -28,7 +32,7 @@ const usage = `用法：
 
 interface ParsedCommand {
   kind: "plan" | "task" | "session";
-  action: "show" | "run" | "resume" | "retry";
+  action: "show" | "run" | "resume" | "retry" | "delivery" | "land" | "cleanup";
   file?: string;
   sessionId?: string;
   taskId?: string;
@@ -36,16 +40,20 @@ interface ParsedCommand {
   mockScenario?: string;
   mockTaskScenarios: Map<string, string>;
   acceptEdits: boolean;
+  isolation?: "git-worktree";
+  verificationTaskId?: string;
+  continueLanding: boolean;
+  setupFile?: string;
 }
 
 function parseArguments(args: string[]): ParsedCommand | "help" {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) return "help";
   const [kind, action, ...options] = args;
   if (!(["plan", "task", "session"] as const).includes(kind as "plan" | "task" | "session") ||
-      !(["show", "run", "resume", "retry"] as const).includes(action as "show" | "run" | "resume" | "retry") ||
+      !(["show", "run", "resume", "retry", "delivery", "land", "cleanup"] as const).includes(action as "show" | "run" | "resume" | "retry" | "delivery" | "land" | "cleanup") ||
       (kind === "task" && action !== "show" && action !== "run") ||
       (kind === "plan" && action !== "show" && action !== "run") ||
-      (kind === "session" && action !== "show" && action !== "resume" && action !== "retry")) {
+      (kind === "session" && action !== "show" && action !== "resume" && action !== "retry" && action !== "delivery" && action !== "land" && action !== "cleanup")) {
     throw new Error("命令无效。请运行 token-coupon --help 查看用法。");
   }
 
@@ -56,6 +64,10 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
   let mockScenario: string | undefined;
   const mockTaskScenarios = new Map<string, string>();
   let acceptEdits = false;
+  let continueLanding = false;
+  let isolation: "git-worktree" | undefined;
+  let verificationTaskId: string | undefined;
+  let setupFile: string | undefined;
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index];
     if (option === "--accept-edits") {
@@ -63,7 +75,12 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
       acceptEdits = true;
       continue;
     }
-    if (!["--file", "--id", "--task", "--workspace", "--mock-scenario", "--mock-task-scenario"].includes(option ?? "")) {
+    if (option === "--continue") {
+      if (kind !== "session" || action !== "land" || continueLanding) throw new Error("--continue 只适用于 session land，且只能指定一次");
+      continueLanding = true;
+      continue;
+    }
+    if (!["--file", "--id", "--task", "--workspace", "--mock-scenario", "--mock-task-scenario", "--isolation", "--verification-task", "--setup-file"].includes(option ?? "")) {
       throw new Error(`不支持的参数：${option}`);
     }
     const value = options[index + 1];
@@ -83,6 +100,16 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
     } else if (option === "--mock-scenario") {
       if (mockScenario !== undefined) throw new Error("--mock-scenario 只能指定一次");
       mockScenario = value;
+    } else if (option === "--isolation") {
+      if (isolation !== undefined) throw new Error("--isolation 只能指定一次");
+      if (value !== "git-worktree") throw new Error("--isolation 当前只支持 git-worktree");
+      isolation = value;
+    } else if (option === "--verification-task") {
+      if (verificationTaskId !== undefined) throw new Error("--verification-task 只能指定一次");
+      verificationTaskId = value;
+    } else if (option === "--setup-file") {
+      if (setupFile !== undefined) throw new Error("--setup-file 只能指定一次");
+      setupFile = value;
     } else {
       const separator = value.indexOf("=");
       if (separator < 1 || separator === value.length - 1) throw new Error("--mock-task-scenario 格式为 <taskId>=<场景>");
@@ -96,14 +123,21 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
 
   if ((kind === "plan" || kind === "task") && !file) throw new Error("缺少 --file 参数");
   if (kind === "session" && !sessionId) throw new Error("Session 命令缺少 --id 参数");
-  if (kind === "session" && action === "retry" && !taskId) throw new Error("session retry 缺少 --task 参数");
-  if (kind === "session" && action !== "retry" && taskId) throw new Error("--task 只适用于 session retry");
+  if (kind === "session" && (action === "retry" || action === "land") && !taskId) throw new Error(`session ${action} 缺少 --task 参数`);
+  if (kind === "session" && action !== "retry" && action !== "land" && taskId) throw new Error("--task 只适用于 session retry/land");
+  if (kind === "session" && action === "land" && !continueLanding) throw new Error("session land 需要 --continue");
+  if (kind === "session" && action !== "land" && continueLanding) throw new Error("--continue 只适用于 session land");
+  if (kind === "session" && action === "land" && acceptEdits) throw new Error("session land 不启动 Runner，不接受 --accept-edits");
   if (kind === "session" && file) throw new Error("--file 不适用于 Session 命令");
   if (kind === "plan" && action === "show" && (mockTaskScenarios.size || acceptEdits)) throw new Error("Mock 场景和 --accept-edits 只适用于 plan run");
+  if ((kind !== "plan" || action !== "run") && (isolation || verificationTaskId)) throw new Error("--isolation 和 --verification-task 只适用于 plan run");
+  if (setupFile && !((kind === "plan" && action === "run") || (kind === "session" && (action === "resume" || action === "retry")))) throw new Error("--setup-file 只适用于 plan run、session resume 或 session retry");
+  if (isolation === "git-worktree" && !verificationTaskId) throw new Error("--isolation git-worktree 需要 --verification-task <taskId>");
+  if (!isolation && verificationTaskId) throw new Error("--verification-task 需要 --isolation git-worktree");
   if (kind === "task" && mockTaskScenarios.size) throw new Error("--mock-task-scenario 只适用于 plan/session 命令");
   if (kind === "task" && action === "show" && (workspace || mockScenario || acceptEdits)) throw new Error("执行参数只适用于 task run");
   if (kind === "task" && action === "run" && mockScenario && acceptEdits) throw new Error("--mock-scenario 与 --accept-edits 不能同时使用");
-  if (kind === "session" && action === "show" && (acceptEdits || mockScenario || mockTaskScenarios.size)) throw new Error("session show 是只读命令，不接受执行参数");
+  if (kind === "session" && action !== undefined && ["show", "delivery", "cleanup"].includes(action) && (acceptEdits || mockScenario || mockTaskScenarios.size || setupFile)) throw new Error(`session ${action} 不接受执行参数`);
   if (mockScenario && (kind !== "task" || action !== "run")) throw new Error("--mock-scenario 只适用于 task run");
 
   if ((kind === "task" && action === "run") || (kind === "plan" && action === "run") || kind === "session") {
@@ -113,7 +147,7 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
     kind: kind as ParsedCommand["kind"], action: action as ParsedCommand["action"],
     ...(file ? { file } : {}), ...(sessionId ? { sessionId } : {}), ...(taskId ? { taskId } : {}),
     ...(workspace ? { workspace } : {}), ...(mockScenario ? { mockScenario } : {}),
-    mockTaskScenarios, acceptEdits,
+    mockTaskScenarios, acceptEdits, continueLanding, ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupFile ? { setupFile } : {}),
   };
 }
 
@@ -219,11 +253,14 @@ export async function runCli(args: string[]): Promise<number> {
     await validateWorkspace(workspace);
     if (command.kind === "plan" && command.action === "run") {
       const plan = parsePlan(await readJsonFile(command.file!));
+      const setupProfile = command.setupFile ? await readSetupFile(command.setupFile) : undefined;
       const cancellation = bindCancellation();
       let result;
       let currentOutputTask: string | undefined;
       try {
         result = await runPlan({ plan, workspace, createRunner, signal: cancellation.signal, acceptEdits: command.acceptEdits,
+          ...(command.isolation ? { isolation: command.isolation } : {}), ...(command.verificationTaskId ? { verificationTaskId: command.verificationTaskId } : {}),
+          ...(setupProfile ? { setupProfile } : {}),
           mockTaskScenarios: command.mockTaskScenarios, onOutput: (taskId, output) => {
             const firstForTask = taskId !== currentOutputTask;
             currentOutputTask = taskId;
@@ -241,23 +278,40 @@ export async function runCli(args: string[]): Promise<number> {
       console.log(formatSession(record.snapshot, record.plan));
       return 0;
     }
+    if (command.action === "delivery") {
+      const record = await sessionStore.load(sessionId);
+      const report = await createSessionDelivery(record, sessionStore);
+      console.log(formatSessionDelivery(report, workspace));
+      console.log(`Delivery 记录：${sessionStore.sessionDirectory(sessionId)}/delivery.json`);
+      return 0;
+    }
+    if (command.action === "cleanup") {
+      const report = await cleanupSessionWorktrees({ sessionId, workspace });
+      console.log(`已移除 worktree：${report.removedWorktrees.length ? report.removedWorktrees.join(", ") : "无"}`);
+      for (const item of report.retainedWorktrees) console.log(`保留：${item.path}（${item.reason}）`);
+      console.log(`清理记录：${sessionStore.sessionDirectory(sessionId)}/cleanup.json`);
+      return report.retainedWorktrees.length ? 1 : 0;
+    }
+    const setupProfile = command.setupFile ? await readSetupFile(command.setupFile) : undefined;
     const cancellation = bindCancellation();
     let result;
     let currentOutputTask: string | undefined;
     try {
       const operation = { sessionId, workspace, createRunner, signal: cancellation.signal,
-        acceptEdits: command.acceptEdits, mockTaskScenarios: command.mockTaskScenarios, onOutput: (taskId: string, output: RunnerOutput) => {
+        acceptEdits: command.acceptEdits, mockTaskScenarios: command.mockTaskScenarios, ...(setupProfile ? { setupProfile } : {}), onOutput: (taskId: string, output: RunnerOutput) => {
           const firstForTask = taskId !== currentOutputTask;
           currentOutputTask = taskId;
           showRunnerOutput(taskId, output, firstForTask);
         }, onIdleState: (taskId: string, state: { idle: boolean }) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`) };
       result = command.action === "retry"
         ? await retrySession({ ...operation, taskId: command.taskId! })
-        : await resumeSession(operation);
+        : command.action === "land"
+          ? await continueSessionLanding({ ...operation, taskId: command.taskId! })
+          : await resumeSession(operation);
     } finally { cancellation.dispose(); }
     const record = await sessionStore.load(sessionId);
     console.log(formatSession(result.snapshot, record.plan));
-    return command.action === "retry" && result.operationStatus
+    return (command.action === "retry" || command.action === "land") && result.operationStatus
       ? resultExitCode(result.operationStatus)
       : sessionExitCode(result.snapshot);
   } catch (error) {
@@ -272,6 +326,14 @@ async function validateWorkspace(workspace: string): Promise<void> {
   try { info = await stat(workspace); }
   catch { throw new InputValidationError("--workspace", "必须是已存在的目录"); }
   if (!info.isDirectory()) throw new InputValidationError("--workspace", "必须是已存在的目录");
+}
+
+async function readSetupFile(path: string): Promise<WorktreeSetupProfile> {
+  const absolute = resolve(path);
+  const info = await stat(absolute);
+  if (!info.isFile() || info.size > 1024 * 1024) throw new InputValidationError("--setup-file", "必须是 1 MiB 以内的 JSON 文件");
+  try { return parseWorktreeSetupProfile(JSON.parse(await readFile(absolute, "utf8")) as unknown); }
+  catch (error) { throw new InputValidationError("--setup-file", error instanceof Error ? error.message : String(error)); }
 }
 
 function printAttempt(result: Awaited<ReturnType<typeof executeTask>>): void {

@@ -6,12 +6,12 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import {
   approvePlannerDraft, canonicalHash, checkPlan, createPlanner, diffPlans, formatPlanner, formatSession,
-  loadCurrentPlanReview, loadPlannerConversation, MockPlanReviewer, MockPlanner, PlannerStore, replacePlannerDraft,
+  cleanupSessionWorktrees, continueSessionLanding, createSessionDelivery, formatSessionDelivery, loadCurrentPlanReview, loadPlannerConversation, MockPlanReviewer, MockPlanner, parseWorktreeSetupProfile, PlannerStore, replacePlannerDraft,
   replyToPlanner, retryPlannerTurn, reviewPlannerDraft, runApprovedPlanner, SessionStore, ReviewStore, startPlannerConversation,
   retrySession, resumeSession,
   effectiveRequirements, traceRequirement, revisePlannerDraft, refreshPlannerRequirements,
 } from "@token-coupon/core";
-import type { PlanChange, PlanReviewRecord, PlannerConfig, PlannerOperationResult, Runner, TaskRunnerFactory } from "@token-coupon/core";
+import type { PlanChange, PlanReviewRecord, PlannerConfig, PlannerOperationResult, Runner, TaskRunnerFactory, WorktreeSetupProfile } from "@token-coupon/core";
 import { ClaudeCodeRunner, MockRunner } from "@token-coupon/core";
 
 const HELP = [
@@ -34,6 +34,7 @@ const HELP = [
   "  token-coupon planner replace --id <planningId> --file <计划.json> [--workspace <目录>]",
   "  token-coupon planner approve --id <planningId> --revision <版本> [--waive-findings <F1,F2> --waiver-reason <原因>] [--workspace <目录>]",
   "  token-coupon planner run --id <planningId> [--workspace <目录>] [--accept-edits]",
+  "      [--isolation git-worktree --verification-task <taskId>] [--setup-file <setup.json>]",
   "",
   "DeepSeek Planner 配置：TOKEN_COUPON_PLANNER_API_KEY、TOKEN_COUPON_PLANNER_MODEL、",
   "TOKEN_COUPON_PLANNER_BASE_URL（默认 https://api.deepseek.com）。",
@@ -208,8 +209,12 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
       return 0;
     }
     if (command.action === "run") {
+      const setupProfile = get("--setup-file") ? await readSetupFile(get("--setup-file")!) : undefined;
       const result = await cancellable((signal) => runApprovedPlanner({
-          planningId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits, signal,
+          planningId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
+          ...(get("--isolation") === "git-worktree" ? { isolation: "git-worktree" as const } : {}),
+          ...(get("--verification-task") ? { verificationTaskId: get("--verification-task")! } : {}), signal,
+          ...(setupProfile ? { setupProfile } : {}),
           onOutput: (_taskId, output) => {
             const visible = output.displayText ?? output.agentText;
             if (visible) process.stdout.write(visible);
@@ -248,7 +253,7 @@ function parse(args: string[]): Command {
     revise: ["--id", "--message", "--review-id", "--workspace"], requirements: ["--id", "--workspace"], trace: ["--id", "--requirement", "--revision", "--workspace"],
     chat: ["--id", "--planner", "--runner", "--workspace", "--planner-model", "--task-model"],
     export: ["--id", "--file", "--workspace"], replace: ["--id", "--file", "--workspace"],
-    approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace"],
+    approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace", "--isolation", "--verification-task", "--setup-file"],
     help: [],
   };
   const allowed = allowedByAction[action];
@@ -296,6 +301,8 @@ function parse(args: string[]): Command {
   if (action === "check" && !values.has("--id") && !values.has("--file")) throw new Error("planner check 需要 --id 或 --file");
   if (action === "chat" && !values.has("--id") && (!values.has("--planner") || !values.has("--runner"))) throw new Error("新建 chat 需要 --planner 和 --runner");
   if (action === "chat" && values.has("--id") && (values.has("--planner") || values.has("--runner"))) throw new Error("重开 chat 使用记录中保存的配置，不接受覆盖参数");
+  if (values.has("--isolation") && values.get("--isolation") !== "git-worktree") throw new Error("--isolation 当前只支持 git-worktree");
+  if (values.has("--isolation") !== values.has("--verification-task")) throw new Error("--isolation git-worktree 与 --verification-task 必须同时提供");
   values.set("--workspace", resolve(values.get("--workspace") ?? process.cwd()));
   if (action === "start") {
     if (!["mock", "deepseek"].includes(values.get("--planner")!)) throw new Error("--planner 只能是 mock 或 deepseek");
@@ -330,6 +337,13 @@ function createTaskRunner(task: Parameters<TaskRunnerFactory>[0], options: Param
 async function validateWorkspace(workspace: string): Promise<void> {
   const info = await stat(workspace);
   if (!info.isDirectory()) throw new Error("workspace 必须是已存在的目录");
+}
+
+async function readSetupFile(path: string): Promise<WorktreeSetupProfile> {
+  const absolute = resolve(path);
+  const info = await stat(absolute);
+  if (!info.isFile() || info.size > 1024 * 1024) throw new Error("--setup-file 必须是 1 MiB 以内的 JSON 文件");
+  return parseWorktreeSetupProfile(JSON.parse(await readFile(absolute, "utf8")) as unknown);
 }
 
 function turnExitCode(status: string | undefined): number { return status === "timed_out" ? 124 : status === "cancelled" ? 130 : 1; }
@@ -485,10 +499,25 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     if (!planningId) return;
     console.log(formatPlanner(await loadPlannerConversation(planningId, workspace)));
   };
-  const run = async () => {
+  const run = async (runArgs: string[] = []) => {
     if (!planningId) throw new Error("请先输入需求生成计划");
+    let isolation: "git-worktree" | undefined;
+    let verificationTaskId: string | undefined;
+    let setupFile: string | undefined;
+    for (let index = 0; index < runArgs.length; index += 1) {
+      const flag = runArgs[index];
+      const value = runArgs[index + 1];
+      if (flag === "--isolation" && isolation === undefined && value === "git-worktree") { isolation = "git-worktree"; index += 1; }
+      else if (flag === "--verification-task" && verificationTaskId === undefined && value && !value.startsWith("--")) { verificationTaskId = value; index += 1; }
+      else if (flag === "--setup-file" && setupFile === undefined && value && !value.startsWith("--")) { setupFile = value; index += 1; }
+      else throw new Error("用法：/run [--isolation git-worktree --verification-task <taskId>]");
+    }
+    if (isolation && !verificationTaskId) throw new Error("git-worktree 运行需要 --verification-task <taskId>");
+    if (!isolation && verificationTaskId) throw new Error("--verification-task 需要 --isolation git-worktree");
+    const setupProfile = setupFile ? await readSetupFile(setupFile) : undefined;
     const result = await cancellable((signal) => runApprovedPlanner({
-      planningId: planningId!, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits, signal,
+      planningId: planningId!, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
+      ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupProfile ? { setupProfile } : {}), signal,
       onOutput: (_taskId, output) => {
         const visible = output.displayText ?? output.agentText;
         if (visible) chatIO.output.write(visible);
@@ -646,7 +675,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       const [name, ...args] = line.slice(1).split(/\s+/);
       try {
         if (name === "exit" || name === "quit") break;
-        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run /status /resume /retry <taskId> /exit");
+        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run [--isolation git-worktree --verification-task <taskId>] [--setup-file <setup.json>] /delivery /status /resume /retry <taskId> [--setup-file <setup.json>] /land <taskId> /cleanup /exit");
         else if (name === "confirm" || name === "delegate" || name === "reject" || name === "revoke") {
           if (!args.length) throw new Error(`用法：/${name} ${name === "confirm" ? "all|编号[,编号]" : name === "revoke" ? "all|decisionId[,decisionId]" : "编号[,编号]"}`);
           const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: `/${name} ${args.join(" ")}`, signal }), chatAbort.signal);
@@ -718,16 +747,55 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
             console.log(formatReview(result.review, true));
           }
         } else if (name === "approve") await approve();
-        else if (name === "run") await run();
-        else if (name === "retry" || name === "resume") {
+        else if (name === "run") await run(args);
+        else if (name === "delivery") {
+          const plannerSnapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
+          if (!plannerSnapshot.execution) throw new Error("规划还没有执行 Session");
+          const sessionStore = new SessionStore(workspace);
+          const record = await sessionStore.load(plannerSnapshot.execution.sessionId);
+          const report = await createSessionDelivery(record, sessionStore);
+          console.log(formatSessionDelivery(report, workspace));
+          console.log(`Delivery 记录：${sessionStore.sessionDirectory(record.snapshot.sessionId)}/delivery.json`);
+        }
+        else if (name === "cleanup") {
+          const plannerSnapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
+          if (!plannerSnapshot.execution) throw new Error("规划还没有执行 Session");
+          const report = await cleanupSessionWorktrees({ sessionId: plannerSnapshot.execution.sessionId, workspace });
+          for (const path of report.removedWorktrees) console.log(`已移除：${path}`);
+          for (const item of report.retainedWorktrees) console.log(`保留：${item.path}（${item.reason}）`);
+        }
+        else if (name === "land") {
+          if (args.length !== 1) throw new Error("用法：/land <taskId>（先在整合 worktree 手工提交并合并 Attempt 分支）");
+          const plannerSnapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
+          if (!plannerSnapshot.execution) throw new Error("规划还没有执行 Session");
+          const result = await cancellable((signal) => continueSessionLanding({
+            sessionId: plannerSnapshot.execution!.sessionId, workspace, createRunner: createTaskRunner,
+            taskId: args[0]!, signal,
+          }), chatAbort.signal);
+          const record = await new SessionStore(workspace).load(result.snapshot.sessionId);
+          console.log(formatSession(result.snapshot, record.plan));
+        } else if (name === "retry" || name === "resume") {
+          let setupFile: string | undefined;
+          const commandArgs: string[] = [];
+          for (let index = 0; index < args.length; index += 1) {
+            if (args[index] === "--setup-file" && setupFile === undefined && args[index + 1] && !args[index + 1]!.startsWith("--")) {
+              setupFile = args[index + 1]!;
+              index += 1;
+            } else commandArgs.push(args[index]!);
+          }
+          if (name === "retry" ? commandArgs.length !== 1 : commandArgs.length !== 0) {
+            throw new Error(name === "retry" ? "用法：/retry <taskId> [--setup-file <setup.json>]" : "用法：/resume [--setup-file <setup.json>]");
+          }
+          const setupProfile = setupFile ? await readSetupFile(setupFile) : undefined;
           const snapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
           if (!snapshot.execution) throw new Error("规划还没有执行 Session");
           const sessionId = snapshot.execution.sessionId;
           const operation = { sessionId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
+            ...(setupProfile ? { setupProfile } : {}),
             onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write(visible); },
             onIdleState: (taskId: string, state: { idle: boolean }) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`) };
           const result = await cancellable((signal) => name === "retry"
-            ? retrySession({ ...operation, taskId: args[0] ?? "", signal })
+            ? retrySession({ ...operation, taskId: commandArgs[0]!, signal })
             : resumeSession({ ...operation, signal }), chatAbort.signal);
           const record = await new SessionStore(workspace).load(sessionId);
           console.log(formatSession(result.snapshot, record.plan));
