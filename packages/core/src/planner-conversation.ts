@@ -61,6 +61,7 @@ export interface PlannerRunOptions {
   isolation?: "git-worktree";
   verificationTaskId?: string;
   setupProfile?: WorktreeSetupProfile;
+  maxParallel?: number;
   onOutput?: Parameters<typeof runPlan>[0]["onOutput"];
   onIdleState?: Parameters<typeof runPlan>[0]["onIdleState"];
 }
@@ -228,6 +229,8 @@ export async function approvePlannerDraft(options: { planningId: string; workspa
 
 export async function runApprovedPlanner(options: PlannerRunOptions): Promise<PlannerOperationResult & { sessionStatus?: string }> {
   if (Boolean(options.isolation) !== Boolean(options.verificationTaskId)) throw new Error("--isolation git-worktree 与 verificationTaskId 必须同时提供");
+  if (options.maxParallel !== undefined && (!Number.isSafeInteger(options.maxParallel) || options.maxParallel < 1 || options.maxParallel > 8)) throw new Error("--max-parallel 必须是 1 到 8 之间的整数");
+  if ((options.maxParallel ?? 1) > 1 && options.isolation !== "git-worktree") throw new Error("--max-parallel 大于 1 时需要 --isolation git-worktree");
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
@@ -239,6 +242,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
         try {
           const record = await sessionStore.load(execution.sessionId);
           if (canonicalHash(record.plan) !== execution.planHash) throw new Error("已关联 Session 的计划哈希不匹配");
+          if (options.maxParallel !== undefined && record.snapshot.maxParallel !== options.maxParallel) throw new Error("已关联 Session 的 maxParallel 已固定，不能在 planner run 中更换");
           if (options.isolation && record.snapshot.isolation?.mode !== options.isolation) throw new Error("已关联 Session 的隔离模式与本次请求不一致；执行配置不可更换");
           if (options.verificationTaskId && (record.snapshot.isolation?.mode !== "git-worktree" || record.snapshot.isolation.verificationTaskId !== options.verificationTaskId)) {
             throw new Error("已关联 Session 的最终验证任务与本次请求不一致；执行配置不可更换");
@@ -294,6 +298,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
       const result = await runPlan({
         plan: draft.plan, workspace: store.workspace, createRunner: options.createRunner, sessionId: execution.sessionId,
         ...(executionIsolation.mode === "git-worktree" ? { isolation: "git-worktree" as const, verificationTaskId: executionIsolation.verificationTaskId } : {}),
+        ...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
         ...(setupProfile ? { setupProfile } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.acceptEdits ? { acceptEdits: true } : {}),

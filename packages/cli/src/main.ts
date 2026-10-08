@@ -13,13 +13,15 @@ import { runPlannerCli } from "./planner-cli.js";
 const usage = `用法：
   token-coupon plan show --file <计划.json>
   token-coupon plan run --file <计划.json> [--workspace <目录>] [--accept-edits]
-      [--isolation git-worktree --verification-task <taskId>] [--setup-file <setup.json>]
+      [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>]
       [--mock-task-scenario <taskId>=<场景> ...]
   token-coupon task show --file <任务.json>
   token-coupon task run --file <任务.json> [--workspace <目录>] [--mock-scenario <场景>] [--accept-edits]
   token-coupon session show --id <sessionId> [--workspace <目录>]
   token-coupon session delivery --id <sessionId> [--workspace <目录>]
   token-coupon session cleanup --id <sessionId> [--workspace <目录>]
+  token-coupon session pause --id <sessionId> [--workspace <目录>]
+  token-coupon session cancel --id <sessionId> [--workspace <目录>]
   token-coupon session land --id <sessionId> --task <taskId> --continue [--workspace <目录>]
   token-coupon session resume --id <sessionId> [--workspace <目录>] [--accept-edits]
       [--mock-task-scenario <taskId>=<场景> ...] [--setup-file <setup.json>]
@@ -32,7 +34,7 @@ const usage = `用法：
 
 interface ParsedCommand {
   kind: "plan" | "task" | "session";
-  action: "show" | "run" | "resume" | "retry" | "delivery" | "land" | "cleanup";
+  action: "show" | "run" | "resume" | "retry" | "delivery" | "land" | "cleanup" | "pause" | "cancel";
   file?: string;
   sessionId?: string;
   taskId?: string;
@@ -44,16 +46,17 @@ interface ParsedCommand {
   verificationTaskId?: string;
   continueLanding: boolean;
   setupFile?: string;
+  maxParallel?: number;
 }
 
 function parseArguments(args: string[]): ParsedCommand | "help" {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) return "help";
   const [kind, action, ...options] = args;
   if (!(["plan", "task", "session"] as const).includes(kind as "plan" | "task" | "session") ||
-      !(["show", "run", "resume", "retry", "delivery", "land", "cleanup"] as const).includes(action as "show" | "run" | "resume" | "retry" | "delivery" | "land" | "cleanup") ||
+      !(["show", "run", "resume", "retry", "delivery", "land", "cleanup", "pause", "cancel"] as const).includes(action as "show" | "run" | "resume" | "retry" | "delivery" | "land" | "cleanup" | "pause" | "cancel") ||
       (kind === "task" && action !== "show" && action !== "run") ||
       (kind === "plan" && action !== "show" && action !== "run") ||
-      (kind === "session" && action !== "show" && action !== "resume" && action !== "retry" && action !== "delivery" && action !== "land" && action !== "cleanup")) {
+      (kind === "session" && action !== "show" && action !== "resume" && action !== "retry" && action !== "delivery" && action !== "land" && action !== "cleanup" && action !== "pause" && action !== "cancel")) {
     throw new Error("命令无效。请运行 token-coupon --help 查看用法。");
   }
 
@@ -68,6 +71,7 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
   let isolation: "git-worktree" | undefined;
   let verificationTaskId: string | undefined;
   let setupFile: string | undefined;
+  let maxParallel: number | undefined;
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index];
     if (option === "--accept-edits") {
@@ -80,7 +84,7 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
       continueLanding = true;
       continue;
     }
-    if (!["--file", "--id", "--task", "--workspace", "--mock-scenario", "--mock-task-scenario", "--isolation", "--verification-task", "--setup-file"].includes(option ?? "")) {
+    if (!["--file", "--id", "--task", "--workspace", "--mock-scenario", "--mock-task-scenario", "--isolation", "--verification-task", "--setup-file", "--max-parallel"].includes(option ?? "")) {
       throw new Error(`不支持的参数：${option}`);
     }
     const value = options[index + 1];
@@ -110,6 +114,10 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
     } else if (option === "--setup-file") {
       if (setupFile !== undefined) throw new Error("--setup-file 只能指定一次");
       setupFile = value;
+    } else if (option === "--max-parallel") {
+      if (maxParallel !== undefined) throw new Error("--max-parallel 只能指定一次");
+      maxParallel = Number(value);
+      if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("--max-parallel 必须是 1 到 8 之间的整数");
     } else {
       const separator = value.indexOf("=");
       if (separator < 1 || separator === value.length - 1) throw new Error("--mock-task-scenario 格式为 <taskId>=<场景>");
@@ -131,13 +139,15 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
   if (kind === "session" && file) throw new Error("--file 不适用于 Session 命令");
   if (kind === "plan" && action === "show" && (mockTaskScenarios.size || acceptEdits)) throw new Error("Mock 场景和 --accept-edits 只适用于 plan run");
   if ((kind !== "plan" || action !== "run") && (isolation || verificationTaskId)) throw new Error("--isolation 和 --verification-task 只适用于 plan run");
+  if ((kind !== "plan" || action !== "run") && maxParallel !== undefined) throw new Error("--max-parallel 只适用于 plan run");
+  if (maxParallel !== undefined && maxParallel > 1 && isolation !== "git-worktree") throw new Error("--max-parallel 大于 1 时需要 --isolation git-worktree");
   if (setupFile && !((kind === "plan" && action === "run") || (kind === "session" && (action === "resume" || action === "retry")))) throw new Error("--setup-file 只适用于 plan run、session resume 或 session retry");
   if (isolation === "git-worktree" && !verificationTaskId) throw new Error("--isolation git-worktree 需要 --verification-task <taskId>");
   if (!isolation && verificationTaskId) throw new Error("--verification-task 需要 --isolation git-worktree");
   if (kind === "task" && mockTaskScenarios.size) throw new Error("--mock-task-scenario 只适用于 plan/session 命令");
   if (kind === "task" && action === "show" && (workspace || mockScenario || acceptEdits)) throw new Error("执行参数只适用于 task run");
   if (kind === "task" && action === "run" && mockScenario && acceptEdits) throw new Error("--mock-scenario 与 --accept-edits 不能同时使用");
-  if (kind === "session" && action !== undefined && ["show", "delivery", "cleanup"].includes(action) && (acceptEdits || mockScenario || mockTaskScenarios.size || setupFile)) throw new Error(`session ${action} 不接受执行参数`);
+  if (kind === "session" && action !== undefined && ["show", "delivery", "cleanup", "pause", "cancel"].includes(action) && (acceptEdits || mockScenario || mockTaskScenarios.size || setupFile)) throw new Error(`session ${action} 不接受执行参数`);
   if (mockScenario && (kind !== "task" || action !== "run")) throw new Error("--mock-scenario 只适用于 task run");
 
   if ((kind === "task" && action === "run") || (kind === "plan" && action === "run") || kind === "session") {
@@ -147,7 +157,7 @@ function parseArguments(args: string[]): ParsedCommand | "help" {
     kind: kind as ParsedCommand["kind"], action: action as ParsedCommand["action"],
     ...(file ? { file } : {}), ...(sessionId ? { sessionId } : {}), ...(taskId ? { taskId } : {}),
     ...(workspace ? { workspace } : {}), ...(mockScenario ? { mockScenario } : {}),
-    mockTaskScenarios, acceptEdits, continueLanding, ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupFile ? { setupFile } : {}),
+    mockTaskScenarios, acceptEdits, continueLanding, ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupFile ? { setupFile } : {}), ...(maxParallel === undefined ? {} : { maxParallel }),
   };
 }
 
@@ -195,11 +205,11 @@ function bindCancellation(): { signal: AbortSignal; dispose: () => void } {
   return { signal: controller.signal, dispose: () => { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); } };
 }
 
-function showRunnerOutput(taskId: string, output: RunnerOutput, label = false): void {
+function showRunnerOutput(taskId: string, output: RunnerOutput, label = false, attemptId?: string): void {
   const displayText = output.displayText ?? output.agentText;
   if (label && (displayText || output.stream === "stderr" || (output.text && output.structuredEvent === undefined))) {
     const stream = output.stream === "stderr" ? process.stderr : process.stdout;
-    stream.write(`\n[${taskId}] `);
+    stream.write(`\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] `);
   }
   if (displayText) process.stdout.write(displayText);
   else if (output.stream === "stderr" && output.text) process.stderr.write(output.text);
@@ -259,12 +269,13 @@ export async function runCli(args: string[]): Promise<number> {
       let currentOutputTask: string | undefined;
       try {
         result = await runPlan({ plan, workspace, createRunner, signal: cancellation.signal, acceptEdits: command.acceptEdits,
+          ...(command.maxParallel === undefined ? {} : { maxParallel: command.maxParallel }),
           ...(command.isolation ? { isolation: command.isolation } : {}), ...(command.verificationTaskId ? { verificationTaskId: command.verificationTaskId } : {}),
           ...(setupProfile ? { setupProfile } : {}),
-          mockTaskScenarios: command.mockTaskScenarios, onOutput: (taskId, output) => {
+          mockTaskScenarios: command.mockTaskScenarios, onOutput: (taskId, output, attemptId) => {
             const firstForTask = taskId !== currentOutputTask;
             currentOutputTask = taskId;
-            showRunnerOutput(taskId, output, firstForTask);
+            showRunnerOutput(taskId, output, (command.maxParallel ?? 1) > 1 || firstForTask, attemptId);
           }, onIdleState: (taskId, state) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`) });
       } finally { cancellation.dispose(); }
       console.log(formatSession(result.snapshot, plan));
@@ -273,6 +284,13 @@ export async function runCli(args: string[]): Promise<number> {
 
     const sessionId = command.sessionId!;
     const sessionStore = new SessionStore(workspace);
+    if (command.action === "pause" || command.action === "cancel") {
+      await sessionStore.requestControl(sessionId, command.action);
+      const record = await sessionStore.load(sessionId);
+      console.log(command.action === "pause" ? "已确认暂停 Session。" : "已确认取消 Session。");
+      console.log(formatSession(record.snapshot, record.plan));
+      return 0;
+    }
     if (command.action === "show") {
       const record = await sessionStore.load(sessionId);
       console.log(formatSession(record.snapshot, record.plan));
@@ -297,11 +315,12 @@ export async function runCli(args: string[]): Promise<number> {
     let result;
     let currentOutputTask: string | undefined;
     try {
+      const sessionMaxParallel = (await sessionStore.load(sessionId)).snapshot.maxParallel ?? 1;
       const operation = { sessionId, workspace, createRunner, signal: cancellation.signal,
-        acceptEdits: command.acceptEdits, mockTaskScenarios: command.mockTaskScenarios, ...(setupProfile ? { setupProfile } : {}), onOutput: (taskId: string, output: RunnerOutput) => {
+        acceptEdits: command.acceptEdits, mockTaskScenarios: command.mockTaskScenarios, ...(setupProfile ? { setupProfile } : {}), onOutput: (taskId: string, output: RunnerOutput, attemptId?: string) => {
           const firstForTask = taskId !== currentOutputTask;
           currentOutputTask = taskId;
-          showRunnerOutput(taskId, output, firstForTask);
+          showRunnerOutput(taskId, output, sessionMaxParallel > 1 || firstForTask, attemptId);
         }, onIdleState: (taskId: string, state: { idle: boolean }) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`) };
       result = command.action === "retry"
         ? await retrySession({ ...operation, taskId: command.taskId! })

@@ -5,7 +5,7 @@ import type { PlanDefinition, PlannedTask } from "./plan.js";
 import { PlanStore, sessionStatusFor } from "./plan-store.js";
 import { executeTask } from "./execute-task.js";
 import type { Runner, RunnerOutput } from "./runner.js";
-import type { SessionRecord, SessionSnapshot, SessionTaskState, TaskResult } from "./session-types.js";
+import type { SessionControlRequest, SessionRecord, SessionSnapshot, SessionTaskState, TaskResult } from "./session-types.js";
 import { SessionLockError, SessionStore } from "./session-store.js";
 import type { TaskDefinition } from "./task.js";
 import { acquireGitRepositoryLock, inspectGitRepository } from "./git-repository.js";
@@ -39,8 +39,9 @@ export interface PlanRunOptions {
   isolation?: "shared" | "git-worktree";
   verificationTaskId?: string;
   setupProfile?: WorktreeSetupProfile;
+  maxParallel?: number;
   beforeCreateSession?: () => Promise<void>;
-  onOutput?: (taskId: string, output: RunnerOutput) => void;
+  onOutput?: (taskId: string, output: RunnerOutput, attemptId?: string) => void;
   onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
@@ -52,7 +53,7 @@ export interface SessionOperationOptions {
   acceptEdits?: boolean;
   mockTaskScenarios?: Map<string, string>;
   setupProfile?: WorktreeSetupProfile;
-  onOutput?: (taskId: string, output: RunnerOutput) => void;
+  onOutput?: (taskId: string, output: RunnerOutput, attemptId?: string) => void;
   onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
@@ -104,6 +105,9 @@ export async function runPlan(options: PlanRunOptions): Promise<SessionOperation
   const store = new SessionStore(options.workspace);
   const sessionId = options.sessionId ?? randomUUID();
   const mode = options.isolation ?? "shared";
+  const maxParallel = options.maxParallel ?? 1;
+  if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("--max-parallel 必须是 1 到 8 之间的整数");
+  if (mode === "shared" && maxParallel !== 1) throw new Error("shared workspace 只支持 --max-parallel 1；并行执行需要 --isolation git-worktree");
   const setupProfile = options.setupProfile ? parseWorktreeSetupProfile(options.setupProfile) : undefined;
   if (mode === "git-worktree" && !options.verificationTaskId) throw new Error("--isolation git-worktree 需要指定 --verification-task");
   if (mode === "shared" && options.verificationTaskId) throw new Error("--verification-task 只适用于 --isolation git-worktree");
@@ -121,7 +125,7 @@ export async function runPlan(options: PlanRunOptions): Promise<SessionOperation
       if (lockedContext.gitCommonDir !== gitContext.gitCommonDir) throw new Error("Git 仓库身份在加锁期间发生变化");
       gitContext = lockedContext;
     }
-    releaseWorkspace = await store.acquireLock();
+    releaseWorkspace = await store.acquireLock(sessionId);
     await options.beforeCreateSession?.();
     const isolation = gitContext ? {
       mode: "git-worktree" as const, status: "initializing" as const,
@@ -132,7 +136,7 @@ export async function runPlan(options: PlanRunOptions): Promise<SessionOperation
       verificationTaskId: options.verificationTaskId!,
       setupHash: setupProfile ? worktreeSetupHash(setupProfile) : null,
     } : { mode: "shared" as const };
-    let record = await store.create(options.plan, sessionId, isolation);
+    let record = await store.create(options.plan, sessionId, isolation, { maxParallel });
     let worktrees: WorktreeIsolation | undefined;
     if (record.snapshot.isolation?.mode === "git-worktree") {
       worktrees = new WorktreeIsolation(record, store);
@@ -157,15 +161,56 @@ export async function resumeSession(options: SessionOperationOptions): Promise<S
     worktrees = await prepareWorktrees(record, store, options.setupProfile);
     if (worktrees) record = await store.load(options.sessionId);
     validateMockTaskScenarios(record.plan, options.mockTaskScenarios ?? new Map());
-    const current = await reconcile(record, store, worktrees);
-    const unresolved = current.snapshot.tasks.filter((state) => ["failed", "timed_out", "cancelled", "interrupted", "blocked"].includes(state.status));
+    let current = await reconcile(record, store, worktrees);
+    const failed = current.snapshot.tasks.filter((state) => ["failed", "timed_out", "cancelled"].includes(state.status) || (state.status === "blocked" && state.reasonCode !== "dependency_not_succeeded"));
+    if (failed.length > 0) throw new Error(`Session 尚有未解决的任务，先用 session retry/land 处理：${failed.map((state) => `${state.taskId}(${state.status})`).join(", ")}`);
+    if (worktrees) current = await landReadyAttempts(current, store, worktrees);
+    const unresolved = current.snapshot.tasks.filter((state) => state.status === "interrupted" || state.status === "blocked");
     if (unresolved.length > 0) throw new Error(`Session 尚有未解决的任务，先用 session retry 指定目标：${unresolved.map((state) => `${state.taskId}(${state.status})`).join(", ")}`);
     await checkRunners(pendingTasks(current), options);
+    current = await store.beginExecution(current);
     return await schedule(current, store, options, undefined, worktrees);
   } finally {
     try { await opened.releaseWorkspace(); }
     finally { await opened.releaseGit?.(); }
   }
+}
+
+async function landReadyAttempts(record: SessionRecord, store: SessionStore, worktrees: WorktreeIsolation): Promise<SessionRecord> {
+  let current = record;
+  const pending = current.isolationJournal?.attempts.filter((attempt) => attempt.status === "committed" &&
+    current.snapshot.tasks.some((state) => state.taskId === attempt.taskId && state.status === "interrupted" && state.reasonCode === "waiting_landing_after_conflict")) ?? [];
+  for (const attempt of pending) {
+    const entry = current.plan.tasks.find(({ task }) => task.id === attempt.taskId);
+    const state = current.snapshot.tasks.find((item) => item.taskId === attempt.taskId);
+    if (!entry || !state || !attempt.taskCommit) throw new Error("recovery_landing_identity_missing：待整合 Attempt 身份不完整");
+    const raw = await store.readAttempt(attempt.attemptId) as Record<string, unknown>;
+    if (raw.attemptId !== attempt.attemptId || raw.taskId !== attempt.taskId || raw.status !== "succeeded") {
+      throw new Error("recovery_landing_runner_not_succeeded：Runner Attempt 不能证明成功，拒绝自动整合");
+    }
+    let handoff: TaskResult;
+    try {
+      handoff = await store.readHandoff(attempt.attemptId) as TaskResult;
+      if (handoff.attemptId !== attempt.attemptId || handoff.taskId !== attempt.taskId || handoff.status !== "succeeded" || handoff.artifactDir !== attemptDirectory(store.workspace, attempt.attemptId)) throw new Error("handoff identity mismatch");
+    } catch {
+      handoff = { taskId: attempt.taskId, attemptId: attempt.attemptId, status: "succeeded", summary: "批次已成功；在人工冲突解决后恢复整合。", summarySource: "none", truncated: false, artifactDir: attemptDirectory(store.workspace, attempt.attemptId) };
+      await store.saveHandoff(attempt.attemptId, handoff);
+    }
+    await worktrees.landSuccessfulAttempt(attempt.attemptId, entry.task.title, { merge: Boolean(attempt.waveId) });
+    const states = new PlanStore(current.plan, current.snapshot).recalculateDependencies(current.snapshot.tasks.map((item) => item.taskId !== attempt.taskId ? item : {
+      ...item, status: "succeeded" as const, activeAttemptId: null, result: handoff, reasonCode: null,
+      attempts: item.attempts.map((ref) => ref.attemptId === attempt.attemptId ? { ...ref, outcome: "recorded" as const } : ref),
+    }));
+    const latest = await store.load(current.snapshot.sessionId);
+    const snapshot: SessionSnapshot = {
+      ...latest.snapshot, revision: latest.snapshot.revision + 1, status: sessionStatusFor(states), tasks: states,
+      schedulerState: "draining", waveId: attempt.waveId ?? null,
+      activeAttemptIds: states.flatMap((item) => item.activeAttemptId ? [item.activeAttemptId] : []), updatedAt: new Date().toISOString(),
+    };
+    await store.save(snapshot);
+    current = await store.load(current.snapshot.sessionId);
+  }
+  return current;
 }
 
 export async function retrySession(options: RetryOptions): Promise<SessionOperationResult> {
@@ -178,7 +223,7 @@ export async function retrySession(options: RetryOptions): Promise<SessionOperat
     worktrees = await prepareWorktrees(record, store, options.setupProfile);
     if (worktrees) record = await store.load(options.sessionId);
     validateMockTaskScenarios(record.plan, options.mockTaskScenarios ?? new Map());
-    const current = await reconcile(record, store, worktrees);
+    let current = await reconcile(record, store, worktrees);
     const entry = current.plan.tasks.find(({ task }) => task.id === options.taskId);
     const state = current.snapshot.tasks.find(({ taskId }) => taskId === options.taskId);
     if (!entry || !state) throw new Error(`Session 中不存在任务：${options.taskId}`);
@@ -186,8 +231,8 @@ export async function retrySession(options: RetryOptions): Promise<SessionOperat
     const stateById = new Map(current.snapshot.tasks.map((item) => [item.taskId, item]));
     if (!entry.dependsOn.every((id) => stateById.get(id)?.status === "succeeded")) throw new Error(`任务 ${options.taskId} 的前置依赖尚未成功`);
     await checkRunners([entry], options);
-    const taskStore = new PlanStore(current.plan, current.snapshot);
-    return await schedule(current, store, options, { taskId: options.taskId, allowRetry: true, taskStore }, worktrees);
+    current = await store.beginExecution(current);
+    return await schedule(current, store, options, { taskId: options.taskId, allowRetry: true, taskStore: new PlanStore(current.plan, current.snapshot) }, worktrees);
   } finally {
     try { await opened.releaseWorkspace(); }
     finally { await opened.releaseGit?.(); }
@@ -232,6 +277,7 @@ export async function continueSessionLanding(options: ContinueLandingOptions): P
     const updatedStates = new PlanStore(latest.plan, latest.snapshot).recalculateDependencies(states);
     const snapshot: SessionSnapshot = {
       ...latest.snapshot, revision: latest.snapshot.revision + 1, status: sessionStatusFor(updatedStates),
+      ...(latest.snapshot.schemaVersion === 3 ? { schedulerState: "idle", waveId: null, activeAttemptIds: [] } : {}),
       tasks: updatedStates, updatedAt: new Date().toISOString(),
     };
     await store.save(snapshot);
@@ -261,6 +307,12 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
     `计划：${snapshot.planId} — ${snapshot.planTitle}`,
     `状态：${snapshot.status}；revision：${snapshot.revision}`,
     `工作目录：${snapshot.workspace}`,
+    `并发上限：${snapshot.maxParallel ?? 1}`,
+    ...(snapshot.executionId ? [`Execution：${snapshot.executionId}`] : []),
+    ...(snapshot.waveId ? [`当前批次：${snapshot.waveId}`] : []),
+    ...(snapshot.activeAttemptIds?.length ? [`活跃 Attempt：${snapshot.activeAttemptIds.join(", ")}`] : []),
+    ...(snapshot.schedulerState ? [`调度器：${snapshot.schedulerState}`] : []),
+    ...(snapshot.controlState?.kind ? [`控制请求：${snapshot.controlState.kind}；${snapshot.controlState.acknowledgedAt ? "已确认" : "等待 owner 确认"}`] : []),
     ...(snapshot.isolation?.mode === "git-worktree" ? [
       `隔离：git-worktree（${snapshot.isolation.status}）`,
       `仓库基线：${snapshot.isolation.baseCommit}`,
@@ -290,12 +342,23 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
 }
 
 async function schedule(record: SessionRecord, store: SessionStore, options: ExecutionOptions, retry?: { taskId: string; allowRetry: true; taskStore: PlanStore }, worktrees?: WorktreeIsolation): Promise<SessionOperationResult> {
+  if (record.snapshot.schemaVersion === 3 && worktrees) {
+    return scheduleParallel(record, store, options, worktrees, retry?.taskId);
+  }
+  if (!retry && (record.snapshot.maxParallel ?? 1) > 1) {
+    throw new Error("并行执行要求 git-worktree Session");
+  }
   let snapshot = record.snapshot;
   let states = snapshot.tasks;
   const planStore = retry?.taskStore ?? new PlanStore(record.plan, snapshot);
   const save = async (nextStates: SessionTaskState[], status: SessionSnapshot["status"]) => {
     const current = worktrees ? (await store.load(snapshot.sessionId)).snapshot : snapshot;
-    const next: SessionSnapshot = { ...current, revision: current.revision + 1, status, tasks: nextStates, updatedAt: new Date().toISOString() };
+    const activeAttemptIds = nextStates.flatMap((state) => state.activeAttemptId ? [state.activeAttemptId] : []);
+    const schedulerState = schedulerStateFor(status);
+    const next: SessionSnapshot = {
+      ...current, revision: current.revision + 1, status, tasks: nextStates, updatedAt: new Date().toISOString(),
+      ...(current.schemaVersion === 3 ? { schedulerState, waveId: null, activeAttemptIds } : {}),
+    };
     await store.save(next);
     snapshot = next;
     states = nextStates;
@@ -365,6 +428,280 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
   return { snapshot };
 }
 
+interface BatchAttemptOutcome {
+  taskId: string;
+  attemptId: string;
+  status: "succeeded" | "failed" | "cancelled" | "timed_out";
+  reasonCode: string | null;
+  result: TaskResult | null;
+  recorded: boolean;
+}
+
+async function scheduleParallel(record: SessionRecord, store: SessionStore, options: ExecutionOptions, worktrees: WorktreeIsolation, retryTaskId?: string): Promise<SessionOperationResult> {
+  let snapshot = record.snapshot;
+  let states = snapshot.tasks;
+  const maxParallel = snapshot.maxParallel ?? 1;
+  const retryOnly = retryTaskId !== undefined;
+  let controlRequest: SessionControlRequest | undefined;
+  let pauseRequested = false;
+  let cancelRequested = false;
+  let activeBatchController: AbortController | undefined;
+  let controlRead = Promise.resolve();
+  let controlFailure: unknown;
+  let writes = Promise.resolve();
+  const serialize = <T>(action: () => Promise<T>): Promise<T> => {
+    const next = writes.then(action, action);
+    writes = next.then(() => undefined, () => undefined);
+    return next;
+  };
+  const emitScheduler = (event: string, details: { taskId?: string; attemptId?: string; waveId?: string; reasonCode?: string } = {}) =>
+    serialize(() => store.appendSchedulerEvent(snapshot.sessionId, snapshot.executionId!, event, details));
+  const refreshControl = () => {
+    controlRead = controlRead.then(async () => {
+      const request = await store.readControlRequest(snapshot.sessionId);
+      if (!request || request.executionId !== snapshot.executionId || snapshot.controlState?.requestId === request.requestId && snapshot.controlState.acknowledgedAt) return;
+      if (controlRequest?.requestId === request.requestId) return;
+      controlRequest = request;
+      if (request.kind === "pause") pauseRequested = true;
+      if (request.kind === "cancel") { cancelRequested = true; activeBatchController?.abort(); }
+      await emitScheduler(request.kind === "pause" ? "scheduler.pause_requested" : "scheduler.cancel_requested");
+      const requestedState = { requestId: request.requestId, kind: request.kind, requestedAt: request.requestedAt, acknowledgedAt: null };
+      await serialize(() => writeSnapshot(states, request.kind === "pause" ? "pausing" : "running", "draining", snapshot.waveId ?? null, requestedState));
+    }).catch((error: unknown) => { controlFailure = error; });
+    return controlRead;
+  };
+  const controlTimer = setInterval(() => { void refreshControl(); }, 100);
+  controlTimer.unref();
+  const abortActiveBatch = () => activeBatchController?.abort();
+  options.signal?.addEventListener("abort", abortActiveBatch, { once: true });
+  if (options.signal?.aborted) abortActiveBatch();
+  const writeSnapshot = async (nextStates: SessionTaskState[], status: SessionSnapshot["status"], schedulerState: NonNullable<SessionSnapshot["schedulerState"]>, waveId: string | null, controlState?: SessionSnapshot["controlState"]) => {
+    const latest = await store.load(snapshot.sessionId);
+    const activeAttemptIds = nextStates.flatMap((state) => state.activeAttemptId ? [state.activeAttemptId] : []);
+    const allSucceeded = nextStates.length > 0 && nextStates.every((state) => state.status === "succeeded");
+    const persistedStatus = allSucceeded ? "succeeded" : activeAttemptIds.length === 0 && ["running", "pausing"].includes(status) ? "ready" : status;
+    const persistedSchedulerState = allSucceeded ? "idle" : schedulerState;
+    const next: SessionSnapshot = {
+      ...latest.snapshot, schemaVersion: 3, revision: latest.snapshot.revision + 1, status: persistedStatus, tasks: nextStates,
+      schedulerState: persistedSchedulerState, waveId: allSucceeded ? null : waveId, activeAttemptIds, updatedAt: new Date().toISOString(),
+      ...(controlState ? { controlState } : {}),
+    };
+    await store.save(next);
+    snapshot = next;
+    states = nextStates;
+  };
+  const persistActivity = (taskId: string, attemptId: string, activity: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => serialize(async () => {
+    const nextStates = states.map((state) => state.taskId !== taskId ? state : {
+      ...state,
+      attempts: state.attempts.map((attempt) => {
+        if (attempt.attemptId !== attemptId) return attempt;
+        const nextAttempt = { ...attempt, lastActivityAt: activity.lastActivityAt };
+        if (activity.idle && activity.idleSince) nextAttempt.idleSince = activity.idleSince;
+        else delete nextAttempt.idleSince;
+        return nextAttempt;
+      }),
+    });
+    await writeSnapshot(nextStates, pauseRequested ? "pausing" : "running", pauseRequested || cancelRequested ? "draining" : "dispatching", snapshot.waveId ?? null);
+  });
+
+  try {
+  while (!options.signal?.aborted && !cancelRequested && !pauseRequested) {
+    await refreshControl();
+    if (controlFailure) throw controlFailure;
+    if (cancelRequested || pauseRequested || options.signal?.aborted) break;
+    const batch = retryTaskId
+      ? record.plan.tasks.filter(({ task }) => task.id === retryTaskId && states.find((state) => state.taskId === retryTaskId)?.status !== "running")
+      : new PlanStore(record.plan, snapshot).nextRunnableBatch(maxParallel, states);
+    if (batch.length === 0) break;
+    const waveId = randomUUID();
+    const waveExecutionId = snapshot.executionId ?? randomUUID();
+    activeBatchController = new AbortController();
+    if (options.signal?.aborted || cancelRequested) activeBatchController.abort();
+    const batchOptions: ExecutionOptions = { ...options, signal: activeBatchController.signal };
+    const attempts = new Map<string, string>();
+    let reserved = states;
+    for (const entry of batch) {
+      const attemptId = randomUUID();
+      attempts.set(entry.task.id, attemptId);
+      reserved = new PlanStore(record.plan, { ...snapshot, tasks: reserved }).beginAttempt(entry.task.id, attemptId, attemptDirectory(store.workspace, attemptId), retryOnly);
+    }
+    states = reserved;
+    await serialize(() => writeSnapshot(states, "running", "dispatching", waveId));
+    for (const entry of batch) await emitScheduler("task.reserved", { taskId: entry.task.id, attemptId: attempts.get(entry.task.id)!, waveId });
+
+    const prepared = new Set<string>();
+    const preparationFailures = new Map<string, string>();
+    for (const entry of batch) {
+      const attemptId = attempts.get(entry.task.id)!;
+      try {
+        await worktrees.createAttempt(entry.task.id, attemptId, { waveId, executionId: waveExecutionId });
+        prepared.add(entry.task.id);
+        await emitScheduler("attempt.dispatched", { taskId: entry.task.id, attemptId, waveId });
+      } catch (error) {
+        const reasonCode = gitFailureCode(error, "git_worktree_create_failed");
+        await worktrees.markAttempt(attemptId, "failed", { reasonCode }).catch(() => undefined);
+        preparationFailures.set(entry.task.id, reasonCode);
+      }
+    }
+
+    const outcomes: BatchAttemptOutcome[] = await Promise.all(batch.map((entry) => {
+      const attemptId = attempts.get(entry.task.id)!;
+      if (!prepared.has(entry.task.id)) return Promise.resolve({ taskId: entry.task.id, attemptId, status: "failed" as const, reasonCode: preparationFailures.get(entry.task.id) ?? "git_worktree_create_failed", result: null, recorded: false });
+      return executePreparedAttempt(entry, attemptId, states, record.plan, store, batchOptions, worktrees,
+        (activity) => persistActivity(entry.task.id, attemptId, activity));
+    }));
+    for (const outcome of outcomes) await emitScheduler("attempt.finished", {
+      taskId: outcome.taskId, attemptId: outcome.attemptId, waveId,
+      ...(outcome.reasonCode ? { reasonCode: outcome.reasonCode } : {}),
+    });
+
+    for (let index = 0; index < batch.length; index += 1) {
+      const entry = batch[index]!;
+      const outcome = outcomes[index]!;
+      if (outcome.status !== "succeeded" || entry.task.id === worktrees.verificationTaskId) continue;
+      try {
+        await worktrees.prepareSuccessfulAttempt(outcome.attemptId, entry.task.title);
+        await emitScheduler("task.ready_to_land", { taskId: entry.task.id, attemptId: outcome.attemptId, waveId });
+        if (outcome.result) await store.saveHandoff(outcome.attemptId, outcome.result);
+      } catch (error) {
+        const reasonCode = gitFailureCode(error, "git_landing_failed");
+        await worktrees.markAttempt(outcome.attemptId, "failed", { reasonCode }).catch(() => undefined);
+        outcomes[index] = { ...outcome, status: "failed", reasonCode, result: null, recorded: true };
+      }
+    }
+
+    let landingBlocked = false;
+    for (let index = 0; index < batch.length; index += 1) {
+      const entry = batch[index]!;
+      const outcome = outcomes[index]!;
+      let finalStatus = outcome.status;
+      let reasonCode = outcome.reasonCode;
+      let result = outcome.result;
+      let recorded = outcome.recorded;
+      if (outcome.status !== "succeeded") {
+        await worktrees.markAttempt(outcome.attemptId, outcome.status === "cancelled" ? "cancelled" : "failed", { reasonCode: reasonCode ?? "runner_failed" }).catch(() => undefined);
+      }
+      if (outcome.status === "succeeded" && !landingBlocked) {
+        try {
+          const landed = entry.task.id === worktrees.verificationTaskId
+            ? await worktrees.completeVerificationAttempt(outcome.attemptId)
+            : await worktrees.landSuccessfulAttempt(outcome.attemptId, entry.task.title, { merge: batch.length > 1 });
+          result = result ?? { taskId: entry.task.id, attemptId: outcome.attemptId, status: "succeeded", summary: "", summarySource: "none", truncated: false, artifactDir: attemptDirectory(store.workspace, outcome.attemptId) };
+          await store.saveHandoff(outcome.attemptId, result);
+          if (!landed.noChanges && landed.integrationHead !== worktrees.integrationHead) throw new Error("integration_head_not_recorded：Git journal 尚未记录落地 head");
+          finalStatus = "succeeded";
+          reasonCode = null;
+          recorded = true;
+          await emitScheduler("task.landed", { taskId: entry.task.id, attemptId: outcome.attemptId, waveId });
+        } catch (error) {
+          landingBlocked = true;
+          finalStatus = "failed";
+          reasonCode = gitFailureCode(error, "git_landing_failed");
+          result = null;
+          await emitScheduler("scheduler.recovery_required", { taskId: entry.task.id, attemptId: outcome.attemptId, waveId, reasonCode });
+          await worktrees.saveBlocked(reasonCode).catch(() => undefined);
+        }
+      } else if (outcome.status === "succeeded" && landingBlocked) {
+        finalStatus = "interrupted" as never;
+        reasonCode = "waiting_landing_after_conflict";
+        result = null;
+        await emitScheduler("task.waiting_landing", { taskId: entry.task.id, attemptId: outcome.attemptId, waveId, reasonCode });
+      } else if (outcome.status !== "succeeded") {
+        await emitScheduler(outcome.status === "cancelled" ? "task.cancelled" : "task.failed", {
+          taskId: entry.task.id, attemptId: outcome.attemptId, waveId, ...(reasonCode ? { reasonCode } : {}),
+        });
+      }
+      const update = await serialize(async () => {
+        const taskStore = new PlanStore(record.plan, snapshot);
+        let nextStates = taskStore.finishAttempt(entry.task.id, outcome.attemptId, finalStatus, reasonCode, result, states);
+        if (!recorded) nextStates = nextStates.map((item) => item.taskId === entry.task.id ? {
+          ...item, attempts: item.attempts.map((attempt) => attempt.attemptId === outcome.attemptId ? { ...attempt, outcome: "record_missing" as const } : attempt),
+        } : item);
+        await writeSnapshot(nextStates, pauseRequested ? "pausing" : "running", landingBlocked ? "blocked" : "draining", waveId);
+        return nextStates.find((item) => item.taskId === entry.task.id)?.status;
+      });
+      if (update === "failed" || update === "cancelled" || update === "timed_out" || update === "interrupted" || landingBlocked) {
+        // Every worker in the batch has finished; remaining task results are still persisted below.
+      }
+    }
+    await serialize(async () => writeSnapshot(states, pauseRequested ? "pausing" : "running", landingBlocked ? "blocked" : pauseRequested || cancelRequested ? "draining" : "dispatching", null));
+    activeBatchController = undefined;
+    await refreshControl();
+    if (retryOnly || landingBlocked || outcomes.some((item) => item.status !== "succeeded") || options.signal?.aborted || cancelRequested || pauseRequested) break;
+  }
+
+  await refreshControl();
+  if (controlFailure) throw controlFailure;
+  await serialize(async () => {
+    let status: SessionSnapshot["status"];
+    let schedulerState: NonNullable<SessionSnapshot["schedulerState"]>;
+    if (states.length > 0 && states.every((state) => state.status === "succeeded")) { status = "succeeded"; schedulerState = "idle"; }
+    else if (options.signal?.aborted || cancelRequested || states.some((state) => state.status === "cancelled")) { status = "cancelled"; schedulerState = "cancelled"; }
+    else if (pauseRequested) { status = "paused"; schedulerState = "paused"; }
+    else if (states.some((state) => ["failed", "timed_out", "blocked"].includes(state.status))) { status = "failed"; schedulerState = "failed"; }
+    else if (states.some((state) => state.status === "interrupted")) { status = "interrupted"; schedulerState = "blocked"; }
+    else { status = "ready"; schedulerState = "idle"; }
+    const acknowledgedAt = controlRequest ? new Date().toISOString() : null;
+    const controlState = controlRequest ? { requestId: controlRequest.requestId, kind: controlRequest.kind, requestedAt: controlRequest.requestedAt, acknowledgedAt } : undefined;
+    await writeSnapshot(states, status, schedulerState, null, controlState);
+    await store.appendSchedulerEvent(snapshot.sessionId, snapshot.executionId!,
+      status === "paused" ? "scheduler.paused" : status === "cancelled" ? "scheduler.cancelled" : status === "failed" || status === "interrupted" ? "scheduler.blocked" : status === "succeeded" ? "scheduler.completed" : "scheduler.idle");
+    if (controlRequest && acknowledgedAt) await store.saveControlAck(controlRequest, acknowledgedAt);
+  });
+  } finally {
+    clearInterval(controlTimer);
+    options.signal?.removeEventListener("abort", abortActiveBatch);
+  }
+  if (!retryTaskId) return { snapshot };
+  const retryState = snapshot.tasks.find((state) => state.taskId === retryTaskId);
+  return { snapshot, operationStatus: retryState?.status === "succeeded" ? "succeeded" : retryState?.status === "timed_out" ? "timed_out" : retryState?.status === "cancelled" ? "cancelled" : "failed" };
+}
+
+async function executePreparedAttempt(entry: PlannedTask, attemptId: string, states: SessionTaskState[], plan: PlanDefinition, store: SessionStore, options: ExecutionOptions,
+  worktrees: WorktreeIsolation, persistActivity: (activity: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => Promise<void>): Promise<BatchAttemptOutcome> {
+  try {
+    await worktrees.runSetup(attemptId, options.setupProfile, options.signal);
+  } catch (error) {
+    const reasonCode = gitFailureCode(error, "workspace_setup_failed");
+    return { taskId: entry.task.id, attemptId, status: options.signal?.aborted ? "cancelled" : "failed", reasonCode, result: null, recorded: false };
+  }
+  const gitAttempt = worktrees.getAttempt(attemptId);
+  if (!gitAttempt) return { taskId: entry.task.id, attemptId, status: "failed", reasonCode: "attempt_journal_missing", result: null, recorded: false };
+  try {
+    const isVerification = worktrees.verificationTaskId === entry.task.id;
+    const effectiveTask = withGitExecutionInstructions(withDependencyContext(entry, states), gitAttempt.worktreePath, gitAttempt.baseCommit, isVerification);
+    const scenario = options.mockTaskScenarios?.get(entry.task.id);
+    const allowEdits = options.acceptEdits && entry.task.execution.runnerId === "claude-code";
+    const runner = options.createRunner(entry.task, { ...(allowEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}) });
+    const decisionConstraints = resolveTaskDecisions(plan, entry);
+    const collector = new OutputCollector();
+    const result = await executeTask({
+      task: effectiveTask, cwd: gitAttempt.worktreePath, artifactWorkspace: store.workspace, runner, attemptId,
+      ...(decisionConstraints.length ? { decisionConstraints } : {}), ...(options.signal === undefined ? {} : { signal: options.signal }),
+      onOutput: (output) => { collector.push(output); options.onOutput?.(entry.task.id, output, attemptId); },
+      onIdleState: (state) => { options.onIdleState?.(entry.task.id, state); return persistActivity(state); },
+    });
+    const status = result.attempt.status;
+    if (status === "succeeded") return { taskId: entry.task.id, attemptId, status, reasonCode: null, result: collector.toResult(entry.task.id, attemptId, result.artifactDir), recorded: true };
+    const mapped = status === "timed_out" ? "timed_out" : status === "cancelled" ? "cancelled" : "failed";
+    return { taskId: entry.task.id, attemptId, status: mapped, reasonCode: result.attempt.reasonCode, result: null, recorded: true };
+  } catch (error) {
+    if (error instanceof SessionLockError) throw error;
+    const reasonCode = "attempt_or_handoff_record_failed";
+    return { taskId: entry.task.id, attemptId, status: "failed", reasonCode, result: null, recorded: false };
+  }
+}
+
+function schedulerStateFor(status: SessionSnapshot["status"]): NonNullable<SessionSnapshot["schedulerState"]> {
+  if (status === "running") return "dispatching";
+  if (status === "pausing") return "draining";
+  if (status === "paused") return "paused";
+  if (status === "cancelled") return "cancelled";
+  if (status === "failed") return "failed";
+  if (status === "interrupted" || status === "blocked") return "blocked";
+  return "idle";
+}
+
 async function runOne(entry: PlannedTask, attemptId: string, states: SessionTaskState[], plan: PlanDefinition, store: SessionStore, options: ExecutionOptions,
   finish: (status: "succeeded" | "failed" | "cancelled" | "timed_out", reasonCode: string | null, result: TaskResult | null, recorded: boolean) => Promise<void>,
   persistActivity: (state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => Promise<void>,
@@ -401,7 +738,7 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
       attemptId,
       ...(decisionConstraints.length ? { decisionConstraints } : {}),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      onOutput: (output) => { collector.push(output); options.onOutput?.(entry.task.id, output); },
+      onOutput: (output) => { collector.push(output); options.onOutput?.(entry.task.id, output, attemptId); },
       onIdleState: (state) => {
         options.onIdleState?.(entry.task.id, state);
         return persistActivity(state);
@@ -599,7 +936,11 @@ async function reconcile(record: SessionRecord, store: SessionStore, worktrees?:
     } : item);
   }
   states = new PlanStore(currentRecord.plan, currentRecord.snapshot).recalculateDependencies(states);
-  const snapshot = { ...currentRecord.snapshot, revision: currentRecord.snapshot.revision + 1, status: sessionStatusFor(states), tasks: states, updatedAt: new Date().toISOString() };
+  const snapshot = {
+    ...currentRecord.snapshot, revision: currentRecord.snapshot.revision + 1, status: sessionStatusFor(states), tasks: states,
+    ...(currentRecord.snapshot.schemaVersion === 3 ? { schedulerState: "blocked" as const, waveId: null, activeAttemptIds: [] } : {}),
+    updatedAt: new Date().toISOString(),
+  };
   await store.save(snapshot);
   return { ...currentRecord, snapshot };
 }

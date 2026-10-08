@@ -19,6 +19,16 @@ export class PlanStore {
     });
   }
 
+  nextRunnableBatch(limit: number, states = this.snapshot.tasks, excludedTaskIds: ReadonlySet<string> = new Set()): PlannedTask[] {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("并发上限必须是正整数");
+    const stateById = new Map(states.map((state) => [state.taskId, state]));
+    return this.plan.tasks.filter((entry) => {
+      const state = stateById.get(entry.task.id);
+      return !excludedTaskIds.has(entry.task.id) && state?.status === "planned" &&
+        entry.dependsOn.every((id) => stateById.get(id)?.status === "succeeded");
+    }).slice(0, limit);
+  }
+
   beginAttempt(taskId: string, attemptId: string, artifactDir: string, allowRetry = false): SessionTaskState[] {
     const entry = this.taskById.get(taskId);
     const current = this.snapshot.tasks.find((state) => state.taskId === taskId);
@@ -40,7 +50,7 @@ export class PlanStore {
     } : state);
   }
 
-  finishAttempt(taskId: string, attemptId: string, status: "succeeded" | "failed" | "cancelled" | "timed_out", reasonCode: string | null, result: TaskResult | null, states = this.snapshot.tasks): SessionTaskState[] {
+  finishAttempt(taskId: string, attemptId: string, status: "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted" | "blocked", reasonCode: string | null, result: TaskResult | null, states = this.snapshot.tasks): SessionTaskState[] {
     const current = states.find((state) => state.taskId === taskId);
     if (!current || current.status !== "running" || current.activeAttemptId !== attemptId) {
       throw new Error(`Attempt ${attemptId} 不是任务 ${taskId} 的当前执行`);

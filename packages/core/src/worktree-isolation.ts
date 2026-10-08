@@ -42,16 +42,19 @@ export class WorktreeIsolation {
     const worktreePath = this.isolation.integrationWorktree;
     const existing = await findWorktree(this.isolation.repositoryRoot, worktreePath);
     const completed = this.record.snapshot.status === "succeeded" && this.record.snapshot.tasks.every((task) => task.status === "succeeded");
+    const unresolvedConflict = this.journal.attempts.find((attempt) => attempt.status === "conflicted");
+    if (unresolvedConflict) {
+      const status = existing
+        ? (await runGit(existing.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout
+        : "";
+      throw new Error(status.length
+        ? `git_merge_conflict_unresolved：Attempt ${unresolvedConflict.attemptId} 的整合冲突仍未提交；请在 integration worktree 解决后执行 session land --continue`
+        : `git_merge_conflict_requires_continue：Attempt ${unresolvedConflict.attemptId} 仍需通过 session land --continue 校验并记录人工整合`);
+    }
     if (existing) {
       const actualHead = await this.assertWorktree(existing.path, this.isolation.integrationBranch);
       if (actualHead !== this.journal.integrationHead) {
-        const landed = this.journal.attempts.find((attempt) => attempt.status === "committed" && attempt.taskCommit === actualHead && attempt.baseCommit === this.journal.integrationHead);
-        if (!landed) throw new Error("integration_head_changed：整合 worktree 的提交不符合 journal 中任何待恢复操作");
-        this.journal = {
-          ...this.journal, integrationHead: actualHead, updatedAt: new Date().toISOString(),
-          attempts: this.journal.attempts.map((attempt) => attempt.attemptId === landed.attemptId ? { ...attempt, status: "landed" } : attempt),
-        };
-        await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
+        await this.recoverIntegrationAdvance(actualHead);
       }
     } else if (completed) {
       const branchHead = (await runGit(this.isolation.repositoryRoot, ["rev-parse", "--verify", `refs/heads/${this.isolation.integrationBranch}^{commit}`])).stdout.trim();
@@ -81,20 +84,59 @@ export class WorktreeIsolation {
     await this.recoverInterruptedCommits();
     const actualHead = await this.readHead(this.isolation.integrationWorktree, this.isolation.integrationBranch);
     if (actualHead !== this.journal.integrationHead) {
-      const landed = this.journal.attempts.find((attempt) => attempt.status === "committed" && attempt.taskCommit === actualHead && attempt.baseCommit === this.journal.integrationHead);
-      if (!landed) throw new Error("integration_head_changed：恢复提交后整合 worktree 的 HEAD 仍不符合 journal");
-      this.journal = {
-        ...this.journal, integrationHead: actualHead, updatedAt: new Date().toISOString(),
-        attempts: this.journal.attempts.map((attempt) => attempt.attemptId === landed.attemptId ? { ...attempt, status: "landed" } : attempt),
-      };
-      await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
+      await this.recoverIntegrationAdvance(actualHead);
     }
     this.journal = { ...this.journal, status: "ready", updatedAt: new Date().toISOString() };
     await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
     await this.saveIsolationStatus("ready");
   }
 
-  async createAttempt(taskId: string, attemptId: string): Promise<GitIsolationAttempt> {
+  getAttempt(attemptId: string): GitIsolationAttempt | undefined {
+    const item = this.journal.attempts.find((attempt) => attempt.attemptId === attemptId);
+    return item ? { ...item } : undefined;
+  }
+
+  private async recoverIntegrationAdvance(actualHead: string): Promise<void> {
+    const candidate = this.journal.attempts.find((attempt) =>
+      (attempt.status === "committed" && attempt.taskCommit === actualHead && attempt.baseCommit === this.journal.integrationHead) ||
+      (attempt.status === "merging" && attempt.taskCommit && attempt.preIntegrationHead === this.journal.integrationHead));
+    if (!candidate) throw new Error("integration_head_changed：整合 worktree 的提交不符合 journal 中任何待恢复操作");
+    const status = (await runGit(this.isolation.integrationWorktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
+    if (status.length) throw new Error("integration_worktree_dirty：检测到尚未完成的整合现场；拒绝覆盖 journal 状态");
+    if (!candidate.taskCommit) throw new Error("merge_recovery_task_commit_missing：journal 中缺少 Attempt taskCommit");
+    await this.assertWorktree(candidate.worktreePath, candidate.branch, candidate.taskCommit);
+    const attemptStatus = (await runGit(candidate.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
+    const taskParents = (await runGit(candidate.worktreePath, ["rev-list", "--parents", "-n", "1", candidate.taskCommit])).stdout.trim().split(/\s+/).slice(1);
+    const committedPaths = parseNulPaths((await runGit(candidate.worktreePath, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", candidate.taskCommit])).stdout);
+    for (const path of committedPaths) assertSafeGitPath(path);
+    const ignored = await this.ignoredPaths(candidate.worktreePath, committedPaths);
+    if (attemptStatus.length || taskParents.length !== 1 || taskParents[0] !== candidate.baseCommit || !samePathSet(committedPaths, candidate.changedFiles) ||
+        committedPaths.some((path) => ignored.has(path) || path === ".token-coupon" || path.startsWith(".token-coupon/"))) {
+      throw new Error("merge_recovery_attempt_invalid：Attempt 提交、父提交、文件清单或 worktree 状态无法验证");
+    }
+    let integrationCommit: string | null = null;
+    let mergeParents: string[] = [];
+    if (candidate.status === "merging") {
+      const line = (await runGit(this.isolation.integrationWorktree, ["rev-list", "--parents", "-n", "1", actualHead])).stdout.trim().split(/\s+/);
+      integrationCommit = line[0] ?? null;
+      mergeParents = line.slice(1);
+      if (integrationCommit !== actualHead || mergeParents.length !== 2 || mergeParents[0] !== candidate.preIntegrationHead || mergeParents[1] !== candidate.taskCommit) {
+        throw new Error("merge_recovery_identity_mismatch：integration HEAD 不是 journal 中预期的双父 merge commit");
+      }
+    } else if (actualHead !== candidate.taskCommit) {
+      throw new Error("integration_head_changed：待恢复的 fast-forward HEAD 与 taskCommit 不一致");
+    }
+    this.journal = {
+      ...this.journal, integrationHead: actualHead, updatedAt: new Date().toISOString(),
+      attempts: this.journal.attempts.map((attempt) => attempt.attemptId === candidate.attemptId ? {
+        ...attempt, status: "landed", integrationCommit, postIntegrationHead: actualHead,
+        mergeParents, conflictPaths: [], recoveryStage: "journal_saved",
+      } : attempt),
+    };
+    await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
+  }
+
+  async createAttempt(taskId: string, attemptId: string, identity: { waveId?: string; executionId?: string } = {}): Promise<GitIsolationAttempt> {
     if (this.journal.status !== "ready") throw new Error("git_isolation_not_ready：Session 整合 worktree 尚未就绪");
     const existing = this.journal.attempts.find((item) => item.attemptId === attemptId);
     if (existing) {
@@ -110,6 +152,8 @@ export class WorktreeIsolation {
       branch: `token-coupon/attempt/${attemptId}`,
       worktreePath: join(this.store.workspace, ".token-coupon", "worktrees", this.record.snapshot.sessionId, "attempts", attemptId),
       status: "creating", taskCommit: null, changedFiles: [], reasonCode: null,
+      ...(identity.waveId ? { waveId: identity.waveId } : {}), ...(identity.executionId ? { executionId: identity.executionId } : {}),
+      preIntegrationHead: null, integrationCommit: null, postIntegrationHead: null, mergeParents: [], conflictPaths: [],
     };
     this.journal = { ...this.journal, attempts: [...this.journal.attempts, attempt], updatedAt: new Date().toISOString() };
     await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
@@ -125,7 +169,7 @@ export class WorktreeIsolation {
     return ready;
   }
 
-  async markAttempt(attemptId: string, status: GitIsolationAttempt["status"], values: Partial<Pick<GitIsolationAttempt, "taskCommit" | "changedFiles" | "reasonCode">> = {}): Promise<void> {
+  async markAttempt(attemptId: string, status: GitIsolationAttempt["status"], values: Partial<GitIsolationAttempt> = {}): Promise<void> {
     const current = this.journal.attempts.find((item) => item.attemptId === attemptId);
     if (!current) throw new Error(`Git Session journal 中没有 Attempt：${attemptId}`);
     const next = { ...current, ...values, status };
@@ -164,16 +208,26 @@ export class WorktreeIsolation {
     if (failure) throw failure;
   }
 
-  async landSuccessfulAttempt(attemptId: string, taskTitle: string): Promise<LandedTaskChange> {
+  async landSuccessfulAttempt(attemptId: string, taskTitle: string, options: { merge?: boolean } = {}): Promise<LandedTaskChange> {
+    const prepared = await this.prepareSuccessfulAttempt(attemptId, taskTitle);
+    if (prepared.noChanges) return prepared;
     const attempt = this.journal.attempts.find((item) => item.attemptId === attemptId);
     if (!attempt) throw new Error(`Git Session journal 中没有 Attempt：${attemptId}`);
-    if (attempt.status === "landed" || attempt.status === "no_changes") {
+    if (attempt.status === "landed") return prepared;
+    if (attempt.status !== "committed" && attempt.status !== "merging") throw new Error(`attempt_not_ready_to_land：Attempt 当前状态为 ${attempt.status}`);
+    return this.landCommittedAttempt(attempt, prepared.ignoredFiles, options.merge ?? false);
+  }
+
+  async prepareSuccessfulAttempt(attemptId: string, taskTitle: string): Promise<LandedTaskChange> {
+    const attempt = this.journal.attempts.find((item) => item.attemptId === attemptId);
+    if (!attempt) throw new Error(`Git Session journal 中没有 Attempt：${attemptId}`);
+    if (attempt.status === "landed" || attempt.status === "no_changes" || attempt.status === "committed" || attempt.status === "merging") {
       return { taskCommit: attempt.taskCommit, integrationHead: this.journal.integrationHead, changedFiles: attempt.changedFiles, ignoredFiles: [], noChanges: attempt.status === "no_changes" };
     }
-    if (attempt.status === "committed") return this.landCommittedAttempt(attempt);
+    if (attempt.status !== "ready") throw new Error(`attempt_not_ready_to_commit：Attempt 当前状态为 ${attempt.status}`);
     await this.assertWorktree(attempt.worktreePath, attempt.branch, attempt.baseCommit);
     const integrationHead = await this.readHead(this.isolation.integrationWorktree, this.isolation.integrationBranch);
-    if (integrationHead !== attempt.baseCommit || this.journal.integrationHead !== attempt.baseCommit) throw new Error("landing_base_changed：整合分支已在任务执行期间变化，保留现场并停止调度");
+    if (this.journal.integrationHead !== integrationHead || integrationHead !== attempt.baseCommit) throw new Error("landing_base_changed：提交 Attempt 前整合分支已变化，保留现场并停止调度");
     const integrationStatus = (await runGit(this.isolation.integrationWorktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
     if (integrationStatus.length) throw new Error("integration_worktree_dirty：整合 worktree 有未提交修改，拒绝自动整合");
 
@@ -233,7 +287,7 @@ export class WorktreeIsolation {
       throw new Error("commit_hook_left_worktree_dirty：提交 hook 留下未提交修改，未整合任务提交");
     }
     await this.markAttempt(attemptId, "committed", { taskCommit, changedFiles: committedPaths });
-    return this.landCommittedAttempt({ ...attempt, status: "committed", taskCommit, changedFiles: committedPaths }, ignoredFiles);
+    return { taskCommit, integrationHead: this.journal.integrationHead, changedFiles: committedPaths, ignoredFiles, noChanges: false };
   }
 
   async completeVerificationAttempt(attemptId: string): Promise<LandedTaskChange> {
@@ -282,10 +336,22 @@ export class WorktreeIsolation {
     if (integrationStatus.length) throw new Error("integration_worktree_dirty：人工整合 worktree 仍有未提交改动或冲突");
     await runGit(this.isolation.integrationWorktree, ["merge-base", "--is-ancestor", attempt.baseCommit, integrationHead]);
     if (!noTaskCommit) await runGit(this.isolation.integrationWorktree, ["merge-base", "--is-ancestor", attemptHead, integrationHead]);
+    let mergeParents: string[] = [];
+    if (attempt.status === "conflicted") {
+      if (!attempt.taskCommit || !attempt.preIntegrationHead) throw new Error("manual_merge_identity_missing：冲突 Attempt 缺少任务提交或整合前 HEAD");
+      mergeParents = (await runGit(this.isolation.integrationWorktree, ["rev-list", "--parents", "-n", "1", integrationHead])).stdout.trim().split(/\s+/).slice(1);
+      if (mergeParents.length !== 2 || mergeParents[0] !== attempt.preIntegrationHead || mergeParents[1] !== attempt.taskCommit) {
+        throw new Error("manual_merge_parents_mismatch：人工解决提交必须保留预期整合 head 和 Attempt taskCommit 两个父提交");
+      }
+    }
     this.journal = {
       ...this.journal, status: "ready", integrationHead, updatedAt: new Date().toISOString(),
       attempts: this.journal.attempts.map((item) => item.attemptId === attemptId
-        ? { ...item, status: noTaskCommit ? "no_changes" : "landed", taskCommit: noTaskCommit ? null : attemptHead, changedFiles: paths, reasonCode: null }
+        ? { ...item, status: noTaskCommit ? "no_changes" : "landed", taskCommit: noTaskCommit ? null : attemptHead, changedFiles: paths, reasonCode: null,
+          integrationCommit: attempt.status === "conflicted" ? integrationHead : item.integrationCommit ?? null,
+          preIntegrationHead: attempt.status === "conflicted" ? attempt.preIntegrationHead! : item.preIntegrationHead ?? null,
+          postIntegrationHead: integrationHead, mergeParents: attempt.status === "conflicted" ? mergeParents : item.mergeParents ?? [],
+          conflictPaths: [], recoveryStage: "journal_saved" }
         : item),
     };
     await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
@@ -401,7 +467,7 @@ export class WorktreeIsolation {
     }
   }
 
-  private async landCommittedAttempt(attempt: GitIsolationAttempt, ignoredFiles: string[] = []): Promise<LandedTaskChange> {
+  private async landCommittedAttempt(attempt: GitIsolationAttempt, ignoredFiles: string[] = [], merge = false): Promise<LandedTaskChange> {
     const taskCommit = attempt.taskCommit;
     if (!taskCommit) throw new Error("committed_attempt_missing_oid：已提交 Attempt 缺少 commit OID");
     await this.assertWorktree(attempt.worktreePath, attempt.branch, taskCommit);
@@ -416,17 +482,39 @@ export class WorktreeIsolation {
     const integrationHead = await this.readHead(this.isolation.integrationWorktree, this.isolation.integrationBranch);
     const integrationStatus = (await runGit(this.isolation.integrationWorktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
     if (integrationStatus.length) throw new Error("integration_worktree_dirty：整合 worktree 有未提交修改，拒绝整合");
-    if (integrationHead === attempt.baseCommit && this.journal.integrationHead === attempt.baseCommit) {
+    if (merge) {
+      if (this.journal.integrationHead !== integrationHead) throw new Error("landing_base_changed：journal 与整合分支 HEAD 不一致");
+      await runGit(this.isolation.repositoryRoot, ["merge-base", "--is-ancestor", attempt.baseCommit, integrationHead]);
+      await this.markAttempt(attempt.attemptId, "merging", {
+        preIntegrationHead: integrationHead, integrationCommit: null, postIntegrationHead: null, mergeParents: [], conflictPaths: [], recoveryStage: "merge_started",
+      });
+      try {
+        await runGit(this.isolation.integrationWorktree, ["merge", "--no-ff", "--no-edit", taskCommit]);
+      } catch (error) {
+        const conflictPaths = parseNulPaths((await runGit(this.isolation.integrationWorktree, ["diff", "--name-only", "--diff-filter=U", "-z"]).catch(() => ({ stdout: "", stderr: "", stdoutBuffer: Buffer.alloc(0) }))).stdout);
+        await this.markAttempt(attempt.attemptId, "conflicted", { conflictPaths, reasonCode: "git_merge_conflict", recoveryStage: "merge_started" }).catch(() => undefined);
+        this.journal = { ...this.journal, status: "blocked", updatedAt: new Date().toISOString() };
+        await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal).catch(() => undefined);
+        throw new Error("git_merge_conflict：并行任务整合产生冲突；保留 integration worktree 现场，请人工解决后执行 session land --continue。" + conflictPaths.join(", "), { cause: error });
+      }
+    } else if (integrationHead === attempt.baseCommit && this.journal.integrationHead === attempt.baseCommit) {
       await runGit(this.isolation.integrationWorktree, ["merge", "--ff-only", taskCommit]);
     } else if (!(integrationHead === taskCommit && this.journal.integrationHead === attempt.baseCommit)) {
       throw new Error("landing_base_changed：整合分支已变化；任务提交保留在 Attempt 分支，需人工检查");
     }
     const landedHead = await this.readHead(this.isolation.integrationWorktree, this.isolation.integrationBranch);
-    if (landedHead !== taskCommit) throw new Error("landing_head_mismatch：整合结果与任务提交不一致，需人工检查");
+    let mergeParents: string[] = [];
+    if (merge) {
+      mergeParents = (await runGit(this.isolation.integrationWorktree, ["rev-list", "--parents", "-n", "1", landedHead])).stdout.trim().split(/\s+/).slice(1);
+      if (mergeParents.length !== 2 || mergeParents[0] !== integrationHead || mergeParents[1] !== taskCommit) {
+        throw new Error("landing_merge_parents_mismatch：merge commit 的父提交与预期不一致");
+      }
+    } else if (landedHead !== taskCommit) throw new Error("landing_head_mismatch：整合结果与任务提交不一致，需人工检查");
     this.journal = {
       ...this.journal, integrationHead: landedHead, updatedAt: new Date().toISOString(),
       attempts: this.journal.attempts.map((item) => item.attemptId === attempt.attemptId
-        ? { ...item, status: "landed", taskCommit, changedFiles: committedPaths }
+        ? { ...item, status: "landed", taskCommit, changedFiles: committedPaths, preIntegrationHead: integrationHead,
+          integrationCommit: merge ? landedHead : null, postIntegrationHead: landedHead, mergeParents, conflictPaths: [], recoveryStage: "journal_saved" }
         : item),
     };
     await this.store.saveIsolationJournal(this.record.snapshot.sessionId, this.journal);
