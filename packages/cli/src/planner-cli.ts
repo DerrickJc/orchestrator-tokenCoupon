@@ -34,7 +34,7 @@ const HELP = [
   "  token-coupon planner replace --id <planningId> --file <计划.json> [--workspace <目录>]",
   "  token-coupon planner approve --id <planningId> --revision <版本> [--waive-findings <F1,F2> --waiver-reason <原因>] [--workspace <目录>]",
   "  token-coupon planner run --id <planningId> [--workspace <目录>] [--accept-edits]",
-  "      [--isolation git-worktree --verification-task <taskId>] [--setup-file <setup.json>]",
+  "      [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>]",
   "",
   "DeepSeek Planner 配置：TOKEN_COUPON_PLANNER_API_KEY、TOKEN_COUPON_PLANNER_MODEL、",
   "TOKEN_COUPON_PLANNER_BASE_URL（默认 https://api.deepseek.com）。",
@@ -213,11 +213,12 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
       const result = await cancellable((signal) => runApprovedPlanner({
           planningId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
           ...(get("--isolation") === "git-worktree" ? { isolation: "git-worktree" as const } : {}),
-          ...(get("--verification-task") ? { verificationTaskId: get("--verification-task")! } : {}), signal,
+          ...(get("--verification-task") ? { verificationTaskId: get("--verification-task")! } : {}),
+          ...(get("--max-parallel") ? { maxParallel: Number(get("--max-parallel")) } : {}), signal,
           ...(setupProfile ? { setupProfile } : {}),
-          onOutput: (_taskId, output) => {
+          onOutput: (taskId, output, attemptId) => {
             const visible = output.displayText ?? output.agentText;
-            if (visible) process.stdout.write(visible);
+            if (visible) process.stdout.write((Number(get("--max-parallel") ?? "1") > 1 ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible);
             else if (output.stream === "stderr" && output.text) process.stderr.write(output.text);
           },
           onIdleState: (taskId, state) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`),
@@ -253,7 +254,7 @@ function parse(args: string[]): Command {
     revise: ["--id", "--message", "--review-id", "--workspace"], requirements: ["--id", "--workspace"], trace: ["--id", "--requirement", "--revision", "--workspace"],
     chat: ["--id", "--planner", "--runner", "--workspace", "--planner-model", "--task-model"],
     export: ["--id", "--file", "--workspace"], replace: ["--id", "--file", "--workspace"],
-    approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace", "--isolation", "--verification-task", "--setup-file"],
+    approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace", "--isolation", "--verification-task", "--setup-file", "--max-parallel"],
     help: [],
   };
   const allowed = allowedByAction[action];
@@ -303,6 +304,12 @@ function parse(args: string[]): Command {
   if (action === "chat" && values.has("--id") && (values.has("--planner") || values.has("--runner"))) throw new Error("重开 chat 使用记录中保存的配置，不接受覆盖参数");
   if (values.has("--isolation") && values.get("--isolation") !== "git-worktree") throw new Error("--isolation 当前只支持 git-worktree");
   if (values.has("--isolation") !== values.has("--verification-task")) throw new Error("--isolation git-worktree 与 --verification-task 必须同时提供");
+  if (values.has("--max-parallel")) {
+    const maxParallel = Number(values.get("--max-parallel"));
+    if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("--max-parallel 必须是 1 到 8 之间的整数");
+    values.set("--max-parallel", String(maxParallel));
+    if (maxParallel > 1 && values.get("--isolation") !== "git-worktree") throw new Error("--max-parallel 大于 1 时需要 --isolation git-worktree");
+  }
   values.set("--workspace", resolve(values.get("--workspace") ?? process.cwd()));
   if (action === "start") {
     if (!["mock", "deepseek"].includes(values.get("--planner")!)) throw new Error("--planner 只能是 mock 或 deepseek");
@@ -504,23 +511,29 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     let isolation: "git-worktree" | undefined;
     let verificationTaskId: string | undefined;
     let setupFile: string | undefined;
+    let maxParallel: number | undefined;
     for (let index = 0; index < runArgs.length; index += 1) {
       const flag = runArgs[index];
       const value = runArgs[index + 1];
       if (flag === "--isolation" && isolation === undefined && value === "git-worktree") { isolation = "git-worktree"; index += 1; }
       else if (flag === "--verification-task" && verificationTaskId === undefined && value && !value.startsWith("--")) { verificationTaskId = value; index += 1; }
       else if (flag === "--setup-file" && setupFile === undefined && value && !value.startsWith("--")) { setupFile = value; index += 1; }
-      else throw new Error("用法：/run [--isolation git-worktree --verification-task <taskId>]");
+      else if (flag === "--max-parallel" && maxParallel === undefined && value && !value.startsWith("--")) {
+        maxParallel = Number(value);
+        if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("--max-parallel 必须是 1 到 8 之间的整数");
+        index += 1;
+      } else throw new Error("用法：/run [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>]");
     }
     if (isolation && !verificationTaskId) throw new Error("git-worktree 运行需要 --verification-task <taskId>");
     if (!isolation && verificationTaskId) throw new Error("--verification-task 需要 --isolation git-worktree");
+    if ((maxParallel ?? 1) > 1 && isolation !== "git-worktree") throw new Error("--max-parallel 大于 1 时需要 --isolation git-worktree");
     const setupProfile = setupFile ? await readSetupFile(setupFile) : undefined;
     const result = await cancellable((signal) => runApprovedPlanner({
       planningId: planningId!, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
-      ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupProfile ? { setupProfile } : {}), signal,
-      onOutput: (_taskId, output) => {
+      ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupProfile ? { setupProfile } : {}), ...(maxParallel === undefined ? {} : { maxParallel }), signal,
+      onOutput: (taskId, output, attemptId) => {
         const visible = output.displayText ?? output.agentText;
-        if (visible) chatIO.output.write(visible);
+        if (visible) chatIO.output.write((maxParallel && maxParallel > 1 ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible);
         else if (output.stream === "stderr" && output.text) console.error(output.text);
       },
       onIdleState: (taskId, state) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`),
@@ -675,7 +688,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       const [name, ...args] = line.slice(1).split(/\s+/);
       try {
         if (name === "exit" || name === "quit") break;
-        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run [--isolation git-worktree --verification-task <taskId>] [--setup-file <setup.json>] /delivery /status /resume /retry <taskId> [--setup-file <setup.json>] /land <taskId> /cleanup /exit");
+        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>] /delivery /status /resume /retry <taskId> [--setup-file <setup.json>] /land <taskId> /cleanup /exit");
         else if (name === "confirm" || name === "delegate" || name === "reject" || name === "revoke") {
           if (!args.length) throw new Error(`用法：/${name} ${name === "confirm" ? "all|编号[,编号]" : name === "revoke" ? "all|decisionId[,decisionId]" : "编号[,编号]"}`);
           const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: `/${name} ${args.join(" ")}`, signal }), chatAbort.signal);
@@ -790,9 +803,10 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           const snapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
           if (!snapshot.execution) throw new Error("规划还没有执行 Session");
           const sessionId = snapshot.execution.sessionId;
+          const parallelExecution = ((await new SessionStore(workspace).load(sessionId)).snapshot.maxParallel ?? 1) > 1;
           const operation = { sessionId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
             ...(setupProfile ? { setupProfile } : {}),
-            onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write(visible); },
+            onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput, attemptId?: string) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write((parallelExecution ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible); },
             onIdleState: (taskId: string, state: { idle: boolean }) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`) };
           const result = await cancellable((signal) => name === "retry"
             ? retrySession({ ...operation, taskId: commandArgs[0]!, signal })

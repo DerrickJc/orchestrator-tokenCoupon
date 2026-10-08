@@ -16,7 +16,7 @@ export { determineVerdict } from "./verdict.js";
 export { executeTask, IDLE_NOTICE_AFTER_MS } from "./execute-task.js";
 export { MockRunner } from "./runners/mock-runner.js";
 export { ClaudeCodeRunner } from "./runners/claude-runner.js";
-export type { GitIsolationAttempt, GitIsolationJournal, SessionIsolation, SessionSnapshot, SessionStatus, SessionTaskStatus, SessionTaskState, TaskResult } from "./session-types.js";
+export type { GitIsolationAttempt, GitIsolationJournal, SessionIsolation, SessionSchedulerEvent, SessionSnapshot, SessionStatus, SessionTaskStatus, SessionTaskState, TaskResult } from "./session-types.js";
 export { PlanStore } from "./plan-store.js";
 export { SessionStore, SessionLockError } from "./session-store.js";
 export { createSessionDelivery, formatSessionDelivery } from "./delivery.js";

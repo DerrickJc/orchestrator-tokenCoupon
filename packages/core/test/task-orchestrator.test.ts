@@ -126,6 +126,9 @@ describe("Phase 2 plan execution and Session persistence", () => {
       ...created.snapshot,
       revision: created.snapshot.revision + 1,
       status: "running" as const,
+      schedulerState: "dispatching" as const,
+      activeAttemptIds: [attemptId],
+      waveId: randomUUID(),
       tasks: created.snapshot.tasks.map((state, index) => index === 0 ? {
         ...state,
         status: "running" as const,
