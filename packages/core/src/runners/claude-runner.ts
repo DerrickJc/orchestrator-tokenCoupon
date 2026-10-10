@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { Runner, RunnerInput, RunnerContext, RunnerOutput } from "../runner.js";
 import { runChildProcess } from "./child-process.js";
+import { diagnoseNativeCli } from "../runner-diagnostics.js";
 
 async function findExecutable(name: string): Promise<string> {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
@@ -19,6 +20,7 @@ export class ClaudeCodeRunner implements Runner {
   constructor(private readonly permissionMode?: "acceptEdits") {}
 
   async checkAvailable(): Promise<void> { await findExecutable("claude"); }
+  async diagnose(cwd: string) { return diagnoseNativeCli(await findExecutable("claude"), "claude-code", cwd); }
 
   async run(input: RunnerInput, context: RunnerContext) {
     const executable = await findExecutable("claude");

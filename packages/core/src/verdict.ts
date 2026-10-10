@@ -1,11 +1,11 @@
 import type { AttemptStatus } from "./attempt.js";
-import type { ProcessResult } from "./runner.js";
+import type { RunnerResult } from "./runner.js";
 
 export type StopReason = "timed_out" | "cancelled" | null;
 
 export interface VerdictInput {
   markerSeen: boolean;
-  process: ProcessResult;
+  process: RunnerResult;
   stopReason: StopReason;
   recordingFailed: boolean;
 }
@@ -49,6 +49,14 @@ export function determineVerdict(input: VerdictInput): Verdict {
     };
   }
 
+  if (input.process.cleanupStatus === "failed" || input.process.cleanupStatus === "unknown") {
+    return {
+      status: "failed",
+      reasonCode: "runner_cleanup_unconfirmed",
+      reason: input.process.terminationError ?? "Runner 连接或子进程清理未能确认完成",
+    };
+  }
+
   if (input.process.startError !== undefined) {
     return {
       status: "failed",
@@ -73,7 +81,17 @@ export function determineVerdict(input: VerdictInput): Verdict {
     };
   }
 
-  if (input.process.exitCode !== 0) {
+  if (input.process.nativeOutcome === "failed" || input.process.nativeOutcome === "incomplete" || input.process.nativeOutcome === "unknown" || input.process.nativeOutcome === "cancelled") {
+    return {
+      status: "failed",
+      reasonCode: `runner_native_${input.process.nativeOutcome}`,
+      reason: input.process.executionError ?? `Runner 原生执行状态为 ${input.process.nativeOutcome}`,
+    };
+  }
+
+  const managedNativeCompletion = (input.process.transport === "sdk" || input.process.transport === "app-server") &&
+    input.process.nativeOutcome === "completed" && input.process.cleanupStatus === "completed";
+  if (input.process.exitCode !== 0 && !managedNativeCompletion) {
     return {
       status: "failed",
       reasonCode: "process_exit_nonzero",
@@ -92,6 +110,8 @@ export function determineVerdict(input: VerdictInput): Verdict {
   return {
     status: "succeeded",
     reasonCode: "completion_protocol_satisfied",
-    reason: "本次完成标记已出现，且 Runner 以退出码 0 结束",
+    reason: managedNativeCompletion
+      ? "本次完成标记已出现，Runner 原生执行完成且连接清理完成"
+      : "本次完成标记已出现，且 Runner 以退出码 0 结束",
   };
 }

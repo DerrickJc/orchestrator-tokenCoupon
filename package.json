@@ -21,6 +21,8 @@
     "demo:phase3.5-bugfix-5": "npm run build && node scripts/phase3.5-bugfix-5-demo.mjs",
     "demo:phase4": "npm run build && node scripts/phase4-demo.mjs",
     "demo:phase5": "npm run build && node scripts/phase5-demo.mjs",
+    "demo:phase6": "npm run build && node scripts/phase6-demo.mjs",
+    "demo:phase6-mixed-live": "npm run build && node scripts/phase6-mixed-live-demo.mjs",
     "test": "npm run build && vitest run"
   },
   "devDependencies": {
