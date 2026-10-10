@@ -7,17 +7,18 @@ import { stdin, stdout } from "node:process";
 import {
   approvePlannerDraft, canonicalHash, checkPlan, createPlanner, diffPlans, formatPlanner, formatSession,
   cleanupSessionWorktrees, continueSessionLanding, createSessionDelivery, formatSessionDelivery, loadCurrentPlanReview, loadPlannerConversation, MockPlanReviewer, MockPlanner, parseWorktreeSetupProfile, PlannerStore, replacePlannerDraft,
-  replyToPlanner, retryPlannerTurn, reviewPlannerDraft, runApprovedPlanner, SessionStore, ReviewStore, startPlannerConversation,
+  replyToPlanner, retryPlannerTurn, reviewPlannerDraft, runApprovedPlanner, SessionStore, ReviewStore, startPlannerConversation, parseRunnerProfile,
   retrySession, resumeSession,
   effectiveRequirements, traceRequirement, revisePlannerDraft, refreshPlannerRequirements,
 } from "@token-coupon/core";
-import type { PlanChange, PlanReviewRecord, PlannerConfig, PlannerOperationResult, Runner, TaskRunnerFactory, WorktreeSetupProfile } from "@token-coupon/core";
-import { ClaudeCodeRunner, MockRunner } from "@token-coupon/core";
+import type { PlanChange, PlanReviewRecord, PlannerConfig, PlannerOperationResult, Runner, RunnerInteractionReply, TaskRunnerFactory, WorktreeSetupProfile } from "@token-coupon/core";
+import { createTaskRunner, validateCliRunnerProfile } from "./runner-factory.js";
+import { createRunnerInteractionHandler, createRunnerInteractionIO, readAttemptInteractions, submitAttemptInteractionReply } from "./interaction-cli.js";
 
 const HELP = [
   "用法：",
-  "  token-coupon planner start --planner <mock|deepseek> --runner <mock|claude-code>",
-  "      --request <需求> [--workspace <目录>] [--planner-model <modelId>]",
+  "  token-coupon planner start --planner <mock|deepseek> --runner <mock|claude-code|codex>",
+  "      --request <需求> [--runner-mode non_interactive|managed] [--workspace <目录>] [--planner-model <modelId>]",
   "      [--task-model <modelId>] [--mock-clarify]",
   "  token-coupon planner reply --id <planningId> --message <补充要求> [--workspace <目录>]",
   "  token-coupon planner retry --id <planningId> [--workspace <目录>]",
@@ -29,11 +30,11 @@ const HELP = [
   "  token-coupon planner revise --id <planningId> [--message <处理说明>] [--review-id <reviewId>] [--workspace <目录>]",
   "  token-coupon planner requirements --id <planningId> [--refresh] [--workspace <目录>]",
   "  token-coupon planner trace --id <planningId> --requirement <requirementId> [--revision <版本>] [--workspace <目录>]",
-  "  token-coupon planner chat [--id <planningId>] [--planner <mock|deepseek> --runner <mock|claude-code>] [--workspace <目录>]",
+  "  token-coupon planner chat [--id <planningId>] [--planner <mock|deepseek> --runner <mock|claude-code|codex> --runner-mode non_interactive|managed] [--workspace <目录>]",
   "  token-coupon planner export --id <planningId> --file <计划.json> [--workspace <目录>]",
   "  token-coupon planner replace --id <planningId> --file <计划.json> [--workspace <目录>]",
   "  token-coupon planner approve --id <planningId> --revision <版本> [--waive-findings <F1,F2> --waiver-reason <原因>] [--workspace <目录>]",
-  "  token-coupon planner run --id <planningId> [--workspace <目录>] [--accept-edits]",
+  "  token-coupon planner run --id <planningId> [--workspace <目录>] [--accept-edits] [--runner-profile <profile.json>]",
   "      [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>]",
   "",
   "DeepSeek Planner 配置：TOKEN_COUPON_PLANNER_API_KEY、TOKEN_COUPON_PLANNER_MODEL、",
@@ -78,7 +79,7 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
       const modelId = get("--task-model");
       const result = await cancellable((signal) => startPlannerConversation({
           workspace, request: get("--request")!, config,
-          executionDefaults: { runnerId, mode: "non_interactive", ...(modelId ? { modelId } : {}) },
+          executionDefaults: { runnerId, mode: get("--runner-mode") === "managed" ? "managed" : "non_interactive", ...(modelId ? { modelId } : {}) },
           ...(provider === "mock" ? {
             planner: new MockPlanner(command.mockClarify
               ? [{ kind: "clarification", message: "在生成计划前，我需要确认实现范围。", questions: ["是否需要同时补充自动化测试？"] }]
@@ -210,19 +211,25 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
     }
     if (command.action === "run") {
       const setupProfile = get("--setup-file") ? await readSetupFile(get("--setup-file")!) : undefined;
-      const result = await cancellable((signal) => runApprovedPlanner({
+      const runnerProfile = get("--runner-profile") ? await readRunnerProfile(get("--runner-profile")!) : undefined;
+      const result = await cancellable((signal, cancel) => {
+        const interaction = createRunnerInteractionIO({ workspace, input: process.stdin, output: process.stdout, isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY), onCancel: cancel });
+        return runApprovedPlanner({
           planningId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
           ...(get("--isolation") === "git-worktree" ? { isolation: "git-worktree" as const } : {}),
           ...(get("--verification-task") ? { verificationTaskId: get("--verification-task")! } : {}),
           ...(get("--max-parallel") ? { maxParallel: Number(get("--max-parallel")) } : {}), signal,
+          onInteraction: interaction.onInteraction,
           ...(setupProfile ? { setupProfile } : {}),
+          ...(runnerProfile ? { runnerProfile } : {}),
           onOutput: (taskId, output, attemptId) => {
             const visible = output.displayText ?? output.agentText;
             if (visible) process.stdout.write((Number(get("--max-parallel") ?? "1") > 1 ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible);
             else if (output.stream === "stderr" && output.text) process.stderr.write(output.text);
           },
           onIdleState: (taskId, state) => console.error(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。` : `\n[${taskId}] 输出已恢复。`),
-        }));
+        }).finally(() => interaction.close());
+      });
       console.log(formatPlanner(result));
       if (result.snapshot.execution) {
         const record = await new SessionStore(workspace).load(result.snapshot.execution.sessionId);
@@ -246,15 +253,15 @@ function parse(args: string[]): Command {
   if (!actions.includes(actionValue as Action)) throw new Error("planner 子命令无效。请运行 token-coupon planner --help 查看用法。");
   const action = actionValue as Action;
   const allowedByAction: Record<Action, string[]> = {
-    start: ["--planner", "--runner", "--request", "--workspace", "--planner-model", "--task-model"],
+    start: ["--planner", "--runner", "--runner-mode", "--request", "--workspace", "--planner-model", "--task-model"],
     reply: ["--id", "--message", "--workspace"],
     retry: ["--id", "--workspace"], show: ["--id", "--workspace"],
     list: ["--workspace"], check: ["--id", "--file", "--workspace"], diff: ["--id", "--from", "--to", "--workspace"],
     review: ["--id", "--review-id", "--workspace"],
     revise: ["--id", "--message", "--review-id", "--workspace"], requirements: ["--id", "--workspace"], trace: ["--id", "--requirement", "--revision", "--workspace"],
-    chat: ["--id", "--planner", "--runner", "--workspace", "--planner-model", "--task-model"],
+    chat: ["--id", "--planner", "--runner", "--runner-mode", "--workspace", "--planner-model", "--task-model"],
     export: ["--id", "--file", "--workspace"], replace: ["--id", "--file", "--workspace"],
-    approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace", "--isolation", "--verification-task", "--setup-file", "--max-parallel"],
+    approve: ["--id", "--revision", "--review-id", "--waive-findings", "--waiver-reason", "--workspace"], run: ["--id", "--workspace", "--isolation", "--verification-task", "--setup-file", "--max-parallel", "--runner-profile"],
     help: [],
   };
   const allowed = allowedByAction[action];
@@ -313,14 +320,16 @@ function parse(args: string[]): Command {
   values.set("--workspace", resolve(values.get("--workspace") ?? process.cwd()));
   if (action === "start") {
     if (!["mock", "deepseek"].includes(values.get("--planner")!)) throw new Error("--planner 只能是 mock 或 deepseek");
-    if (!["mock", "claude-code"].includes(values.get("--runner")!)) throw new Error("--runner 只能是 mock 或 claude-code");
-    if (values.has("--task-model") && values.get("--runner") !== "claude-code") throw new Error("--task-model 只适用于 claude-code Runner");
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(values.get("--runner")!)) throw new Error("--runner 必须是小写字母开头的 Runner ID");
+    if (values.has("--runner-mode") && !["non_interactive", "managed"].includes(values.get("--runner-mode")!)) throw new Error("--runner-mode 必须是 non_interactive 或 managed");
+    if (values.has("--task-model") && values.get("--runner") === "mock") throw new Error("mock Runner 不支持 --task-model");
     if (mockClarify && values.get("--planner") !== "mock") throw new Error("--mock-clarify 只适用于 mock Planner");
   }
   if (action === "chat" && !values.has("--id")) {
     if (!["mock", "deepseek"].includes(values.get("--planner")!)) throw new Error("--planner 只能是 mock 或 deepseek");
-    if (!["mock", "claude-code"].includes(values.get("--runner")!)) throw new Error("--runner 只能是 mock 或 claude-code");
-    if (values.has("--task-model") && values.get("--runner") !== "claude-code") throw new Error("--task-model 只适用于 claude-code Runner");
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(values.get("--runner")!)) throw new Error("--runner 必须是小写字母开头的 Runner ID");
+    if (values.has("--runner-mode") && !["non_interactive", "managed"].includes(values.get("--runner-mode")!)) throw new Error("--runner-mode 必须是 non_interactive 或 managed");
+    if (values.has("--task-model") && values.get("--runner") === "mock") throw new Error("mock Runner 不支持 --task-model");
   }
   if (action === "approve" && Boolean(values.get("--waive-findings")) !== Boolean(values.get("--waiver-reason"))) throw new Error("--waive-findings 和 --waiver-reason 必须同时提供");
   if (action === "approve") {
@@ -335,12 +344,6 @@ function parse(args: string[]): Command {
   return { action, values, acceptEdits, mockClarify, full, json };
 }
 
-function createTaskRunner(task: Parameters<TaskRunnerFactory>[0], options: Parameters<TaskRunnerFactory>[1]): Runner {
-  if (task.execution.runnerId === "mock") return new MockRunner(options.mockScenario);
-  if (task.execution.runnerId === "claude-code") return new ClaudeCodeRunner(options.acceptEdits ? "acceptEdits" : undefined);
-  throw new Error("不支持的 Runner：" + task.execution.runnerId);
-}
-
 async function validateWorkspace(workspace: string): Promise<void> {
   const info = await stat(workspace);
   if (!info.isDirectory()) throw new Error("workspace 必须是已存在的目录");
@@ -353,15 +356,24 @@ async function readSetupFile(path: string): Promise<WorktreeSetupProfile> {
   return parseWorktreeSetupProfile(JSON.parse(await readFile(absolute, "utf8")) as unknown);
 }
 
+async function readRunnerProfile(path: string): Promise<import("@token-coupon/core").RunnerProfile> {
+  const absolute = resolve(path);
+  const info = await stat(absolute);
+  if (!info.isFile() || info.size > 1024 * 1024) throw new Error("--runner-profile 必须是 1 MiB 以内的 JSON 文件");
+  const profile = parseRunnerProfile(JSON.parse(await readFile(absolute, "utf8")) as unknown);
+  validateCliRunnerProfile(profile);
+  return profile;
+}
+
 function turnExitCode(status: string | undefined): number { return status === "timed_out" ? 124 : status === "cancelled" ? 130 : 1; }
-async function cancellable<T>(operation: (signal: AbortSignal) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
+async function cancellable<T>(operation: (signal: AbortSignal, cancel: () => void) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   const cancel = () => controller.abort(parentSignal?.reason ?? new Error("操作已取消"));
   if (parentSignal?.aborted) cancel();
   else parentSignal?.addEventListener("abort", cancel, { once: true });
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
-  try { return await operation(controller.signal); }
+  try { return await operation(controller.signal, cancel); }
   finally {
     parentSignal?.removeEventListener("abort", cancel);
     process.removeListener("SIGINT", cancel);
@@ -480,7 +492,12 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
   });
   let planningId = get("--id");
   let exitCode = 0;
-  const ask = async (prompt: string): Promise<string | null> => {
+  rl.on("SIGINT", () => {
+    exitCode = 130;
+    chatAbort.abort(new Error("用户取消了当前 CLI 对话操作"));
+    rl.close();
+  });
+  const ask = async (prompt: string, signal?: AbortSignal): Promise<string | null> => {
     if (inputClosed) return null;
     return await new Promise((resolveAnswer) => {
       const onClose = () => {
@@ -489,7 +506,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       };
       rl.once("close", onClose);
       try {
-        void rl.question(prompt).then((answer) => {
+        void rl.question(prompt, signal ? { signal } : {}).then((answer) => {
           rl.removeListener("close", onClose);
           resolveAnswer(answer);
         }).catch(() => {
@@ -502,6 +519,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       }
     });
   };
+  const onInteraction = createRunnerInteractionHandler({ workspace, isTTY: chatIO.isTTY, ask, output: (text) => chatIO.output.write(text) });
   const show = async () => {
     if (!planningId) return;
     console.log(formatPlanner(await loadPlannerConversation(planningId, workspace)));
@@ -511,6 +529,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     let isolation: "git-worktree" | undefined;
     let verificationTaskId: string | undefined;
     let setupFile: string | undefined;
+    let runnerProfileFile: string | undefined;
     let maxParallel: number | undefined;
     for (let index = 0; index < runArgs.length; index += 1) {
       const flag = runArgs[index];
@@ -518,24 +537,28 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       if (flag === "--isolation" && isolation === undefined && value === "git-worktree") { isolation = "git-worktree"; index += 1; }
       else if (flag === "--verification-task" && verificationTaskId === undefined && value && !value.startsWith("--")) { verificationTaskId = value; index += 1; }
       else if (flag === "--setup-file" && setupFile === undefined && value && !value.startsWith("--")) { setupFile = value; index += 1; }
+      else if (flag === "--runner-profile" && runnerProfileFile === undefined && value && !value.startsWith("--")) { runnerProfileFile = value; index += 1; }
       else if (flag === "--max-parallel" && maxParallel === undefined && value && !value.startsWith("--")) {
         maxParallel = Number(value);
         if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("--max-parallel 必须是 1 到 8 之间的整数");
         index += 1;
-      } else throw new Error("用法：/run [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>]");
+      } else throw new Error("用法：/run [--runner-profile <profile.json>] [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>]");
     }
     if (isolation && !verificationTaskId) throw new Error("git-worktree 运行需要 --verification-task <taskId>");
     if (!isolation && verificationTaskId) throw new Error("--verification-task 需要 --isolation git-worktree");
     if ((maxParallel ?? 1) > 1 && isolation !== "git-worktree") throw new Error("--max-parallel 大于 1 时需要 --isolation git-worktree");
     const setupProfile = setupFile ? await readSetupFile(setupFile) : undefined;
+    const runnerProfile = runnerProfileFile ? await readRunnerProfile(runnerProfileFile) : undefined;
     const result = await cancellable((signal) => runApprovedPlanner({
       planningId: planningId!, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
       ...(isolation ? { isolation } : {}), ...(verificationTaskId ? { verificationTaskId } : {}), ...(setupProfile ? { setupProfile } : {}), ...(maxParallel === undefined ? {} : { maxParallel }), signal,
+      ...(runnerProfile ? { runnerProfile } : {}),
       onOutput: (taskId, output, attemptId) => {
         const visible = output.displayText ?? output.agentText;
         if (visible) chatIO.output.write((maxParallel && maxParallel > 1 ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible);
         else if (output.stream === "stderr" && output.text) console.error(output.text);
       },
+      onInteraction,
       onIdleState: (taskId, state) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`),
     }), chatAbort.signal);
     console.log(formatPlanner(result));
@@ -663,7 +686,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
         const taskModel = get("--task-model");
         const result = await cancellable((signal) => startPlannerConversation({
           workspace, request: line, config,
-          executionDefaults: { runnerId, mode: "non_interactive", ...(taskModel ? { modelId: taskModel } : {}) },
+          executionDefaults: { runnerId, mode: get("--runner-mode") === "managed" ? "managed" : "non_interactive", ...(taskModel ? { modelId: taskModel } : {}) },
           ...(provider === "mock" ? { planner: new MockPlanner() } : {}), signal,
         }), chatAbort.signal);
         planningId = result.snapshot.planningId;
@@ -688,8 +711,47 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       const [name, ...args] = line.slice(1).split(/\s+/);
       try {
         if (name === "exit" || name === "quit") break;
-        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>] /delivery /status /resume /retry <taskId> [--setup-file <setup.json>] /land <taskId> /cleanup /exit");
-        else if (name === "confirm" || name === "delegate" || name === "reject" || name === "revoke") {
+        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>] /pending /respond <requestId> allow-once|deny /answer <requestId> <answers.json> /delivery /status /resume /retry <taskId> [--setup-file <setup.json>] /land <taskId> /cleanup /exit");
+        else if (name === "pending") {
+          const current = await loadPlannerConversation(planningId!, workspace);
+          if (!current.snapshot.execution) throw new Error("规划还没有执行 Session");
+          const session = await new SessionStore(workspace).load(current.snapshot.execution.sessionId);
+          const pending = [];
+          for (const taskState of session.snapshot.tasks) {
+            if (!taskState.activeAttemptId || taskState.status !== "running") continue;
+            pending.push(...(await readAttemptInteractions(workspace, taskState.activeAttemptId)).filter((item) => item.status === "pending"));
+          }
+          if (!pending.length) console.log("当前没有等待中的 Runner 请求。");
+          for (const item of pending) console.log(`${item.requestId} · ${item.kind} · ${item.runnerId}/${item.taskId} · Attempt ${item.attemptId}\n${item.title}\n${item.summary}\n`);
+        } else if (name === "respond" || name === "answer") {
+          const [requestId, value, ...extra] = args;
+          if (!requestId || !value || extra.length || (name === "respond" && value !== "allow-once" && value !== "deny")) {
+            throw new Error(name === "respond" ? "用法：/respond <requestId> allow-once|deny" : "用法：/answer <requestId> <answers.json>");
+          }
+          const current = await loadPlannerConversation(planningId!, workspace);
+          if (!current.snapshot.execution) throw new Error("规划还没有执行 Session");
+          const session = await new SessionStore(workspace).load(current.snapshot.execution.sessionId);
+          let attemptId: string | undefined;
+          for (const taskState of session.snapshot.tasks) {
+            if (!taskState.activeAttemptId || taskState.status !== "running") continue;
+            const active = await readAttemptInteractions(workspace, taskState.activeAttemptId);
+            if (active.some((item) => item.requestId === requestId && item.status === "pending")) { attemptId = taskState.activeAttemptId; break; }
+          }
+          if (!attemptId) throw new Error("请求不属于当前活跃 Attempt，或已不再等待回复");
+          let reply: RunnerInteractionReply;
+          if (name === "respond") reply = { kind: "approval", decision: value as "allow-once" | "deny" };
+          else {
+            const path = resolve(value);
+            const info = await stat(path);
+            if (!info.isFile() || info.size > 64 * 1024) throw new Error("答案文件必须是小于 64 KiB 的 JSON 文件");
+            const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+            const values = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).answers : undefined;
+            if (!Array.isArray(values) || values.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof (item as Record<string, unknown>).questionId !== "string")) throw new Error("答案文件必须包含 [{questionId, optionIds?, text?}] 或 {answers:[...]}");
+            reply = { kind: "question", answers: values as Array<{ questionId: string; optionIds?: string[]; text?: string }> };
+          }
+          const responseId = await submitAttemptInteractionReply({ workspace, attemptId, requestId, reply });
+          console.log(`已提交回复 ${responseId}；活跃 owner 将核对后转发给 Runner。`);
+        } else if (name === "confirm" || name === "delegate" || name === "reject" || name === "revoke") {
           if (!args.length) throw new Error(`用法：/${name} ${name === "confirm" ? "all|编号[,编号]" : name === "revoke" ? "all|decisionId[,decisionId]" : "编号[,编号]"}`);
           const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: `/${name} ${args.join(" ")}`, signal }), chatAbort.signal);
           console.log(formatPlanner(result));
@@ -804,7 +866,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           if (!snapshot.execution) throw new Error("规划还没有执行 Session");
           const sessionId = snapshot.execution.sessionId;
           const parallelExecution = ((await new SessionStore(workspace).load(sessionId)).snapshot.maxParallel ?? 1) > 1;
-          const operation = { sessionId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits,
+          const operation = { sessionId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits, onInteraction,
             ...(setupProfile ? { setupProfile } : {}),
             onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput, attemptId?: string) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write((parallelExecution ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible); },
             onIdleState: (taskId: string, state: { idle: boolean }) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`) };

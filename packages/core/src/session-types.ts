@@ -1,4 +1,5 @@
 import type { PlanDefinition } from "./plan.js";
+import type { RunnerProfile } from "./runner.js";
 
 export type SessionTaskStatus = "planned" | "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "blocked" | "interrupted";
 export type SessionStatus = "ready" | "running" | "pausing" | "paused" | "succeeded" | "failed" | "cancelled" | "interrupted" | "blocked";
@@ -122,6 +123,9 @@ export interface SessionSnapshot {
   waveId?: string | null;
   activeAttemptIds?: string[];
   controlState?: SessionControlState;
+  /** Validated, credential-free Runner settings used to make resume/retry reproducible. */
+  runnerProfile?: RunnerProfile;
+  runnerProfileHash?: string;
   createdAt: string;
   updatedAt: string;
 }

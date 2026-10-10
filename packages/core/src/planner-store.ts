@@ -350,11 +350,14 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
 function parseExecution(value: unknown): ExecutionConfig {
   const raw = object(value, "executionDefaults");
   const timeoutMs = raw.timeoutMs;
-  if (typeof raw.runnerId !== "string" || !["mock", "claude-code"].includes(raw.runnerId) || raw.mode !== "non_interactive" ||
+  const requiredCapabilities = raw.requiredCapabilities;
+  if (Object.keys(raw).some((key) => !["runnerId", "modelId", "mode", "timeoutMs", "requiredCapabilities"].includes(key)) ||
+      typeof raw.runnerId !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(raw.runnerId) || !["non_interactive", "managed"].includes(String(raw.mode)) ||
       (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) < 1000 || (timeoutMs as number) > 3_600_000)) ||
       (raw.modelId !== undefined && (typeof raw.modelId !== "string" || !raw.modelId || Buffer.byteLength(raw.modelId, "utf8") > 256)) ||
-      (raw.runnerId === "mock" && raw.modelId !== undefined)) throw new Error("Planner executionDefaults 无效");
-  return { runnerId: raw.runnerId, mode: "non_interactive", ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }), ...(raw.modelId === undefined ? {} : { modelId: raw.modelId as string }) };
+      (raw.runnerId === "mock" && raw.modelId !== undefined) ||
+      (requiredCapabilities !== undefined && (!Array.isArray(requiredCapabilities) || requiredCapabilities.length > 2 || requiredCapabilities.some((item) => item !== "userInput" && item !== "toolApproval") || new Set(requiredCapabilities).size !== requiredCapabilities.length))) throw new Error("Planner executionDefaults 无效");
+  return { runnerId: raw.runnerId, mode: raw.mode as ExecutionConfig["mode"], ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }), ...(raw.modelId === undefined ? {} : { modelId: raw.modelId as string }), ...(requiredCapabilities === undefined ? {} : { requiredCapabilities: requiredCapabilities as NonNullable<ExecutionConfig["requiredCapabilities"]> }) };
 }
 
 function parseTurn(value: unknown, workspace: string, planningId: string): PlannerTurnRef {

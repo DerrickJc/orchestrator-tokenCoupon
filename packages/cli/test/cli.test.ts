@@ -35,6 +35,66 @@ afterEach(() => {
 });
 
 describe("CLI show commands", () => {
+  test("lists registered runners and managed capabilities", async () => {
+    const result = await invokeCli("runner", "list");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("codex · modes=managed");
+    expect(result.stdout).toContain("claude-code · modes=non_interactive,managed");
+  });
+
+  test("doctor scopes checks to a selected runner and validates its workspace", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-runner-doctor-"));
+    temporaryDirectories.push(directory);
+    const result = await invokeCli("runner", "doctor", "--runner", "mock", "--workspace", directory);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("mock/non_interactive · available");
+    expect(result.stdout).toContain("mock/managed · available");
+    expect(result.stdout).not.toContain("claude-code");
+  });
+
+  test("doctor rejects an unknown runner", async () => {
+    const result = await invokeCli("runner", "doctor", "--runner", "unknown");
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("未知 Runner：unknown");
+  });
+
+  test("doctor leaves inference unverified until an explicit probe and stores probe evidence", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-doctor-probe-"));
+    temporaryDirectories.push(directory);
+    const local = await invokeCli("runner", "doctor", "--runner", "mock", "--workspace", directory);
+    expect(local.stdout).toContain("模型调用：unverified");
+    expect(readdirSync(directory)).toEqual([]);
+    const probe = await invokeCli("runner", "doctor", "--runner", "mock", "--workspace", directory, "--probe");
+    expect(probe.exitCode, probe.stderr).toBe(0);
+    expect(probe.stdout).toContain("succeeded");
+    expect(readdirSync(join(directory, ".token-coupon", "runs"))).toHaveLength(1);
+    expect((await invokeCli("runner", "doctor", "--probe")).exitCode).toBe(2);
+  });
+
+  test("persists a validated runner profile and resolved spec on the Session and Attempt", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "token-coupon-runner-profile-"));
+    temporaryDirectories.push(directory);
+    const planFile = join(directory, "plan.json");
+    const profileFile = join(directory, "runner-profile.json");
+    const task = { schemaVersion: 1, id: "profile-task", title: "Profile task", prompt: "Run the mock task",
+      execution: { runnerId: "mock", mode: "non_interactive" } };
+    writeFileSync(planFile, JSON.stringify({ schemaVersion: 1, id: "profile-plan", title: "Profile plan",
+      tasks: [{ task, dependsOn: [], status: "planned" }] }), "utf8");
+    writeFileSync(profileFile, JSON.stringify({ schemaVersion: 1, runners: { mock: { configVersion: 1, settings: { mockScenario: "success" } } } }), "utf8");
+
+    const result = await invokeCli("plan", "run", "--file", planFile, "--workspace", directory, "--runner-profile", profileFile);
+    expect(result.exitCode).toBe(0);
+    const sessionId = /Session：([\da-f-]{36})/.exec(result.stdout)?.[1];
+    expect(sessionId).toBeDefined();
+    const snapshot = JSON.parse(readFileSync(join(directory, ".token-coupon", "sessions", sessionId!, "session.json"), "utf8"));
+    expect(snapshot.runnerProfile.runners.mock.settings.mockScenario).toBe("success");
+    expect(snapshot.runnerProfileHash).toMatch(/^[0-9a-f]{64}$/);
+    const attemptId = snapshot.tasks[0].attempts[0].attemptId;
+    const attempt = JSON.parse(readFileSync(join(directory, ".token-coupon", "runs", attemptId, "attempt.json"), "utf8"));
+    expect(attempt.runnerSpec).toMatchObject({ runnerId: "mock", mode: "non_interactive", configurationVersion: 1 });
+    expect(attempt.runnerSpec.settingsHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   test("prints task details from a plan, including dependency and initial status", async () => {
     const result = await invokeCli("plan", "show", "--file", "examples/plan.json");
 

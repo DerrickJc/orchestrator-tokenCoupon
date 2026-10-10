@@ -9,6 +9,7 @@ import { canonicalHash, PlannerStore, readJson } from "./planner-store.js";
 import type { ExecutionReference, Planner, PlannerConfig, PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerInput, PlannerReply, PlannerTurnRef, RepositoryEvidence, PlanningAssessment } from "./planner-types.js";
 import { RepositoryReader, verifyRepositoryEvidence } from "./repository-reader.js";
 import type { ExecutionConfig } from "./task.js";
+import type { RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest } from "./runner.js";
 import { InputValidationError } from "./validation.js";
 import type { TaskRunnerFactory } from "./task-orchestrator.js";
 import { runPlan } from "./task-orchestrator.js";
@@ -23,6 +24,7 @@ import { applyCommittedConfirmations, assertNoRepeatedConfirmationClarification,
 import { bindPlanDecisions, plannerPlanStructure } from "./plan-decisions.js";
 import { parseWorktreeSetupProfile, worktreeSetupHash } from "./worktree-setup.js";
 import type { WorktreeSetupProfile } from "./worktree-setup.js";
+import type { RunnerProfile } from "./runner.js";
 
 const USER_MESSAGE_LIMIT = 8 * 1024;
 const REQUEST_CONTEXT_LIMIT = 256 * 1024;
@@ -61,9 +63,11 @@ export interface PlannerRunOptions {
   isolation?: "git-worktree";
   verificationTaskId?: string;
   setupProfile?: WorktreeSetupProfile;
+  runnerProfile?: RunnerProfile;
   maxParallel?: number;
   onOutput?: Parameters<typeof runPlan>[0]["onOutput"];
   onIdleState?: Parameters<typeof runPlan>[0]["onIdleState"];
+  onInteraction?: (requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal) => Promise<RunnerInteractionReply>;
 }
 
 export function createPlanner(config: PlannerConfig, options: { fetchImpl?: typeof fetch } = {}): Planner {
@@ -300,10 +304,12 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
         ...(executionIsolation.mode === "git-worktree" ? { isolation: "git-worktree" as const, verificationTaskId: executionIsolation.verificationTaskId } : {}),
         ...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
         ...(setupProfile ? { setupProfile } : {}),
+        ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.acceptEdits ? { acceptEdits: true } : {}),
         ...(options.onOutput ? { onOutput: options.onOutput } : {}),
         ...(options.onIdleState ? { onIdleState: options.onIdleState } : {}),
+        ...(options.onInteraction ? { onInteraction: options.onInteraction } : {}),
         beforeCreateSession: async () => {
           const current = await store.load(options.planningId);
           if (current.status !== "approved" || current.approval?.approvalId !== execution.approvalId ||
@@ -742,9 +748,11 @@ function validateRequest(value: string): void {
 }
 
 function validateExecutionDefaults(value: ExecutionConfig): void {
-  if (!value || !["mock", "claude-code"].includes(value.runnerId) || value.mode !== "non_interactive" ||
+  if (!value || typeof value.runnerId !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.runnerId) || !["non_interactive", "managed"].includes(value.mode) ||
       (value.timeoutMs !== undefined && (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1000 || value.timeoutMs > 3_600_000)) ||
-      (value.runnerId === "mock" && value.modelId !== undefined)) throw new InputValidationError("planner.execution", "执行默认配置无效");
+      (value.modelId !== undefined && (!value.modelId || Buffer.byteLength(value.modelId, "utf8") > 256)) ||
+      (value.runnerId === "mock" && value.modelId !== undefined) ||
+      (value.requiredCapabilities !== undefined && (value.requiredCapabilities.length > 2 || value.requiredCapabilities.some((item) => item !== "userInput" && item !== "toolApproval") || new Set(value.requiredCapabilities).size !== value.requiredCapabilities.length))) throw new InputValidationError("planner.execution", "执行默认配置无效");
 }
 
 function validateConfig(config: PlannerConfig): void {

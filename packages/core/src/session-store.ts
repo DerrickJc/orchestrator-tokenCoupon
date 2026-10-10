@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { PlanDefinition } from "./plan.js";
 import type { GitIsolationJournal, SessionControlKind, SessionControlRequest, SessionIsolation, SessionRecord, SessionSchedulerEvent, SessionSnapshot, SessionTaskState } from "./session-types.js";
 import { parsePlan } from "./validate-plan.js";
+import { parseRunnerProfile, runnerProfileHash } from "./runner-registry.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_STATUSES = new Set(["ready", "running", "pausing", "paused", "succeeded", "failed", "cancelled", "interrupted", "blocked"]);
@@ -55,7 +56,7 @@ export class SessionStore {
     };
   }
 
-  async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string } = {}): Promise<SessionRecord> {
+  async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string; runnerProfile?: import("./runner.js").RunnerProfile } = {}): Promise<SessionRecord> {
     if (!UUID.test(sessionId)) throw new Error("sessionId 必须是 UUID");
     const maxParallel = options.maxParallel ?? 1;
     if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("maxParallel 必须是 1 到 8 之间的整数");
@@ -64,11 +65,13 @@ export class SessionStore {
     if (!UUID.test(executionId)) throw new Error("executionId 必须是 UUID");
     const sessionDir = join(this.root, "sessions", sessionId);
     const now = new Date().toISOString();
+    const runnerProfile = options.runnerProfile ? parseRunnerProfile(options.runnerProfile) : undefined;
     const snapshot: SessionSnapshot = {
       schemaVersion: 3, sessionId, workspace: this.workspace, revision: 1, status: "ready", isolation,
       maxParallel, planDigest: digestPlan(plan), executionId, schedulerState: "idle", waveId: null, activeAttemptIds: [],
       controlState: { requestId: null, kind: null, requestedAt: null, acknowledgedAt: null },
       planId: plan.id, planTitle: plan.title,
+      ...(runnerProfile ? { runnerProfile, runnerProfileHash: runnerProfileHash(runnerProfile) } : {}),
       tasks: plan.tasks.map(({ task }) => ({ taskId: task.id, status: "planned", activeAttemptId: null, attempts: [], result: null, reasonCode: null })),
       createdAt: now, updatedAt: now,
     };
@@ -360,6 +363,14 @@ function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, 
         (control.requestId === null) !== (control.kind === null)) throw new Error("Session controlState 字段无效");
   }
   if (typeof raw.createdAt !== "string" || typeof raw.updatedAt !== "string" || !Array.isArray(raw.tasks)) throw new Error("Session 快照字段无效");
+  let runnerProfile: SessionSnapshot["runnerProfile"];
+  let runnerProfileHashValue: string | undefined;
+  if (raw.runnerProfile !== undefined || raw.runnerProfileHash !== undefined) {
+    if (raw.runnerProfile === undefined || typeof raw.runnerProfileHash !== "string" || !/^[0-9a-f]{64}$/i.test(raw.runnerProfileHash)) throw new Error("Session Runner profile/hash 必须同时存在");
+    runnerProfile = parseRunnerProfile(raw.runnerProfile);
+    runnerProfileHashValue = runnerProfileHash(runnerProfile);
+    if (runnerProfileHashValue !== raw.runnerProfileHash) throw new Error("Session Runner profile hash 不匹配");
+  }
   const expectedIds = plan.tasks.map(({ task }) => task.id);
   if (raw.tasks.length !== expectedIds.length) throw new Error("Session 任务数量与计划不匹配");
   const tasks: SessionTaskState[] = raw.tasks.map((entry, index) => {
@@ -452,7 +463,7 @@ function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, 
     activeAttemptIds: raw.activeAttemptIds as string[],
     controlState: raw.controlState as NonNullable<SessionSnapshot["controlState"]>,
   } : {};
-  return { schemaVersion: raw.schemaVersion as SessionSnapshot["schemaVersion"], sessionId, workspace, revision: raw.revision as number, status, planId: plan.id, planTitle: plan.title, tasks, ...(isolation ? { isolation } : {}), ...phase5Fields, createdAt: raw.createdAt, updatedAt: raw.updatedAt };
+  return { schemaVersion: raw.schemaVersion as SessionSnapshot["schemaVersion"], sessionId, workspace, revision: raw.revision as number, status, planId: plan.id, planTitle: plan.title, tasks, ...(isolation ? { isolation } : {}), ...phase5Fields, ...(runnerProfile && runnerProfileHashValue ? { runnerProfile, runnerProfileHash: runnerProfileHashValue } : {}), createdAt: raw.createdAt, updatedAt: raw.updatedAt };
 }
 
 function digestPlan(plan: PlanDefinition): string {

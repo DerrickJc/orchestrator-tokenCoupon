@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import type { PlanDefinition, PlannedTask } from "./plan.js";
 import { PlanStore, sessionStatusFor } from "./plan-store.js";
 import { executeTask } from "./execute-task.js";
-import type { Runner, RunnerOutput } from "./runner.js";
+import type { Runner, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerOutput } from "./runner.js";
+import type { RunnerProfile } from "./runner.js";
+import { runnerProfileHash } from "./runner-registry.js";
 import type { SessionControlRequest, SessionRecord, SessionSnapshot, SessionTaskState, TaskResult } from "./session-types.js";
 import { SessionLockError, SessionStore } from "./session-store.js";
 import type { TaskDefinition } from "./task.js";
@@ -24,6 +26,8 @@ const ALLOWED_MOCK_SCENARIOS = new Set(["success", "missing-marker", "marker-non
 export interface TaskRunnerFactoryOptions {
   acceptEdits?: boolean;
   mockScenario?: string;
+  runnerSettings?: Readonly<Record<string, unknown>>;
+  runnerProfile?: RunnerProfile;
 }
 
 export type TaskRunnerFactory = (task: TaskDefinition, options: TaskRunnerFactoryOptions) => Runner;
@@ -39,9 +43,11 @@ export interface PlanRunOptions {
   isolation?: "shared" | "git-worktree";
   verificationTaskId?: string;
   setupProfile?: WorktreeSetupProfile;
+  runnerProfile?: RunnerProfile;
   maxParallel?: number;
   beforeCreateSession?: () => Promise<void>;
   onOutput?: (taskId: string, output: RunnerOutput, attemptId?: string) => void;
+  onInteraction?: (requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal) => Promise<RunnerInteractionReply>;
   onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
@@ -53,11 +59,13 @@ export interface SessionOperationOptions {
   acceptEdits?: boolean;
   mockTaskScenarios?: Map<string, string>;
   setupProfile?: WorktreeSetupProfile;
+  runnerProfile?: RunnerProfile;
   onOutput?: (taskId: string, output: RunnerOutput, attemptId?: string) => void;
+  onInteraction?: (requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal) => Promise<RunnerInteractionReply>;
   onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
-type ExecutionOptions = Pick<SessionOperationOptions, "workspace" | "createRunner" | "signal" | "acceptEdits" | "mockTaskScenarios" | "setupProfile" | "onOutput" | "onIdleState">;
+type ExecutionOptions = Pick<SessionOperationOptions, "workspace" | "createRunner" | "signal" | "acceptEdits" | "mockTaskScenarios" | "setupProfile" | "runnerProfile" | "onOutput" | "onIdleState" | "onInteraction">;
 
 export interface RetryOptions extends SessionOperationOptions { taskId: string; }
 export interface ContinueLandingOptions extends SessionOperationOptions { taskId: string; }
@@ -136,7 +144,7 @@ export async function runPlan(options: PlanRunOptions): Promise<SessionOperation
       verificationTaskId: options.verificationTaskId!,
       setupHash: setupProfile ? worktreeSetupHash(setupProfile) : null,
     } : { mode: "shared" as const };
-    let record = await store.create(options.plan, sessionId, isolation, { maxParallel });
+    let record = await store.create(options.plan, sessionId, isolation, { maxParallel, ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
     let worktrees: WorktreeIsolation | undefined;
     if (record.snapshot.isolation?.mode === "git-worktree") {
       worktrees = new WorktreeIsolation(record, store);
@@ -157,9 +165,12 @@ export async function resumeSession(options: SessionOperationOptions): Promise<S
   let worktrees: WorktreeIsolation | undefined;
   try {
     let record = await store.load(options.sessionId);
+    assertRunnerProfileStable(options.runnerProfile, record.snapshot);
     if (options.setupProfile && record.snapshot.isolation?.mode !== "git-worktree") throw new Error("setup-file-not-applicable：仅 Git worktree Session 支持 setup 配置");
     worktrees = await prepareWorktrees(record, store, options.setupProfile);
     if (worktrees) record = await store.load(options.sessionId);
+    const runnerProfile = options.runnerProfile ?? record.snapshot.runnerProfile;
+    const executionOptions = { ...options, ...(runnerProfile ? { runnerProfile } : {}) };
     validateMockTaskScenarios(record.plan, options.mockTaskScenarios ?? new Map());
     let current = await reconcile(record, store, worktrees);
     const failed = current.snapshot.tasks.filter((state) => ["failed", "timed_out", "cancelled"].includes(state.status) || (state.status === "blocked" && state.reasonCode !== "dependency_not_succeeded"));
@@ -167,9 +178,9 @@ export async function resumeSession(options: SessionOperationOptions): Promise<S
     if (worktrees) current = await landReadyAttempts(current, store, worktrees);
     const unresolved = current.snapshot.tasks.filter((state) => state.status === "interrupted" || state.status === "blocked");
     if (unresolved.length > 0) throw new Error(`Session 尚有未解决的任务，先用 session retry 指定目标：${unresolved.map((state) => `${state.taskId}(${state.status})`).join(", ")}`);
-    await checkRunners(pendingTasks(current), options);
+    await checkRunners(pendingTasks(current), executionOptions);
     current = await store.beginExecution(current);
-    return await schedule(current, store, options, undefined, worktrees);
+    return await schedule(current, store, executionOptions, undefined, worktrees);
   } finally {
     try { await opened.releaseWorkspace(); }
     finally { await opened.releaseGit?.(); }
@@ -219,9 +230,12 @@ export async function retrySession(options: RetryOptions): Promise<SessionOperat
   let worktrees: WorktreeIsolation | undefined;
   try {
     let record = await store.load(options.sessionId);
+    assertRunnerProfileStable(options.runnerProfile, record.snapshot);
     if (options.setupProfile && record.snapshot.isolation?.mode !== "git-worktree") throw new Error("setup-file-not-applicable：仅 Git worktree Session 支持 setup 配置");
     worktrees = await prepareWorktrees(record, store, options.setupProfile);
     if (worktrees) record = await store.load(options.sessionId);
+    const runnerProfile = options.runnerProfile ?? record.snapshot.runnerProfile;
+    const executionOptions = { ...options, ...(runnerProfile ? { runnerProfile } : {}) };
     validateMockTaskScenarios(record.plan, options.mockTaskScenarios ?? new Map());
     let current = await reconcile(record, store, worktrees);
     const entry = current.plan.tasks.find(({ task }) => task.id === options.taskId);
@@ -230,9 +244,9 @@ export async function retrySession(options: RetryOptions): Promise<SessionOperat
     if (!["failed", "timed_out", "cancelled", "interrupted"].includes(state.status)) throw new Error(`任务 ${options.taskId} 当前状态 ${state.status} 不允许重试`);
     const stateById = new Map(current.snapshot.tasks.map((item) => [item.taskId, item]));
     if (!entry.dependsOn.every((id) => stateById.get(id)?.status === "succeeded")) throw new Error(`任务 ${options.taskId} 的前置依赖尚未成功`);
-    await checkRunners([entry], options);
+    await checkRunners([entry], executionOptions);
     current = await store.beginExecution(current);
-    return await schedule(current, store, options, { taskId: options.taskId, allowRetry: true, taskStore: new PlanStore(current.plan, current.snapshot) }, worktrees);
+    return await schedule(current, store, executionOptions, { taskId: options.taskId, allowRetry: true, taskStore: new PlanStore(current.plan, current.snapshot) }, worktrees);
   } finally {
     try { await opened.releaseWorkspace(); }
     finally { await opened.releaseGit?.(); }
@@ -671,14 +685,14 @@ async function executePreparedAttempt(entry: PlannedTask, attemptId: string, sta
     const isVerification = worktrees.verificationTaskId === entry.task.id;
     const effectiveTask = withGitExecutionInstructions(withDependencyContext(entry, states), gitAttempt.worktreePath, gitAttempt.baseCommit, isVerification);
     const scenario = options.mockTaskScenarios?.get(entry.task.id);
-    const allowEdits = options.acceptEdits && entry.task.execution.runnerId === "claude-code";
-    const runner = options.createRunner(entry.task, { ...(allowEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}) });
+    const runner = options.createRunner(entry.task, { ...(options.acceptEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}), ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
     const decisionConstraints = resolveTaskDecisions(plan, entry);
     const collector = new OutputCollector();
     const result = await executeTask({
       task: effectiveTask, cwd: gitAttempt.worktreePath, artifactWorkspace: store.workspace, runner, attemptId,
       ...(decisionConstraints.length ? { decisionConstraints } : {}), ...(options.signal === undefined ? {} : { signal: options.signal }),
       onOutput: (output) => { collector.push(output); options.onOutput?.(entry.task.id, output, attemptId); },
+      ...(options.onInteraction ? { onInteraction: options.onInteraction } : {}),
       onIdleState: (state) => { options.onIdleState?.(entry.task.id, state); return persistActivity(state); },
     });
     const status = result.attempt.status;
@@ -724,8 +738,7 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
   let effectiveTask = withDependencyContext(entry, states);
   if (worktrees) effectiveTask = withGitExecutionInstructions(effectiveTask, runnerCwd, worktrees.integrationHead, isVerification);
   const scenario = options.mockTaskScenarios?.get(entry.task.id);
-  const allowEdits = options.acceptEdits && entry.task.execution.runnerId === "claude-code";
-  const runner = options.createRunner(entry.task, { ...(allowEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}) });
+  const runner = options.createRunner(entry.task, { ...(options.acceptEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}), ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
   const decisionConstraints = resolveTaskDecisions(plan, entry);
   const collector = new OutputCollector();
   let result: Awaited<ReturnType<typeof executeTask>>;
@@ -739,6 +752,7 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
       ...(decisionConstraints.length ? { decisionConstraints } : {}),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       onOutput: (output) => { collector.push(output); options.onOutput?.(entry.task.id, output, attemptId); },
+      ...(options.onInteraction ? { onInteraction: options.onInteraction } : {}),
       onIdleState: (state) => {
         options.onIdleState?.(entry.task.id, state);
         return persistActivity(state);
@@ -857,19 +871,23 @@ function truncateUtf8(value: string, limit: number): { text: string; truncated: 
   return { text, truncated: true };
 }
 
-async function checkRunners(entries: PlannedTask[], options: Pick<ExecutionOptions, "createRunner" | "acceptEdits" | "mockTaskScenarios">): Promise<void> {
+async function checkRunners(entries: PlannedTask[], options: Pick<ExecutionOptions, "createRunner" | "acceptEdits" | "mockTaskScenarios" | "runnerProfile">): Promise<void> {
   const checked = new Set<string>();
-  const hasClaude = entries.some(({ task }) => task.execution.runnerId === "claude-code");
-  if (options.acceptEdits && !hasClaude) throw new Error("--accept-edits 仅适用于包含 Claude Code 任务的计划");
   for (const entry of entries) {
     const scenario = options.mockTaskScenarios?.get(entry.task.id);
-    const allowEdits = options.acceptEdits && entry.task.execution.runnerId === "claude-code";
-    const runner = options.createRunner(entry.task, { ...(allowEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}) });
-    const key = `${runner.id}:${options.acceptEdits && runner.id === "claude-code"}`;
+    const runner = options.createRunner(entry.task, { ...(options.acceptEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}), ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
+    const key = `${runner.id}:${options.acceptEdits}:${entry.task.execution.mode}`;
     if (checked.has(key)) continue;
     if (entry.task.execution.modelId && !runner.supportsModel) throw new Error(`${runner.id} 不支持 modelId`);
     await runner.checkAvailable();
     checked.add(key);
+  }
+}
+
+function assertRunnerProfileStable(profile: RunnerProfile | undefined, snapshot: SessionSnapshot): void {
+  if (!profile || !snapshot.runnerProfileHash) return;
+  if (runnerProfileHash(profile) !== snapshot.runnerProfileHash) {
+    throw new Error("runner_profile_changed：Session 已固定 Runner profile；resume/retry 必须使用原配置");
   }
 }
 

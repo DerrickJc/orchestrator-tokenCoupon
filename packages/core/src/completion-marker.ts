@@ -14,8 +14,9 @@ export function createCompletionProtocol(task: TaskDefinition): CompletionProtoc
     task.prompt.trim(),
     "",
     "完成要求：执行任务并说明修改与验证结果。",
-    "仅在你认为任务完成时，在最终回复的独立一行输出本次完成标记。",
-    `本次标记为：${marker}`,
+    "仅在你认为任务完成时，将下方标记逐字符复制为最终回复的最后一行。",
+    "标记必须单独一行，不加引号或代码围栏；保留开头三个 < 和末尾三个 >，不得省略或改写任何字符。",
+    marker,
     "",
   ].join("\n");
 
