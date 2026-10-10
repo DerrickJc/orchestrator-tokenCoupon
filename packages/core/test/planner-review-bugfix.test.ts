@@ -10,6 +10,7 @@ import {
   retryPlannerTurn,
 } from "../src/index.js";
 import { createHistoryReader } from "../src/requirements.js";
+import { validateReviewReply } from "../src/review-reply.js";
 import type { Planner, PlannerInput, PlanReviewInput, RequirementsUpdate } from "../src/index.js";
 
 const roots: string[] = [];
@@ -154,6 +155,58 @@ describe("Phase 3.5 review repair and requirement provenance", () => {
     expect(requestBodies).toHaveLength(3);
     expect(requestBodies.slice(1).every((body) => body.tools === undefined)).toBe(true);
     expect(JSON.stringify(requestBodies[2]?.messages)).toContain("遗漏：F4");
+  });
+
+  it("replays the recorded closed-F1 failure, repairs it, and permits review/approve without changing the draft", async () => {
+    const root = await workspace();
+    const first = await start(root);
+    const options = { planningId: first.snapshot.planningId, workspace: root };
+    const recorded = JSON.parse(await readFile(new URL("./fixtures/phase6-closed-review.json", import.meta.url), "utf8"));
+    await reviewPlannerDraft({ ...options, reviewer: new MockPlanReviewer({ summary: "Optional suggestion", findings: [{ ...finding, severity: "info" }] }) });
+    const closed = await reviewPlannerDraft({ ...options, reviewer: { review: async () => ({ ...recorded.previous,
+      resolutions: recorded.previous.resolutions.map(({ findingId, status, basis }: { findingId: string; status: string; basis: string }) => ({ findingId, status, basis })),
+    }) } });
+    expect(closed.review.findings).toEqual([]);
+    expect(closed.review.resolutions![0]!.findingId).toBe("F1");
+    await replacePlannerDraft({ ...options, value: plan("Implement greeting and tests, with explicit output evidence") });
+    await expect(approvePlannerDraft({ ...options, draftRevision: 2 })).rejects.toThrow("审查");
+    expect(() => validateReviewReply(recorded.reply, ["implement", "verify"], ["R-stack"], closed.review)).toThrow('resolutions[0].findingId 引用了未知的上轮问题 "F1"');
+    const bodies: Array<{ messages: Array<{ role: string; content: string }>; tools?: unknown }> = [];
+    const replies = [recorded.reply, { summary: "Current plan reviewed; no previous open findings", findings: [], resolutions: [] }];
+    const reviewer = new DeepSeekPlanner({ model: "fake", baseUrl: "https://api.deepseek.com", apiKey: "fake-key", fetchImpl: async (_url, init) => {
+      bodies.push(JSON.parse(String(init!.body)));
+      return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { role: "assistant", content: JSON.stringify(replies.shift()) } }] }));
+    } });
+    const result = await reviewPlannerDraft({ ...options, reviewer });
+    expect(result.review.status).toBe("succeeded"); expect(result.review.resolutions).toEqual([]);
+    expect(result.snapshot.draftRevision).toBe(2); expect(bodies).toHaveLength(2);
+    const input = JSON.parse(bodies[0]!.messages[1]!.content);
+    expect(input.previousReview.findings).toEqual([]); expect(input.previousReview.resolutions).toBeUndefined();
+    expect(bodies[0]!.messages[0]!.content).toContain("本轮 resolutions 必须恰好覆盖的 findingId：[]");
+    expect(JSON.stringify(bodies[1]!.messages)).toContain("本轮 resolutions 必须为 []");
+    expect(bodies[1]!.tools).toBeUndefined();
+    expect((await approvePlannerDraft({ ...options, draftRevision: 2 })).snapshot.status).toBe("approved");
+    const stored = (await import("../src/review-store.js")).ReviewStore;
+    expect((await new stored(root).load(options.planningId, closed.review.reviewId)).resolutions).toHaveLength(1);
+  });
+
+  it("reports the exact invalid resolution field and allows a new finding after the previous report cleared", async () => {
+    const root = await workspace();
+    const first = await start(root);
+    const options = { planningId: first.snapshot.planningId, workspace: root };
+    const review = await reviewPlannerDraft({ ...options, reviewer: new MockPlanReviewer({ summary: "Initial", findings: [finding] }) });
+    const base = { findingId: "F1", status: "resolved", basis: "Fixed dependency" };
+    for (const [entry, message] of [
+      [{ ...base, status: "done" }, "resolutions[0].status"],
+      [{ ...base, basis: " " }, "resolutions[0].basis"],
+      [{ ...base, issueId: "invented" }, "未知字段：issueId"],
+    ] as const) expect(() => validateReviewReply({ summary: "Checked", findings: [], resolutions: [entry] }, ["implement", "verify"], [], review.review)).toThrow(message);
+    expect(() => validateReviewReply({ summary: "Checked", findings: [], resolutions: [base, base] }, ["implement", "verify"], [], review.review)).toThrow("resolutions[1].findingId 重复：F1");
+    const cleared = await reviewPlannerDraft({ ...options, reviewer: { review: async () => ({ summary: "Cleared", findings: [], resolutions: [base] }) } });
+    const next = await reviewPlannerDraft({ ...options, reviewer: new MockPlanReviewer({ summary: "New problem", findings: [finding], resolutions: [] }) });
+    expect(next.review.findings[0]!.issueId).not.toBe(review.review.findings[0]!.issueId);
+    expect(next.review.previousReviewId).toBe(cleared.review.reviewId);
+    await expect(approvePlannerDraft({ ...options, draftRevision: 1 })).rejects.toThrow();
   });
 
   it("rejects invented provenance and does not publish partial updates after invalid responses", async () => {

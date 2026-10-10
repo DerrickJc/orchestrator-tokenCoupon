@@ -2,13 +2,15 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline/promises";
+import { TerminalInput, InputCancelled } from "./terminal-input.js";
+import { formatChatHelp } from "./chat-commands.js";
+import { showSessionLogs } from "./session-logs-cli.js";
 import { stdin, stdout } from "node:process";
 import {
   approvePlannerDraft, canonicalHash, checkPlan, createPlanner, diffPlans, formatPlanner, formatSession,
   cleanupSessionWorktrees, continueSessionLanding, createSessionDelivery, formatSessionDelivery, loadCurrentPlanReview, loadPlannerConversation, MockPlanReviewer, MockPlanner, parseWorktreeSetupProfile, PlannerStore, replacePlannerDraft,
   replyToPlanner, retryPlannerTurn, reviewPlannerDraft, runApprovedPlanner, SessionStore, ReviewStore, startPlannerConversation, parseRunnerProfile,
-  retrySession, resumeSession,
+  retrySession, resumeSession, diagnoseSession, formatSessionDiagnosis, recoverSession, applyReviewActions,
   effectiveRequirements, traceRequirement, revisePlannerDraft, refreshPlannerRequirements,
 } from "@token-coupon/core";
 import type { PlanChange, PlanReviewRecord, PlannerConfig, PlannerOperationResult, Runner, RunnerInteractionReply, TaskRunnerFactory, WorktreeSetupProfile } from "@token-coupon/core";
@@ -483,46 +485,65 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
   if (!chatIO.isTTY) throw new Error("planner chat 需要交互式终端；非交互环境请使用 planner start/reply/review/approve/run");
   const values = command.values;
   const get = (key: string) => values.get(key);
-  const rl = createInterface({ input: chatIO.input, output: chatIO.output, terminal: true });
   const chatAbort = new AbortController();
   let inputClosed = false;
-  rl.once("close", () => {
-    inputClosed = true;
-    chatAbort.abort(new Error("终端输入结束；当前操作已取消"));
-  });
   let planningId = get("--id");
   let exitCode = 0;
-  rl.on("SIGINT", () => {
-    exitCode = 130;
-    chatAbort.abort(new Error("用户取消了当前 CLI 对话操作"));
-    rl.close();
-  });
-  const ask = async (prompt: string, signal?: AbortSignal): Promise<string | null> => {
-    if (inputClosed) return null;
-    return await new Promise((resolveAnswer) => {
-      const onClose = () => {
-        rl.removeListener("close", onClose);
-        resolveAnswer(null);
-      };
-      rl.once("close", onClose);
-      try {
-        void rl.question(prompt, signal ? { signal } : {}).then((answer) => {
-          rl.removeListener("close", onClose);
-          resolveAnswer(answer);
-        }).catch(() => {
-          rl.removeListener("close", onClose);
-          resolveAnswer(null);
-        });
-      } catch {
-        rl.removeListener("close", onClose);
-        resolveAnswer(null);
-      }
-    });
+  const cancelChat = () => {
+    if (chatAbort.signal.aborted) return;
+    exitCode = 130; inputClosed = true;
+    terminal.write("\n收到中断，正在退出会话…\n");
+    chatAbort.abort(new Error("用户退出 CLI 会话")); terminal.close();
   };
-  const onInteraction = createRunnerInteractionHandler({ workspace, isTTY: chatIO.isTTY, ask, output: (text) => chatIO.output.write(text) });
+  const terminal = new TerminalInput(chatIO.input, chatIO.output, {
+    onClose: () => { inputClosed = true; },
+    onCancel: cancelChat,
+  });
+  process.once("SIGINT", cancelChat); process.once("SIGTERM", cancelChat);
+  const rl = terminal; // External-editor handoff shares this same input owner.
+  const ask = terminal.ask;
+  const print = (text: string) => terminal.write(styleRoles(text, terminal.color) + "\n");
+  const onInteraction = createRunnerInteractionHandler({ workspace, isTTY: chatIO.isTTY, ask,
+    choose: (prompt, choices, signal) => terminal.choose(prompt, choices, signal, false), output: (text) => terminal.write(text) });
+  const runnerHeaders = new Set<string>();
+  const runnerOutput = (taskId: string, visible: string, attemptId?: string) => {
+    const key = attemptId ?? taskId;
+    if (!runnerHeaders.has(key)) { runnerHeaders.add(key); terminal.write(`\nRunner · Task ${taskId} · Attempt ${attemptId ?? "未知"}\n`); }
+    terminal.write(visible);
+  };
+  const reviewChoices = async (review: PlanReviewRecord) => {
+    if (!review.findings.length) return;
+    const actions: import("@token-coupon/core").ReviewAction[] = [];
+    try {
+      for (const finding of review.findings) {
+        print(`${finding.findingId} [${finding.severity}] ${finding.description}\n依据：${finding.basis}`);
+        const action = await terminal.choose("选择修订方式", [
+          { id: "suggestion", label: finding.suggestion + "（推荐）", disabled: !finding.suggestion.trim() },
+          { id: "custom", label: "自定义修订说明" }, { id: "keep", label: "暂不处理，保留该问题" },
+        ]);
+        if (!action) return;
+        let text: string | undefined;
+        if (action === "custom") {
+          do { const raw = await terminal.text("修订说明："); if (raw === null) return; text = raw.trim(); if (!text) print("说明不能为空，请重新输入。"); } while (!text);
+        }
+        actions.push({ findingId: finding.findingId, action: action as "suggestion" | "custom" | "keep", ...(text ? { text } : {}) });
+      }
+      print("修订汇总：\n" + actions.map((a) => `${a.findingId}：${a.action}${a.text ? " · " + a.text : ""}`).join("\n"));
+      const result = await cancellable((signal) => applyReviewActions({ workspace, review, actions, signal }), chatAbort.signal);
+      print(`选择记录：${result.actionId}`);
+      if (!result.revised) { print("全部问题保留；未修订草案，未复审。严重问题仍需修订或显式豁免。"); return; }
+      print(formatPlanner(result.revised));
+      if (result.revised.error) { print(result.revised.error); return; }
+      await printDraftUpdate(result.revised, workspace);
+      if (!result.revised.draft || result.revised.snapshot.status !== "draft_ready") { print("当前未生成可复审的新草案，请先回答澄清问题。"); return; }
+      const checked = await cancellable((signal) => reviewPlannerDraft({ planningId: review.planningId, workspace, signal }), chatAbort.signal);
+      print(formatReview(checked.review, true));
+      print("复审完成；如需继续修订请再次 /review，不自动批准或执行。");
+    } catch (error) { if (error instanceof InputCancelled) { print("已取消本轮选择，未提交部分修订。"); return; } throw error; }
+  };
   const show = async () => {
     if (!planningId) return;
-    console.log(formatPlanner(await loadPlannerConversation(planningId, workspace)));
+    print(formatPlanner(await loadPlannerConversation(planningId, workspace)));
   };
   const run = async (runArgs: string[] = []) => {
     if (!planningId) throw new Error("请先输入需求生成计划");
@@ -555,17 +576,17 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       ...(runnerProfile ? { runnerProfile } : {}),
       onOutput: (taskId, output, attemptId) => {
         const visible = output.displayText ?? output.agentText;
-        if (visible) chatIO.output.write((maxParallel && maxParallel > 1 ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible);
-        else if (output.stream === "stderr" && output.text) console.error(output.text);
+        if (visible) runnerOutput(taskId, visible, attemptId);
+        else if (output.stream === "stderr" && output.text) print(output.text);
       },
       onInteraction,
-      onIdleState: (taskId, state) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`),
+      onIdleState: (taskId, state) => terminal.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`),
     }), chatAbort.signal);
-    console.log(formatPlanner(result));
+    print(formatPlanner(result));
     if (result.snapshot.execution) {
       const record = await new SessionStore(workspace).load(result.snapshot.execution.sessionId);
-      console.log(formatSession(record.snapshot, record.plan));
-      exitCode = sessionExitCode(record.snapshot);
+      print(formatSession(record.snapshot, record.plan));
+      if (!chatAbort.signal.aborted) exitCode = sessionExitCode(record.snapshot);
     }
   };
   const approve = async () => {
@@ -573,7 +594,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     const loaded = await loadPlannerConversation(planningId, workspace);
     if (!loaded.draft) throw new Error("当前没有可批准的计划");
     if (!loaded.review || loaded.review.status !== "succeeded" || !loaded.reviewIsCurrent) throw new Error("批准前必须运行 /review；当前草案没有有效审查");
-    console.log(formatReview(loaded.review, true));
+    print(formatReview(loaded.review, true));
     const errorFindings = loaded.review.findings.filter((finding) => finding.severity === "error");
     let waivedFindingIds: string[] = [];
     let waiverReason: string | undefined;
@@ -594,7 +615,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     if (confirm !== "y" && confirm !== "yes") return;
     const result = await cancellable((signal) => approvePlannerDraft({ planningId: planningId!, workspace, draftRevision: loaded.draft!.draftRevision, reviewId: loaded.review!.reviewId,
       ...(waivedFindingIds.length && waiverReason ? { waivedFindingIds, waiverReason: waiverReason! } : {}), signal }), chatAbort.signal);
-    console.log(formatPlanner(result));
+    print(formatPlanner(result));
   };
   const edit = async () => {
     if (!planningId) throw new Error("请先生成计划");
@@ -606,7 +627,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     await mkdir(directory, { recursive: true });
     const file = join(directory, "plan.json");
     await writeFile(file, JSON.stringify(loaded.draft.plan, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-    console.log(`正在编辑 draft-${loaded.draft.draftRevision}：${file}`);
+    print(`正在编辑 draft-${loaded.draft.draftRevision}：${file}`);
     const terminalInput = chatIO.input as NodeJS.ReadableStream & {
       isRaw?: boolean;
       setRawMode?: (mode: boolean) => unknown;
@@ -627,7 +648,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     if (info.size > 4 * 1024 * 1024) throw new Error(`编辑结果超过 4 MiB；文件保留：${file}`);
     const value = JSON.parse(await readFile(file, "utf8")) as unknown;
     const result = await replacePlannerDraft({ planningId, workspace, value, expectedDraftRevision: loaded.draft.draftRevision, expectedPlanHash: loaded.draft.planHash });
-    console.log(formatPlanner(result));
+    print(formatPlanner(result));
     await printDraftUpdate(result, workspace);
   };
 
@@ -635,10 +656,10 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     if (!planningId) {
       const records = await new PlannerStore(workspace).list();
       if (records.length) {
-        console.log("已有规划：");
+        print("已有规划：");
         for (const [index, snapshot] of records.entries()) {
           const draft = snapshot.draftRevision === null ? undefined : await new PlannerStore(workspace).loadDraft(snapshot.planningId, snapshot.draftRevision).catch(() => undefined);
-          console.log(`  ${index + 1}) ${snapshot.planningId.slice(0, 8)}  ${draft?.plan.title ?? "等待草案"}  ${snapshot.status}  draft-${snapshot.draftRevision ?? "—"}`);
+          print(`  ${index + 1}) ${snapshot.planningId.slice(0, 8)}  ${draft?.plan.title ?? "等待草案"}  ${snapshot.status}  draft-${snapshot.draftRevision ?? "—"}`);
         }
         const selectedValue = await ask("输入序号打开规划，回车新建：");
         if (selectedValue === null) return 0;
@@ -653,28 +674,33 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
     }
     if (planningId) {
       const snapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
-      if (snapshot.execution) console.log(`已关联执行 Session ${snapshot.execution.sessionId}；规划只读，请使用 /status、/resume 或 /retry。`);
-      else console.log(`已打开规划 ${planningId}。输入 /help 查看命令。`);
+      if (snapshot.execution) print(`已关联执行 Session ${snapshot.execution.sessionId}；规划只读，请使用 /status、/resume 或 /retry。`);
+      else print(`已打开规划 ${planningId}。输入 /help 查看命令。`);
       await show();
     } else {
-      console.log("输入需求开始规划，或用 /request-file <路径> 读取多行需求；输入 /exit 退出。");
+      print("输入需求开始规划，或用 /request-file <路径> 读取多行需求；输入 /exit 退出。");
     }
     while (true) {
-      const inputLine = await ask(planningId ? "planner> " : "request> ");
+      if (inputClosed) break;
+      terminal.initial = !planningId;
+      const inputLine = await terminal.message(planningId ? "planner> " : "request> ");
+      let literal = terminal.lastLiteral;
       if (inputLine === null) break;
       let line = inputLine.trim();
       if (!line) continue;
-      if (!planningId && line.startsWith("/request-file")) {
+      if (!literal && !planningId && line.startsWith("/request-file")) {
         const file = line.slice("/request-file".length).trim();
-        if (!file) { console.log("用法：/request-file <需求文本文件>"); continue; }
+        if (!file) { print("用法：/request-file <需求文本文件>"); continue; }
         const path = resolve(file);
         const info = await stat(path);
-        if (info.size > 8 * 1024) { console.log("需求文件超过 8 KiB"); continue; }
+        if (info.size > 8 * 1024) { print("需求文件超过 8 KiB"); continue; }
         line = await readFile(path, "utf8");
+        literal = true;
       }
-      if (!planningId && line.startsWith("/")) {
-        if (line === "/exit") break;
-        console.log("新规划尚未开始，请先输入需求。");
+      if (!literal && line === "/help") { print(formatChatHelp(!planningId)); continue; }
+      if (!literal && !planningId && line.startsWith("/")) {
+        if (line === "/exit" || line === "/quit") break;
+        print("新规划尚未开始，请先输入需求。");
         continue;
       }
       if (!planningId) {
@@ -690,7 +716,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           ...(provider === "mock" ? { planner: new MockPlanner() } : {}), signal,
         }), chatAbort.signal);
         planningId = result.snapshot.planningId;
-        console.log(formatPlanner(result));
+        print(formatPlanner(result));
         await printDraftUpdate(result, workspace);
         if (result.error) {
           const status = result.snapshot.turns.at(-1)?.status;
@@ -698,9 +724,9 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
         }
         continue;
       }
-      if (!line.startsWith("/")) {
+      if (literal || !line.startsWith("/")) {
         const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: line, signal }), chatAbort.signal);
-        console.log(formatPlanner(result));
+        print(formatPlanner(result));
         await printDraftUpdate(result, workspace);
         if (result.error) {
           const status = result.snapshot.turns.at(-1)?.status;
@@ -711,7 +737,33 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
       const [name, ...args] = line.slice(1).split(/\s+/);
       try {
         if (name === "exit" || name === "quit") break;
-        if (name === "help") console.log("输入自然语言继续规划；/confirm all|编号 /delegate 编号 /reject 编号 /revoke all|decisionId[,decisionId]；/plan /history /requirements [refresh] /trace <requirementId> [revision] /edit /check /diff /review /revise [说明] /approve /run [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>] /pending /respond <requestId> allow-once|deny /answer <requestId> <answers.json> /delivery /status /resume /retry <taskId> [--setup-file <setup.json>] /land <taskId> /cleanup /exit");
+        if (name === "help") print(formatChatHelp());
+        else if (name === "recover" || name === "logs") {
+          const snapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
+          if (!snapshot.execution) throw new Error("当前没有关联执行 Session");
+          const sessionId = snapshot.execution.sessionId;
+          if (name === "recover") {
+            if (args.some((arg) => arg !== "--confirm-stopped") || args.length > 1) throw new Error("用法：/recover [--confirm-stopped]");
+            const diagnosis = await diagnoseSession(workspace, sessionId);
+            print(formatSessionDiagnosis(diagnosis));
+            let confirmed = args.includes("--confirm-stopped");
+            if (!confirmed && !["active", "unknown", "identity_conflict", "idle"].includes(diagnosis.state)) {
+              confirmed = await terminal.choose("是否已人工确认原生执行全部停止？", [{ id: "no", label: "尚未确认，仅查看" }, { id: "yes", label: "已确认停止，恢复记录与残留锁" }]) === "yes";
+            }
+            if (confirmed) { const result = await recoverSession({ workspace, sessionId, confirmedStopped: true }); print(formatSessionDiagnosis(result.diagnosis)); print(result.recovered ? `恢复完成：${result.recoveryId}；请 /retry <taskId>，然后 /resume。` : "没有需要恢复的中断执行。"); }
+          } else {
+            let taskId: string | undefined, attemptId: string | undefined;
+            let follow = false, raw = false;
+            for (let i = 0; i < args.length; i++) {
+              if (args[i] === "--follow" && !follow) follow = true;
+              else if (args[i] === "--raw" && !raw) raw = true;
+              else if (args[i] === "--task" && !taskId && args[i + 1]) taskId = args[++i];
+              else if (args[i] === "--attempt" && !attemptId && args[i + 1]) attemptId = args[++i];
+              else throw new Error("用法：/logs [--task <taskId>] [--attempt <attemptId>] [--follow] [--raw]");
+            }
+            await showSessionLogs({ workspace, sessionId, follow, raw, signal: chatAbort.signal, ...(taskId ? { taskId } : {}), ...(attemptId ? { attemptId } : {}), output: print });
+          }
+        }
         else if (name === "pending") {
           const current = await loadPlannerConversation(planningId!, workspace);
           if (!current.snapshot.execution) throw new Error("规划还没有执行 Session");
@@ -721,8 +773,8 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
             if (!taskState.activeAttemptId || taskState.status !== "running") continue;
             pending.push(...(await readAttemptInteractions(workspace, taskState.activeAttemptId)).filter((item) => item.status === "pending"));
           }
-          if (!pending.length) console.log("当前没有等待中的 Runner 请求。");
-          for (const item of pending) console.log(`${item.requestId} · ${item.kind} · ${item.runnerId}/${item.taskId} · Attempt ${item.attemptId}\n${item.title}\n${item.summary}\n`);
+          if (!pending.length) print("当前没有等待中的 Runner 请求。");
+          for (const item of pending) print(`${item.requestId} · ${item.kind} · ${item.runnerId}/${item.taskId} · Attempt ${item.attemptId}\n${item.title}\n${item.summary}\n`);
         } else if (name === "respond" || name === "answer") {
           const [requestId, value, ...extra] = args;
           if (!requestId || !value || extra.length || (name === "respond" && value !== "allow-once" && value !== "deny")) {
@@ -750,65 +802,66 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
             reply = { kind: "question", answers: values as Array<{ questionId: string; optionIds?: string[]; text?: string }> };
           }
           const responseId = await submitAttemptInteractionReply({ workspace, attemptId, requestId, reply });
-          console.log(`已提交回复 ${responseId}；活跃 owner 将核对后转发给 Runner。`);
+          print(`已提交回复 ${responseId}；活跃 owner 将核对后转发给 Runner。`);
         } else if (name === "confirm" || name === "delegate" || name === "reject" || name === "revoke") {
           if (!args.length) throw new Error(`用法：/${name} ${name === "confirm" ? "all|编号[,编号]" : name === "revoke" ? "all|decisionId[,decisionId]" : "编号[,编号]"}`);
           const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: `/${name} ${args.join(" ")}`, signal }), chatAbort.signal);
-          console.log(formatPlanner(result));
+          print(formatPlanner(result));
           await printDraftUpdate(result, workspace);
-          if (result.error) console.error(result.error);
+          if (result.error) print(result.error);
         }
         else if (name === "status") {
           const loaded = await loadPlannerConversation(planningId, workspace);
-          console.log(formatPlanner(loaded));
           if (loaded.snapshot.execution) {
             const session = await new SessionStore(workspace).load(loaded.snapshot.execution.sessionId);
-            console.log(formatSession(session.snapshot, session.plan));
-          }
+            print(formatSession(session.snapshot, session.plan));
+            print(formatSessionDiagnosis(await diagnoseSession(workspace, session.snapshot.sessionId)));
+            print(`Planning：${planningId}；规划状态：${loaded.snapshot.status}；/plan 查看计划，/history 查看对话。`);
+          } else { print("执行状态：[待执行] 尚未关联执行 Session。"); print(formatPlanner(loaded)); }
         } else if (name === "plan") {
           if (!args[0]) await show();
           else {
             const loaded = await loadPlannerConversation(planningId, workspace);
             const entry = loaded.draft?.plan.tasks.find(({ task }) => task.id === args[0]);
             if (!entry) throw new Error(`当前草案中没有任务 ${args[0]}`);
-            console.log(`draft-${loaded.draft!.draftRevision} · ${entry.task.id} — ${entry.task.title}`);
-            console.log(`依赖：${entry.dependsOn.join(", ") || "无"}\n${entry.task.prompt}`);
+            print(`draft-${loaded.draft!.draftRevision} · ${entry.task.id} — ${entry.task.title}`);
+            print(`依赖：${entry.dependsOn.join(", ") || "无"}\n${entry.task.prompt}`);
           }
         }
         else if (name === "history") {
           const snapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
-          for (const message of snapshot.messages) console.log(`${message.role === "user" ? "用户" : "Planner"} [${message.messageId}]：${message.content}`);
+          for (const message of snapshot.messages) print(`${message.role === "user" ? "用户" : "Planner"} [${message.messageId}]：${message.content}`);
         } else if (name === "requirements") {
           if (args[0] === "refresh") {
             const result = await cancellable((signal) => refreshPlannerRequirements({ planningId: planningId!, workspace, signal }), chatAbort.signal);
-            console.log(formatPlanner(result));
+            print(formatPlanner(result));
             await printDraftUpdate(result, workspace);
           } else if (args.length) throw new Error("用法：/requirements [refresh]");
           const requirementsSnapshot = await new PlannerStore(workspace).load(planningId);
           printRequirements(requirementsSnapshot.requirements);
           if (requirementsSnapshot.planningAssessment) {
-            console.log("规划决策：");
-            for (const decision of requirementsSnapshot.planningAssessment.decisions) console.log(`  ${decision.decisionId} [${decision.status}]：${decision.value}`);
+            print("规划决策：");
+            for (const decision of requirementsSnapshot.planningAssessment.decisions) print(`  ${decision.decisionId} [${decision.status}]：${decision.value}`);
           }
         } else if (name === "trace") {
           if (!args[0] || args.length > 2 || (args[1] !== undefined && (!Number.isSafeInteger(Number(args[1])) || Number(args[1]) < 1))) throw new Error("用法：/trace <requirementId> [revision]");
           printRequirementTrace(traceRequirement(await new PlannerStore(workspace).load(planningId), args[0], args[1] === undefined ? undefined : Number(args[1])));
         } else if (name === "revise") {
           const result = await cancellable((signal) => revisePlannerDraft({ planningId: planningId!, workspace, message: args.join(" "), signal }), chatAbort.signal);
-          console.log(formatPlanner(result));
+          print(formatPlanner(result));
           await printDraftUpdate(result, workspace);
         } else if (name === "edit") await edit();
         else if (name === "check") {
           const loaded = await loadPlannerConversation(planningId, workspace);
           if (!loaded.draft) throw new Error("当前没有可检查的草案");
           const checked = checkPlan(loaded.draft.plan, loaded.snapshot.executionDefaults);
-          console.log(checked.valid ? `计划有效：${checked.planHash}` : checked.diagnostics.map((item) => `${item.path}：${item.message}`).join("\n"));
+          print(checked.valid ? `计划有效：${checked.planHash}` : checked.diagnostics.map((item) => `${item.path}：${item.message}`).join("\n"));
         } else if (name === "diff") {
           const loaded = await loadPlannerConversation(planningId, workspace);
           if (!loaded.draft) throw new Error("当前没有可比较的草案");
           const to = Number(args[1] ?? loaded.draft.draftRevision);
           const from = Number(args[0] ?? to - 1);
-          if (to <= 1 && !args.length) console.log("首次生成的计划，没有前一版本可比较。");
+          if (to <= 1 && !args.length) print("首次生成的计划，没有前一版本可比较。");
           else printPlanDiff(from, to, diffPlans((await new PlannerStore(workspace).loadDraft(planningId!, from)).plan, (await new PlannerStore(workspace).loadDraft(planningId!, to)).plan), false);
         } else if (name === "review") {
           if (args[0] === "show") {
@@ -816,10 +869,11 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
             const id = args[1] ?? snapshot.latestReviewId;
             if (!id) throw new Error("当前没有审查记录");
             const record = await new ReviewStore(workspace).load(planningId, id);
-            console.log(formatReview(record, (await loadCurrentPlanReview(planningId, workspace))?.reviewId === id));
+            print(formatReview(record, (await loadCurrentPlanReview(planningId, workspace))?.reviewId === id));
           } else {
             const result = await cancellable((signal) => reviewPlannerDraft({ planningId: planningId!, workspace, signal }), chatAbort.signal);
-            console.log(formatReview(result.review, true));
+            print(formatReview(result.review, true));
+            await reviewChoices(result.review);
           }
         } else if (name === "approve") await approve();
         else if (name === "run") await run(args);
@@ -829,15 +883,15 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           const sessionStore = new SessionStore(workspace);
           const record = await sessionStore.load(plannerSnapshot.execution.sessionId);
           const report = await createSessionDelivery(record, sessionStore);
-          console.log(formatSessionDelivery(report, workspace));
-          console.log(`Delivery 记录：${sessionStore.sessionDirectory(record.snapshot.sessionId)}/delivery.json`);
+          print(formatSessionDelivery(report, workspace));
+          print(`Delivery 记录：${sessionStore.sessionDirectory(record.snapshot.sessionId)}/delivery.json`);
         }
         else if (name === "cleanup") {
           const plannerSnapshot = (await loadPlannerConversation(planningId, workspace)).snapshot;
           if (!plannerSnapshot.execution) throw new Error("规划还没有执行 Session");
           const report = await cleanupSessionWorktrees({ sessionId: plannerSnapshot.execution.sessionId, workspace });
-          for (const path of report.removedWorktrees) console.log(`已移除：${path}`);
-          for (const item of report.retainedWorktrees) console.log(`保留：${item.path}（${item.reason}）`);
+          for (const path of report.removedWorktrees) print(`已移除：${path}`);
+          for (const item of report.retainedWorktrees) print(`保留：${item.path}（${item.reason}）`);
         }
         else if (name === "land") {
           if (args.length !== 1) throw new Error("用法：/land <taskId>（先在整合 worktree 手工提交并合并 Attempt 分支）");
@@ -848,7 +902,7 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
             taskId: args[0]!, signal,
           }), chatAbort.signal);
           const record = await new SessionStore(workspace).load(result.snapshot.sessionId);
-          console.log(formatSession(result.snapshot, record.plan));
+          print(formatSession(result.snapshot, record.plan));
         } else if (name === "retry" || name === "resume") {
           let setupFile: string | undefined;
           const commandArgs: string[] = [];
@@ -868,13 +922,13 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           const parallelExecution = ((await new SessionStore(workspace).load(sessionId)).snapshot.maxParallel ?? 1) > 1;
           const operation = { sessionId, workspace, createRunner: createTaskRunner, acceptEdits: command.acceptEdits, onInteraction,
             ...(setupProfile ? { setupProfile } : {}),
-            onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput, attemptId?: string) => { const visible = output.displayText ?? output.agentText; if (visible) chatIO.output.write((parallelExecution ? `\n[${taskId}${attemptId ? `#${attemptId.slice(0, 8)}` : ""}] ` : "") + visible); },
-            onIdleState: (taskId: string, state: { idle: boolean }) => chatIO.output.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`) };
+            onOutput: (taskId: string, output: import("@token-coupon/core").RunnerOutput, attemptId?: string) => { const visible = output.displayText ?? output.agentText; if (visible) runnerOutput(taskId, visible, attemptId); },
+            onIdleState: (taskId: string, state: { idle: boolean }) => terminal.write(state.idle ? `\n[${taskId}] 暂无输出，任务仍在运行。\n` : `\n[${taskId}] 输出已恢复。\n`) };
           const result = await cancellable((signal) => name === "retry"
             ? retrySession({ ...operation, taskId: commandArgs[0]!, signal })
             : resumeSession({ ...operation, signal }), chatAbort.signal);
           const record = await new SessionStore(workspace).load(sessionId);
-          console.log(formatSession(result.snapshot, record.plan));
+          print(formatSession(result.snapshot, record.plan));
         } else if (name === "request-file") {
           const file = args.join(" ");
           if (!file) throw new Error("用法：/request-file <需求文本文件>");
@@ -882,21 +936,25 @@ async function runPlannerChat(command: Command, workspace: string, chatIO: Plann
           if (info.size > 8 * 1024) throw new Error("需求文件超过 8 KiB");
           const content = await readFile(resolve(file), "utf8");
           const result = await cancellable((signal) => replyToPlanner({ planningId: planningId!, workspace, message: content, signal }), chatAbort.signal);
-          console.log(formatPlanner(result));
+          print(formatPlanner(result));
           await printDraftUpdate(result, workspace);
           if (result.error) {
             const status = result.snapshot.turns.at(-1)?.status;
             if (status === "cancelled" || status === "timed_out") exitCode = turnExitCode(status);
           }
-        } else console.log("未知命令。输入 /help 查看可用操作。");
+        } else print("未知命令。输入 /help 查看可用操作。");
       } catch (error) {
-        console.error(error instanceof Error ? error.message : String(error));
+        print(error instanceof Error ? error.message : String(error));
       }
     }
+  } catch (error) {
+    if (!chatAbort.signal.aborted) throw error;
   } finally {
+    process.removeListener("SIGINT", cancelChat); process.removeListener("SIGTERM", cancelChat);
     rl.close();
+    if (chatAbort.signal.aborted) terminal.write("\n[会话已退出] 当前操作已结束；退出码：130。\n");
   }
-  return exitCode;
+  return chatAbort.signal.aborted ? 130 : exitCode;
 }
 
 function parseEditor(value: string): string[] {
@@ -926,4 +984,9 @@ function runEditor(executable: string, args: string[]): Promise<number> {
     child.once("error", reject);
     child.once("close", (code) => resolveCode(code ?? 1));
   });
+}
+
+function styleRoles(text: string, color: boolean): string {
+  if (!color) return text;
+  return text.replace(/^(用户[：:]|Planner[：:])/gm, (role) => `\x1b[${role.startsWith("用户") ? "36;1" : "35;1"}m${role}\x1b[0m`);
 }

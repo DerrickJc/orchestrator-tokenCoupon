@@ -99,16 +99,17 @@ export async function replyToPlanner(options: { planningId: string; workspace: s
   return mutateWithTurn(store, options.planningId, options.planner ?? createPlanner(initial.config), options.message, options.signal, false);
 }
 
-export async function revisePlannerDraft(options: { planningId: string; workspace: string; message?: string; reviewId?: string; planner?: Planner; signal?: AbortSignal }): Promise<PlannerOperationResult> {
+export async function revisePlannerDraft(options: { planningId: string; workspace: string; message?: string; reviewId?: string; expectedPlanHash?: string; expectedDraftRevision?: number; classifyRevision?: boolean; planner?: Planner; signal?: AbortSignal }): Promise<PlannerOperationResult> {
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
     const snapshot = await store.load(options.planningId);
     const review = await loadCurrentPlanReview(options.planningId, store.workspace);
     if (!review || (options.reviewId && options.reviewId !== review.reviewId)) throw new Error("修订需要当前有效的审查报告，请先 /review");
+    if ((options.expectedPlanHash && options.expectedPlanHash !== review.planHash) || (options.expectedDraftRevision && options.expectedDraftRevision !== review.draftRevision)) throw new Error("review_actions_stale：草案或报告已变化");
     if (snapshot.activeTurnId || snapshot.execution) throw new Error("当前规划不能修订");
-    const message = "根据本次附带的审查报告修订当前草案，逐项落实建议；不能自行豁免。" + (options.message ? "\n用户处理说明：" + options.message : "");
-    return await executeTurn(store, snapshot, options.planner ?? createPlanner(snapshot.config), randomUUID(), message, options.signal, false, true);
+    const message = (options.classifyRevision ? "根据本次审查及用户逐项选择修订当前草案，保留未处理问题；不能自行豁免。" : "根据本次附带的审查报告修订当前草案，逐项落实建议；不能自行豁免。") + (options.message ? "\n用户处理说明：" + options.message : "");
+    return await executeTurn(store, snapshot, options.planner ?? createPlanner(snapshot.config), randomUUID(), message, options.signal, false, !options.classifyRevision);
   } finally { await release(); }
 }
 
@@ -532,10 +533,10 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
       result = { ...result, planningAssessment: assessment };
       if (result.kind === "clarification") {
         assertNoRepeatedConfirmationClarification(assessment, result, confirmationState);
-        if (hasPendingPlanningDecisions(assessment) && !result.questionBindings) {
+        if (hasPendingPlanningDecisions(assessment) && !result.questionBindings?.length) {
           throw new PlannerReplyValidationError("planner_readiness_invalid", "澄清必须提供 questionBindings，将每个待确认 decisionId 关联到具体问题和回答模式");
         }
-        if (result.questionBindings && hasPendingPlanningDecisions(assessment)) {
+        if (result.questionBindings?.length) {
           try { makeConfirmationProposal(result, messageId, (confirmationState.activeProposal?.revision ?? 0) + 1); }
           catch (error) { throw new PlannerReplyValidationError("planner_readiness_invalid", safeError(error)); }
         }
@@ -605,7 +606,8 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
         if (!repairable || attempt === 2) throw error;
         repairMessage = "上次回复未通过应用校验：" + (error instanceof Error ? error.message : String(error)) +
           "。复用已有调研，只修正指出的 JSON、字段、需求来源或执行配置问题；保留 requirementsUpdate，输出一个完整 JSON 对象，不要调用工具。";
-        await context.record({ type: "planner.validation_failed", payload: { attempt: attempt + 1, message: repairMessage } });
+        await context.record({ type: "planner.validation_failed", payload: { attempt: attempt + 1, message: repairMessage,
+          ...(error instanceof PlannerReplyValidationError ? { code: error.code, ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) } : {}) } });
       }
     }
     if (!reply) throw validationError ?? new PlannerOperationError("planner_invalid_reply", "Planner 没有返回有效结果");

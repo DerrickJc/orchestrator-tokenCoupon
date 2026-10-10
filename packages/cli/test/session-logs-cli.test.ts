@@ -49,3 +49,25 @@ async function invoke(...args: string[]): Promise<{ code: number; stdout: string
   try { return { code: await runCli(args), stdout: lines.join("\n") }; }
   finally { log.mockRestore(); }
 }
+
+it("follow discovers a new retry Attempt, hides deltas and shows a complete final message", async () => {
+  const { showSessionLogs } = await import("../src/session-logs-cli.js");
+  const workspace = mkdtempSync(join(tmpdir(), "logs-follow-")); directories.push(workspace);
+  const store = new SessionStore(workspace);
+  const task = { schemaVersion: 1 as const, id: "verify", title: "Verify", prompt: "Run tests", execution: { runnerId: "mock", mode: "non_interactive" as const } };
+  const record = await store.create({ schemaVersion: 1, id: "follow", title: "Follow", tasks: [{ task, dependsOn: [], status: "planned" }] });
+  const controller = new AbortController(); const logs: string[] = [];
+  const running = showSessionLogs({ workspace, sessionId: record.snapshot.sessionId, follow: true, signal: controller.signal, output: (s) => { logs.push(s); if (s.includes("FINAL_END")) controller.abort(); } });
+  const attemptId = "22222222-2222-4222-8222-222222222222"; const artifactDir = join(workspace, ".token-coupon", "runs", attemptId); mkdirSync(artifactDir, { recursive: true });
+  const text = "完整结果".repeat(130) + "FINAL_END";
+  writeFileSync(join(artifactDir, "events.jsonl"), [
+    { sequence: 1, timestamp: new Date().toISOString(), attemptId, type: "message.delta", payload: { text: "HIDDEN_DELTA" } },
+    { sequence: 2, timestamp: new Date().toISOString(), attemptId, type: "command.completed", payload: { command: "node --test", cwd: workspace, exitCode: null } },
+    { sequence: 3, timestamp: new Date().toISOString(), attemptId, type: "message.completed", payload: { text } },
+  ].map((e) => JSON.stringify(e)).join("\n") + "\n");
+  await store.save({ ...record.snapshot, revision: 2, tasks: [{ ...record.snapshot.tasks[0]!, attempts: [{ attemptId, artifactDir, outcome: "recorded" }] }] });
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try { await running; } finally { clearTimeout(timeout); }
+  expect(logs.join("\n")).toContain("新增 Attempt"); expect(logs.join("\n")).toContain(text);
+  expect(logs.join("\n")).not.toContain("HIDDEN_DELTA"); expect(logs.join("\n")).toContain("exit=unknown");
+});

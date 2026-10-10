@@ -3,6 +3,7 @@ import { decodePlannerJson, parsePlannerReply, PlannerReplyValidationError } fro
 import { plannerPlanStructure } from "../plan-decisions.js";
 import { ReviewReplyValidationError } from "../review-reply.js";
 import { repositoryToolDefinitions } from "../repository-reader.js";
+import { PLANNING_PROTOCOL_PROMPT } from "../planning-protocol.js";
 
 const MAX_TOOL_ROUNDS = 4;
 const MAX_TOOLS_PER_REPLY = 4;
@@ -31,8 +32,7 @@ function outputContract(input: PlannerInput): string {
     classification: { rationale: "根据用户输入选择规划类型", sourceMessageId: "当前用户消息的真实 messageId", quote: "从用户原文复制的连续片段" },
     decisions: [],
   };
-  const clarification = { kind: "clarification", message: "需要确认的信息", questions: ["具体问题"],
-    ...(input.pendingMessages ? { questionBindings: [{ questionId: "question-1", displayIndex: 1, decisionIds: ["当前待确认的 decisionId"], answerMode: "provide_value" }] } : {}),
+  const clarification = { kind: "clarification", message: "需要确认的信息", questions: ["具体任务是什么？"],
     ...requirementsUpdate, planningAssessment };
   const draft = { kind: "draft", message: "计划说明", plan: { schemaVersion: 1, id: "greeting-plan", title: "问候功能", tasks: [
     { task: { schemaVersion: 1, id: "implement", title: "实现", prompt: "实现约定问候函数并编写测试", execution: input.executionDefaults }, dependsOn: [], status: "planned" },
@@ -69,7 +69,7 @@ export class DeepSeekPlanner implements Planner, PlanReviewer {
     if (!apiKey) throw new PlannerApiError("planner_api_key_missing", "缺少 TOKEN_COUPON_PLANNER_API_KEY");
     const endpoint = chatEndpoint(this.config.baseUrl);
     const fetcher = this.config.fetchImpl ?? fetch;
-    const system = SYSTEM_PROMPT + outputContract(input) + (input.pendingMessages ? REQUIREMENTS_PROMPT : "") + READINESS_PROMPT + AUTHORIZATION_PROMPT + DECISION_FORMAT + "\n本次执行配置：" + JSON.stringify(input.executionDefaults) +
+    const system = SYSTEM_PROMPT + outputContract(input) + (input.pendingMessages ? REQUIREMENTS_PROMPT : "") + READINESS_PROMPT + AUTHORIZATION_PROMPT + DECISION_FORMAT + PLANNING_PROTOCOL_PROMPT + "\n本次执行配置：" + JSON.stringify(input.executionDefaults) +
       (input.requirements ? "\n当前需求记录：" + JSON.stringify(input.requirements) : "") +
       (input.planningAssessment ? "\n当前规划决策记录：" + JSON.stringify(input.planningAssessment) : "") +
       (input.confirmationState ? "\n已提交的结构化确认状态（不得重新索要已接受的提案或已委托的选择权）：" + JSON.stringify(input.confirmationState) : "") +
@@ -136,11 +136,22 @@ export class DeepSeekPlanner implements Planner, PlanReviewer {
     if (!apiKey) throw new PlannerApiError("planner_api_key_missing", "缺少 TOKEN_COUPON_PLANNER_API_KEY");
     const endpoint = chatEndpoint(this.config.baseUrl);
     const fetcher = this.config.fetchImpl ?? fetch;
+    // Only findings in the immediately previous report need a resolution now.
+    // Its resolutions are a historical receipt, not another set of open issues.
+    const resolutionIds = input.previousReview?.findings.map(({ findingId }) => findingId) ?? [];
+    const resolutionContract = "\n本轮 resolutions 必须恰好覆盖的 findingId：" + JSON.stringify(resolutionIds) +
+      "。只以 previousReview.findings 为依据；previousReview 的历史 resolutions、summary、planChanges 或追溯原文提及的已解决编号不能重复提交。" +
+      (resolutionIds.length ? "每个编号必须出现一次；unresolved 用 priorFindingId 延续，resolved 不再延续。" : "没有需要追踪的上轮问题，resolutions 必须是 []；仍需检查本轮新增问题。");
+    const reviewInput = { ...input };
+    if (input.previousReview) {
+      const { resolutions: _history, ...previous } = input.previousReview;
+      reviewInput.previousReview = previous;
+    }
     const messages: ApiMessage[] = [
-      { role: "system", content: REVIEW_PROMPT + (input.plan.schemaVersion === 2
+      { role: "system", content: REVIEW_PROMPT + resolutionContract + (input.plan.schemaVersion === 2
         ? "\n对 Plan v2，decisionContext 是所选值的规范记录，decisionRefs 只建立结构关联；逐项比较所选值与任务实际方案。语义一致的正常改写可以通过，技术或业务含义冲突必须报告，不能只因长 value 没有逐字出现而判缺失。"
         : "") },
-      { role: "user", content: JSON.stringify(input) },
+      { role: "user", content: JSON.stringify(reviewInput) },
     ];
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const response = await this.request(fetcher, endpoint, apiKey, messages, true, context);
@@ -159,7 +170,7 @@ export class DeepSeekPlanner implements Planner, PlanReviewer {
             if (!(error instanceof ReviewReplyValidationError)) throw error;
             await context.record({ type: "review.validation_failed", payload: { attempt: 0, code: error.code, message: error.message } });
             messages.push({ role: "user", content: "调研阶段已给出报告，但未通过应用校验：" + error.message +
-              "。保留有效结论，补齐缺项后只返回完整审查 JSON；复用已有证据，不调用工具。" });
+              "。保留有效结论，修正无效项、补齐缺项后只返回完整审查 JSON；复用已有证据，不调用工具。" + resolutionContract });
           }
         }
         break;
@@ -178,7 +189,7 @@ export class DeepSeekPlanner implements Planner, PlanReviewer {
         messages.push({ role: "tool", tool_call_id: callId, name: name || "unknown", content: result });
       }
     }
-    messages.push({ role: "system", content: "停止调研，只返回规定的审查 JSON；保留已经形成的结论、严重程度及逐项 resolutions，只完成格式整理，不重新扩大审查范围；不得修改计划或执行任务。" });
+    messages.push({ role: "system", content: "停止调研，只返回规定的审查 JSON；保留有效结论和严重程度，修正无效的 resolutions；不得修改计划或执行任务。" + resolutionContract });
     for (let correction = 0; correction <= 2; correction += 1) {
       const final = await this.request(fetcher, endpoint, apiKey, messages, false, context);
       const choice = final.choices?.[0];
@@ -197,7 +208,7 @@ export class DeepSeekPlanner implements Planner, PlanReviewer {
         await context.record({ type: "review.validation_failed", payload: { attempt: correction + 1, code: error.code, message: error.message } });
         if (correction === 2) throw error;
         messages.push({ role: "user", content: "上次审查报告未通过应用校验：" + error.message +
-          "。请复用本对话中已经取得的需求、计划、差异与仓库证据，只修正指出的字段。必须完整覆盖每个上轮 findingId 的 resolutions；unresolved 项须由 finding.priorFindingId 延续。不要调用工具，不要扩大审查范围，只返回一个完整 JSON 对象。" });
+          "。请复用本对话中已经取得的需求、计划、差异与仓库证据，只修正指出的字段。不要调用工具，不要扩大审查范围，只返回一个完整 JSON 对象。" + resolutionContract });
       }
     }
     throw new ReviewReplyValidationError("review_reply_invalid", "复审报告修正次数已耗尽");

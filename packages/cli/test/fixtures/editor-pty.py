@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import sys
@@ -62,8 +63,11 @@ def drive(node, cli, workspace, planning_id, mode):
         deadline = time.monotonic() + 8
         while True:
             found = transcript.find(marker, position)
-            if found != -1:
-                position = found + len(marker)
+            # Editing redraws also contain "planner>". Only an empty prompt
+            # at the end of output announces that the CLI owns input again.
+            visible = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", transcript).rstrip(b"\r")
+            if found != -1 and (marker != b"planner> " or visible.endswith(marker)):
+                position = len(transcript) if marker == b"planner> " else found + len(marker)
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:

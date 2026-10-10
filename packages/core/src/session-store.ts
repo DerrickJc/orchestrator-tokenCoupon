@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { appendFile, open, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { PlanDefinition } from "./plan.js";
 import type { GitIsolationJournal, SessionControlKind, SessionControlRequest, SessionIsolation, SessionRecord, SessionSchedulerEvent, SessionSnapshot, SessionTaskState } from "./session-types.js";
 import { parsePlan } from "./validate-plan.js";
 import { parseRunnerProfile, runnerProfileHash } from "./runner-registry.js";
+
+import { createExecutionLock, inspectLock, lockDescription } from "./owner-lock.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_STATUSES = new Set(["ready", "running", "pausing", "paused", "succeeded", "failed", "cancelled", "interrupted", "blocked"]);
@@ -27,33 +29,11 @@ export class SessionStore {
   async acquireLock(sessionId?: string): Promise<() => Promise<void>> {
     await mkdir(this.root, { recursive: true });
     const lockPath = join(this.root, "workspace.lock");
-    const owner = { pid: process.pid, sessionId: sessionId ?? null, token: randomUUID(), acquiredAt: new Date().toISOString() };
-    let handle;
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
-      await handle.close();
-    } catch (error) {
-      await handle?.close().catch(() => undefined);
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        let description = "已有计划正在使用此工作目录";
-        try {
-          const existing = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: number; sessionId?: string | null };
-          description += `（PID ${existing.pid ?? "未知"}${existing.sessionId ? `，Session ${existing.sessionId}` : ""}）`;
-        } catch { description += "（锁文件内容不可读）"; }
-        throw new SessionLockError(description);
-      }
+    try { return await createExecutionLock(lockPath, sessionId); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new SessionLockError(lockDescription(await inspectLock(lockPath)));
       throw error;
     }
-
-    return async () => {
-      try {
-        const current = JSON.parse(await readFile(lockPath, "utf8")) as { token?: string };
-        if (current.token === owner.token) await unlink(lockPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-    };
   }
 
   async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string; runnerProfile?: import("./runner.js").RunnerProfile } = {}): Promise<SessionRecord> {
@@ -276,12 +256,8 @@ export class SessionStore {
   }
 
   private async hasLiveOwner(sessionId: string): Promise<boolean> {
-    let owner: { pid?: number; sessionId?: string | null };
-    try { owner = JSON.parse(await readFile(join(this.root, "workspace.lock"), "utf8")) as typeof owner; }
-    catch { return false; }
-    if (!Number.isSafeInteger(owner.pid) || owner.sessionId !== sessionId) return false;
-    try { process.kill(owner.pid!, 0); return true; }
-    catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+    const lock = await inspectLock(join(this.root, "workspace.lock"));
+    return lock.owner?.sessionId === sessionId && lock.state === "active";
   }
 
 }

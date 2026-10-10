@@ -1,5 +1,6 @@
+import { createExecutionLock, inspectLock, lockDescription } from "./owner-lock.js";
 import { spawn } from "node:child_process";
-import { lstat, open, readFile, realpath, unlink } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 export interface GitRepositoryContext {
@@ -117,30 +118,11 @@ export async function inspectGitRepository(workspaceValue: string): Promise<GitR
 /** One lock per Git common directory prevents overlapping Token Coupon worktree/ref mutations. */
 export async function acquireGitRepositoryLock(gitCommonDir: string, sessionId?: string): Promise<() => Promise<void>> {
   const lockPath = join(gitCommonDir, "token-coupon-worktree.lock");
-  const owner = { pid: process.pid, sessionId: sessionId ?? null, token: `${Date.now()}-${Math.random().toString(16).slice(2)}`, acquiredAt: new Date().toISOString() };
-  let handle;
-  try {
-    handle = await open(lockPath, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
-    await handle.close();
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      let detail = "另一个 Token Coupon Git Session 正在操作此仓库";
-      try {
-        const existing = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: number; sessionId?: string | null };
-        detail += `（PID ${existing.pid ?? "未知"}${existing.sessionId ? `，Session ${existing.sessionId}` : ""}）`;
-      } catch { detail += "（锁记录不可读；不会自动删除）"; }
-      throw new Error(`${detail}。如果已确认无进程持有，可手动检查并移除 ${lockPath}`);
-    }
+  try { return await createExecutionLock(lockPath, sessionId); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("另一个 Token Coupon Git Session 正在操作或遗留了锁。" + lockDescription(await inspectLock(lockPath)));
     throw error;
   }
-  return async () => {
-    try {
-      const current = JSON.parse(await readFile(lockPath, "utf8")) as { token?: string };
-      if (current.token === owner.token) await unlink(lockPath);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  };
 }
 
 export function parseNulPaths(value: string): string[] {

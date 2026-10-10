@@ -10,7 +10,7 @@ import { diffPlans } from "./plan-diff.js";
 import { SessionStore } from "./session-store.js";
 import { InputValidationError } from "./validation.js";
 import { assertPlanningReady } from "./planning-readiness.js";
-import { validateReviewReply } from "./review-reply.js";
+import { finalizeReviewReply, validateReviewReply } from "./review-reply.js";
 
 const REVIEW_TIMEOUT_MS = 120_000;
 const API_REQUEST_LIMIT = 8;
@@ -185,54 +185,12 @@ export function requirementsHash(snapshot: PlannerConversationSnapshot): string 
 }
 
 export function reviewerConfigHash(config: PlannerConfig, planSchemaVersion: 1 | 2 = 1, hasStructuredAssessment = true): string {
-  const reviewPromptVersion = planSchemaVersion === 2 ? 4 : hasStructuredAssessment ? 3 : 2;
+  const reviewPromptVersion = planSchemaVersion === 2 ? 7 : hasStructuredAssessment ? 6 : 5;
   return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion });
 }
 
 function parseReviewReply(value: unknown, knownTaskIds: string[], knownRequirementIds: string[], previous?: PlanReviewRecord): { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] } {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("审查回复必须是 JSON 对象");
-  const raw = value as Record<string, unknown>;
-  if (Object.keys(raw).some((key) => !["summary", "findings", "resolutions"].includes(key)) || typeof raw.summary !== "string" || !raw.summary.trim() ||
-      Buffer.byteLength(raw.summary, "utf8") > 16 * 1024 || !Array.isArray(raw.findings) || raw.findings.length > 100) throw new Error("审查报告结构无效");
-  const findings: PlanReviewFinding[] = raw.findings.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`findings[${index}] 必须是对象`);
-    const finding = item as Record<string, unknown>;
-    if (Object.keys(finding).some((key) => !["findingId", "severity", "category", "taskIds", "requirementIds", "description", "basis", "suggestion", "priorFindingId"].includes(key)) ||
-        !["error", "warning", "info"].includes(String(finding.severity)) || !["requirements", "dependency", "technology", "contract", "testing"].includes(String(finding.category)) ||
-        !Array.isArray(finding.taskIds) || finding.taskIds.some((id) => typeof id !== "string" || !knownTaskIds.includes(id)) ||
-        typeof finding.description !== "string" || !finding.description.trim() || typeof finding.basis !== "string" || !finding.basis.trim() ||
-        typeof finding.suggestion !== "string" || !finding.suggestion.trim()) throw new Error(`findings[${index}] 字段无效或引用了未知任务`);
-    const findingId = typeof finding.findingId === "string" ? finding.findingId : `F${index + 1}`;
-    const prior = finding.priorFindingId === undefined ? undefined : previous?.findings.find(({ findingId }) => findingId === finding.priorFindingId);
-    if (finding.priorFindingId !== undefined && !prior) throw new Error("priorFindingId 引用了未知的上轮问题");
-    if (finding.requirementIds !== undefined && (!Array.isArray(finding.requirementIds) || finding.requirementIds.some((id) => typeof id !== "string" || !knownRequirementIds.includes(id)))) throw new Error("审查引用了未知需求");
-    return { findingId, severity: finding.severity as PlanReviewFinding["severity"], category: finding.category as PlanReviewFinding["category"],
-      taskIds: finding.taskIds as string[], description: finding.description, basis: finding.basis, suggestion: finding.suggestion,
-      issueId: prior ? prior.issueId ?? `issue-${previous!.reviewId}-${prior.findingId}` : "issue-" + randomUUID(),
-      ...(prior ? { priorFindingId: prior.findingId } : {}), ...(finding.requirementIds ? { requirementIds: finding.requirementIds as string[] } : {}),
-    };
-  });
-  if (new Set(findings.map((finding) => finding.findingId)).size !== findings.length) throw new Error("审查报告包含重复 findingId");
-  if (new Set(findings.filter(({ priorFindingId }) => priorFindingId).map(({ priorFindingId }) => priorFindingId)).size !== findings.filter(({ priorFindingId }) => priorFindingId).length) throw new Error("多个问题引用同一旧问题");
-  const resolutions = parseResolutions(raw.resolutions, previous, findings);
-  return { summary: raw.summary, findings, resolutions };
-}
-
-function parseResolutions(value: unknown, previous: PlanReviewRecord | undefined, findings: PlanReviewFinding[]): import("./planner-types.js").ReviewResolution[] {
-  if (value === undefined && !previous?.findings.length) return [];
-  if (!Array.isArray(value) || value.length !== (previous?.findings.length ?? 0)) throw new Error("复审必须逐项说明上轮问题的解决情况");
-  const seen = new Set<string>();
-  return value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("问题解决记录无效");
-    const item = entry as Record<string, unknown>;
-    const prior = previous?.findings.find(({ findingId }) => findingId === item.findingId);
-    if (!prior || seen.has(prior.findingId) || Object.keys(item).some((key) => !["findingId", "status", "basis"].includes(key)) || !["resolved", "unresolved"].includes(String(item.status)) ||
-        typeof item.basis !== "string" || !item.basis.trim() || Buffer.byteLength(item.basis, "utf8") > 4096) throw new Error("问题解决记录引用、状态或依据无效");
-    seen.add(prior.findingId);
-    const continued = findings.some(({ priorFindingId }) => priorFindingId === prior.findingId);
-    if (continued !== (item.status === "unresolved")) throw new Error("旧问题解决状态与本轮 findings 不一致");
-    return { findingId: prior.findingId, issueId: prior.issueId ?? `issue-${previous!.reviewId}-${prior.findingId}`, status: item.status as "resolved" | "unresolved", basis: item.basis };
-  });
+  return finalizeReviewReply(validateReviewReply(value, knownTaskIds, knownRequirementIds, previous), previous);
 }
 
 function mergeEvidence(previous: RepositoryEvidence[], current: RepositoryEvidence[]): RepositoryEvidence[] {

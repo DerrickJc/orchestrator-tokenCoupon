@@ -14,18 +14,24 @@ export function makeConfirmationProposal(
   sourceMessageId: string,
   revision: number,
 ): ConfirmationProposalSet | undefined {
-  if (reply.kind !== "clarification" || !reply.questions || !reply.questionBindings?.length || !reply.planningAssessment) return undefined;
+  if (reply.kind !== "clarification" || !reply.questions || !reply.planningAssessment) return undefined;
   const pending = new Map(reply.planningAssessment.decisions.filter(({ status }) => status === "pending").map((item) => [item.decisionId, item]));
+  if (!reply.questionBindings?.length) {
+    if (pending.size) throw new Error("questionBindings 未覆盖所有待确认决策");
+    return undefined;
+  }
   const seenIds = new Set<string>();
+  const seenIndexes = new Set<number>();
   const seenDecisions = new Set<PlanningDecisionId>();
   const questions: ConfirmationQuestion[] = reply.questionBindings.map((binding) => {
     if (!Number.isSafeInteger(binding.displayIndex) || binding.displayIndex < 1 || binding.displayIndex > reply.questions!.length ||
-        !/^[A-Za-z0-9_-]{1,64}$/.test(binding.questionId) || seenIds.has(binding.questionId) ||
+        !/^[A-Za-z0-9_-]{1,64}$/.test(binding.questionId) || seenIds.has(binding.questionId) || seenIndexes.has(binding.displayIndex) ||
         !Array.isArray(binding.decisionIds) || binding.decisionIds.length < 1 ||
         !["accept_proposal", "delegate_choice", "provide_value"].includes(binding.answerMode)) {
       throw new Error("Planner 澄清的问题与决策关联无效");
     }
     seenIds.add(binding.questionId);
+    seenIndexes.add(binding.displayIndex);
     for (const decisionId of binding.decisionIds) {
       if (!pending.has(decisionId) || seenDecisions.has(decisionId)) throw new Error("Planner 澄清重复关联或引用了非待确认决策：" + decisionId);
       seenDecisions.add(decisionId);
@@ -46,7 +52,6 @@ export function makeConfirmationProposal(
       answerMode: binding.answerMode,
     };
   });
-  if (questions.length !== reply.questions.length) throw new Error("Planner 必须为每个澄清问题提供唯一 questionBinding");
   const missingDecisionIds = [...pending.keys()].filter((decisionId) => !seenDecisions.has(decisionId));
   if (missingDecisionIds.length) throw new Error("questionBindings 未覆盖所有待确认决策，缺少：" + missingDecisionIds.join(", "));
   const proposalId = randomUUID();

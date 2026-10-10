@@ -4,12 +4,27 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePlan, SessionLockError } from "../src/index.js";
-import { resumeSession, retrySession, runPlan } from "../src/task-orchestrator.js";
+import { formatSession, resumeSession, retrySession, runPlan } from "../src/task-orchestrator.js";
 import { SessionStore } from "../src/session-store.js";
 import { MockRunner } from "../src/runners/mock-runner.js";
 import type { PlanDefinition } from "../src/plan.js";
 
 const roots: string[] = [];
+it("makes completion, failure, cancellation and blocked progress distinct", async () => {
+  const root = await workspace(); const plan = parsePlan(planValue());
+  const { snapshot } = await new SessionStore(root).create(plan);
+  const completed = { ...snapshot, status: "succeeded" as const, tasks: snapshot.tasks.map((task) => ({ ...task, status: "succeeded" as const })) };
+  expect(formatSession(completed, plan)).toContain("执行状态：[✓ 已完成] succeeded");
+  expect(formatSession(completed, plan)).toContain("任务进度：成功 3/3");
+  const mixed = { ...snapshot, status: "failed" as const, tasks: snapshot.tasks.map((task, i) => ({ ...task, status: (["succeeded", "failed", "blocked"] as const)[i]! })) };
+  const output = formatSession(mixed, plan);
+  expect(output).toContain("执行状态：[✗ 执行失败] failed");
+  expect(output).toContain("成功 1/3；运行 0；失败 1；取消 0；受阻 1");
+  expect(output).toContain("verify — verify：blocked [! 执行受阻]");
+  expect(formatSession({ ...completed, status: "running" }, plan).split("\n")[0]).toBe("执行状态：[运行中] running");
+  expect(formatSession({ ...snapshot, status: "cancelled" }, plan)).toContain("执行状态：[■ 已取消] cancelled");
+  expect(formatSession({ ...snapshot, status: "paused" }, plan)).toContain("执行状态：[已暂停] paused");
+});
 async function workspace(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "token-coupon-phase2-"));
   roots.push(path);

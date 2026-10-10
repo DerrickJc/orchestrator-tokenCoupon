@@ -7,17 +7,12 @@ import { PlannerReplyValidationError } from "./planner-reply.js";
 import { validateRequirementsState } from "./requirements.js";
 import { decisionValueHash } from "./plan.js";
 
-export const REQUIRED_DECISIONS: Record<PlanningProfile, PlanningDecisionId[]> = {
-  backend_crud: ["language_runtime", "web_framework", "database", "documentation", "testing", "business_rules"],
-  documentation: ["document_scope", "audience", "source_of_truth", "acceptance"],
-  script: ["language_runtime", "inputs_outputs", "side_effects", "testing"],
-  existing_project: ["change_scope", "compatibility", "testing", "validation"],
-  general: [],
-};
+import { REQUIRED_DECISIONS, PLANNING_DECISION_IDS, PLANNING_STATUSES } from "./planning-protocol.js";
+export { REQUIRED_DECISIONS } from "./planning-protocol.js";
 
-const DECISION_IDS = new Set<PlanningDecisionId>(Object.values(REQUIRED_DECISIONS).flat());
+const DECISION_IDS = new Set<PlanningDecisionId>(PLANNING_DECISION_IDS);
 const PROFILES = new Set<PlanningProfile>(Object.keys(REQUIRED_DECISIONS) as PlanningProfile[]);
-const STATUSES = new Set(["confirmed", "repository", "defaulted", "pending"]);
+const STATUSES = new Set<string>(PLANNING_STATUSES);
 
 function invalid(message: string): never {
   throw new PlannerReplyValidationError("planner_readiness_invalid", message);
@@ -51,7 +46,12 @@ export function parsePlanningAssessment(value: unknown): PlanningAssessment {
   const seen = new Set<string>();
   const decisions = raw.decisions.map((item, index): PlanningDecision => {
     const decision = object(item, "planningAssessment.decisions[" + index + "]");
-    if (typeof decision.decisionId !== "string" || !DECISION_IDS.has(decision.decisionId as PlanningDecisionId) || !STATUSES.has(String(decision.status))) invalid("planningAssessment.decisions[" + index + "] 的 decisionId 或 status 无效");
+    const diagnostics = [
+      ...(!DECISION_IDS.has(decision.decisionId as PlanningDecisionId) ? [{ path: `planningAssessment.decisions[${index}].decisionId`, actual: decision.decisionId ?? null, allowed: PLANNING_DECISION_IDS }] : []),
+      ...(!STATUSES.has(String(decision.status)) ? [{ path: `planningAssessment.decisions[${index}].status`, actual: decision.status ?? null, allowed: PLANNING_STATUSES }] : []),
+    ];
+    if (diagnostics.length) throw new PlannerReplyValidationError("planner_readiness_invalid",
+      "规划决策字段无效：" + JSON.stringify(diagnostics) + "；普通业务问题使用 questions，不创造决策编号；修正后同步检查 questionBindings。", diagnostics);
     const id = decision.decisionId as PlanningDecisionId;
     if (seen.has(id)) invalid("planningAssessment 包含重复决策：" + id);
     seen.add(id);
@@ -146,8 +146,7 @@ export function assertPlanningReady(assessment: PlanningAssessment | undefined, 
     if (plan.schemaVersion === 1) return;
     invalid("缺少结构化规划决策记录，请先重新规划并补齐决策");
   }
-  const pending = REQUIRED_DECISIONS[assessment.profile].map((id) => assessment.decisions.find((item) => item.decisionId === id)!)
-    .filter((item) => item.status === "pending");
+  const pending = assessment.decisions.filter((item) => item.status === "pending");
   if (pending.length) invalid("仍有关键决策待澄清：" + pending.map(({ decisionId }) => decisionId).join(", "));
   if (plan.schemaVersion === 2) {
     const context = plan.decisionContext;
@@ -177,8 +176,7 @@ export function assertPlanningReady(assessment: PlanningAssessment | undefined, 
 
 export function hasPendingPlanningDecisions(assessment: PlanningAssessment | undefined): boolean {
   if (!assessment) return false;
-  const required = new Set(REQUIRED_DECISIONS[assessment.profile]);
-  return assessment.decisions.some(({ decisionId, status }) => status === "pending" && required.has(decisionId));
+  return assessment.decisions.some(({ status }) => status === "pending");
 }
 
 function isConcreteDefaultProposal(decision: PlanningDecision): boolean {

@@ -3,7 +3,7 @@ import type { PlannerReply, RequirementsUpdate } from "./planner-types.js";
 
 /** Recoverable output errors are distinct from network, cancellation and budget errors. */
 export class PlannerReplyValidationError extends Error {
-  constructor(readonly code: "planner_invalid_json" | "planner_invalid_reply" | "planner_requirements_invalid" | "planner_plan_invalid" | "planner_readiness_invalid", message: string) {
+  constructor(readonly code: "planner_invalid_json" | "planner_invalid_reply" | "planner_requirements_invalid" | "planner_plan_invalid" | "planner_readiness_invalid", message: string, readonly diagnostics?: Array<{ path: string; actual: unknown; allowed: readonly string[] }>) {
     super(message);
     this.name = "PlannerReplyValidationError";
   }
@@ -89,14 +89,15 @@ export function parsePlannerReply(value: unknown, requireUpdate = false, require
     if (!Array.isArray(raw.questions) || raw.questions.length < 1 || raw.questions.length > 3 ||
         raw.questions.some((question) => typeof question !== "string" || !question.trim() || Buffer.byteLength(question, "utf8") > 2048)) return fail("clarification 必须包含 1 到 3 个具体问题，每个问题不超过 2048 字节");
     let questionBindings: PlannerReply["questionBindings"];
+    const questionCount = raw.questions.length;
     if (raw.questionBindings !== undefined) {
-      if (!Array.isArray(raw.questionBindings) || raw.questionBindings.length !== raw.questions.length) return fail("questionBindings 必须逐项关联全部澄清问题");
+      if (!Array.isArray(raw.questionBindings) || raw.questionBindings.length > raw.questions.length) return fail("questionBindings 不能多于澄清问题");
       questionBindings = raw.questionBindings.map((value, index) => {
         if (!value || typeof value !== "object" || Array.isArray(value)) return fail(`questionBindings[${index}] 必须是对象`);
         const binding = value as Record<string, unknown>;
         if (Object.keys(binding).some((key) => !["questionId", "displayIndex", "decisionIds", "answerMode"].includes(key)) ||
             typeof binding.questionId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(binding.questionId) ||
-            binding.displayIndex !== index + 1 || !Array.isArray(binding.decisionIds) || binding.decisionIds.length < 1 ||
+            !Number.isSafeInteger(binding.displayIndex) || Number(binding.displayIndex) < 1 || Number(binding.displayIndex) > questionCount || !Array.isArray(binding.decisionIds) || binding.decisionIds.length < 1 ||
             binding.decisionIds.some((id) => typeof id !== "string") ||
             !["accept_proposal", "delegate_choice", "provide_value"].includes(String(binding.answerMode))) return fail(`questionBindings[${index}] 字段无效`);
         return { questionId: binding.questionId, displayIndex: binding.displayIndex as number, decisionIds: binding.decisionIds as NonNullable<PlannerReply["questionBindings"]>[number]["decisionIds"], answerMode: binding.answerMode as NonNullable<PlannerReply["questionBindings"]>[number]["answerMode"] };

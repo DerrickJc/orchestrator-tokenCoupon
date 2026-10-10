@@ -42,7 +42,8 @@ export function validateReviewReply(
     const findingId = finding.findingId === undefined ? "F" + (index + 1) : finding.findingId;
     if (typeof findingId !== "string" || !/^[A-Z][A-Z0-9_-]{0,31}$/.test(findingId)) return invalid("findings[" + index + "].findingId 无效");
     if (finding.priorFindingId !== undefined && (typeof finding.priorFindingId !== "string" || !previous?.findings.some(({ findingId: id }) => id === finding.priorFindingId))) {
-      return invalid("priorFindingId 引用了未知的上轮问题");
+      return invalid("findings[" + index + "].priorFindingId 引用了未知的上轮问题 " + JSON.stringify(finding.priorFindingId) +
+        "；允许的编号：" + JSON.stringify(previous?.findings.map(({ findingId }) => findingId) ?? []));
     }
     if (finding.requirementIds !== undefined && (!Array.isArray(finding.requirementIds) || finding.requirementIds.some((id) => typeof id !== "string" || !knownRequirementIds.includes(id)))) {
       return invalid("审查引用了未知需求");
@@ -71,16 +72,22 @@ function parseResolutions(
   if (!Array.isArray(value)) return invalid("复审必须逐项说明上轮问题的解决情况");
   const ids = value.map((entry) => entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>).findingId : undefined);
   const seen = new Set<string>();
-  const resolutions = value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return invalid("问题解决记录无效");
+  const resolutions = value.map((entry, index) => {
+    const field = "resolutions[" + index + "]";
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return invalid(field + " 必须是对象");
     const item = entry as Record<string, unknown>;
     const prior = priorFindings.find(({ findingId }) => findingId === item.findingId);
-    if (!prior || seen.has(prior.findingId) || Object.keys(item).some((key) => !["findingId", "status", "basis"].includes(key)) ||
-        !["resolved", "unresolved"].includes(String(item.status)) || typeof item.basis !== "string" || !item.basis.trim() ||
-        Buffer.byteLength(item.basis, "utf8") > 4096) return invalid("问题解决记录引用、状态或依据无效");
+    if (!prior) return invalid(field + ".findingId 引用了未知的上轮问题 " + JSON.stringify(item.findingId) +
+      "；允许的编号仅来自 previousReview.findings：" + JSON.stringify(priorFindings.map(({ findingId }) => findingId)) +
+      (priorFindings.length ? "；历史 resolutions 不得重复提交" : "；本轮 resolutions 必须为 []，历史已解决问题不得重复提交"));
+    if (seen.has(prior.findingId)) return invalid(field + ".findingId 重复：" + prior.findingId);
+    const extra = Object.keys(item).filter((key) => !["findingId", "status", "basis"].includes(key));
+    if (extra.length) return invalid(field + " 包含未知字段：" + extra.join(", "));
+    if (!["resolved", "unresolved"].includes(String(item.status))) return invalid(field + ".status 必须是 resolved 或 unresolved");
+    if (typeof item.basis !== "string" || !item.basis.trim() || Buffer.byteLength(item.basis, "utf8") > 4096) return invalid(field + ".basis 必须是非空文本且不超过 4 KiB");
     seen.add(prior.findingId);
     const continued = findings.some(({ priorFindingId }) => priorFindingId === prior.findingId);
-    if (continued !== (item.status === "unresolved")) return invalid("旧问题解决状态与本轮 findings 不一致");
+    if (continued !== (item.status === "unresolved")) return invalid(field + " 的旧问题 " + prior.findingId + " 解决状态与本轮 findings 不一致；unresolved 必须有 priorFindingId 延续，resolved 不能仍被延续");
     return { findingId: prior.findingId, status: item.status as "resolved" | "unresolved", basis: item.basis };
   });
   if (resolutions.length !== priorFindings.length) {

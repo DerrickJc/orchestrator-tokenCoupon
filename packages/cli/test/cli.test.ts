@@ -332,6 +332,21 @@ describe("CLI show commands", () => {
 });
 
 describe("Planner interactive chat", () => {
+  test.each(["", "unfinished", "/input\nunfinished"])("Ctrl-C exits before submission (%s) with code 130 and restores stdin", async (text) => {
+    const directory = mkdtempSync(join(tmpdir(), "planner-chat-interrupt-")); temporaryDirectories.push(directory);
+    const input = Object.assign(new PassThrough(), { isRaw: false, setRawMode(raw: boolean) { this.isRaw = raw; } });
+    const output = new PassThrough(); const logs: string[] = []; let sent = false;
+    const before = process.listenerCount("SIGINT");
+    output.on("data", (b: Buffer) => {
+      logs.push(b.toString());
+      if (!sent && b.toString().includes("request> ")) { sent = true; setImmediate(() => input.write(text + "\x03")); }
+    });
+    try {
+      expect(await runPlannerCli(["chat", "--planner", "mock", "--runner", "mock", "--workspace", directory], { input, output, isTTY: true })).toBe(130);
+      expect(logs.join("")).toContain("[会话已退出]"); expect(input.isRaw).toBe(false);
+      expect(readdirSync(directory)).toEqual([]); expect(process.listenerCount("SIGINT")).toBe(before);
+    } finally { input.destroy(); output.destroy(); }
+  });
   test("shows requirements and provenance and revises with a report in the same chat", async () => {
     const directory = mkdtempSync(join(tmpdir(), "planner-bugfix-chat-"));
     temporaryDirectories.push(directory);
@@ -357,6 +372,7 @@ describe("Planner interactive chat", () => {
       const replies = ["/requirements", `/trace ${requirementId} 1`, "/review", "/revise", "/review", "/exit"];
       let pending = "";
       output.on("data", (chunk: Buffer) => {
+        stdout.push(chunk.toString());
         pending += chunk.toString();
         if (replies.length && /planner> $/.test(pending)) { pending = ""; input.write(replies.shift() + "\n"); }
       });
@@ -427,6 +443,7 @@ describe("Planner interactive chat", () => {
       const replies = ["/edit", "/exit"];
       let pending = "";
       output.on("data", (chunk: Buffer) => {
+        stdout.push(chunk.toString());
         pending += chunk.toString();
         if (replies.length && /planner> $/.test(pending)) {
           pending = "";
@@ -478,6 +495,7 @@ describe("Planner interactive chat", () => {
       const replies = ["Create a greeting API.", "Also add tests for an empty name.", "/exit"];
       let pending = "";
       output.on("data", (chunk: Buffer) => {
+        stdout.push(chunk.toString());
         pending += chunk.toString();
         if (replies.length && /(?:request|planner)> $/.test(pending)) {
           pending = "";
