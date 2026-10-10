@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  executeTask, formatSession, InputValidationError, parsePlan, parseTask, parseRunnerProfile, recoverAbandonedAttempt,
+  executeTask, formatSession, InputValidationError, parsePlan, parseTask, parseRunnerProfile, recoverAbandonedAttempt, recoverSession, diagnoseSession, formatSessionDiagnosis,
   cleanupSessionWorktrees, continueSessionLanding, createSessionDelivery, formatSessionDelivery, parseWorktreeSetupProfile, resumeSession, retrySession, runPlan, SessionLockError, SessionStore,
 } from "@token-coupon/core";
 import type { PlanDefinition, RunnerInteractionReply, RunnerOutput, TaskDefinition, WorktreeSetupProfile } from "@token-coupon/core";
@@ -23,6 +23,7 @@ const usage = `用法：
       [--runner-profile <profile.json>]
   token-coupon runner list | doctor
   token-coupon session show --id <sessionId> [--workspace <目录>]
+  token-coupon session recover --id <sessionId> [--workspace <目录>] [--confirm-stopped]
   token-coupon session delivery --id <sessionId> [--workspace <目录>]
   token-coupon session cleanup --id <sessionId> [--workspace <目录>]
   token-coupon session pause --id <sessionId> [--workspace <目录>]
@@ -281,6 +282,28 @@ function sessionExitCode(snapshot: import("@token-coupon/core").SessionSnapshot)
 }
 
 export async function runCli(args: string[]): Promise<number> {
+  if (args[0] === "session" && args[1] === "recover") {
+    let workspace = process.cwd();
+    let sessionId: string | undefined;
+    let confirmedStopped = false;
+    const seen = new Set<string>();
+    for (let i = 2; i < args.length; i++) {
+      const flag = args[i]!;
+      if (seen.has(flag)) { console.error(`参数重复：${flag}`); return 2; }
+      seen.add(flag);
+      if (flag === "--confirm-stopped") confirmedStopped = true;
+      else if ((flag === "--id" || flag === "--workspace") && args[i + 1] && !args[i + 1]!.startsWith("--")) {
+        const value = args[++i]!; if (flag === "--id") sessionId = value; else workspace = value;
+      } else { console.error(`session recover 参数无效：${flag}`); return 2; }
+    }
+    if (!sessionId) { console.error("用法：session recover --id <sessionId> [--workspace <目录>] [--confirm-stopped]"); return 2; }
+    try {
+      const result = await recoverSession({ workspace, sessionId, confirmedStopped });
+      console.log(formatSessionDiagnosis(result.diagnosis));
+      console.log(result.recovered ? `恢复完成：${result.recoveryId}；未启动执行，请 retry/resume。` : "只读预检或无需恢复；修改需要 --confirm-stopped。");
+      return 0;
+    } catch (error) { console.error(error instanceof Error ? error.message : String(error)); return 1; }
+  }
   if (args[0] === "task" && args[1] === "recover") {
     let workspace: string | undefined;
     let attemptId: string | undefined;
@@ -494,6 +517,7 @@ export async function runCli(args: string[]): Promise<number> {
     if (command.action === "show") {
       const record = await sessionStore.load(sessionId);
       console.log(formatSession(record.snapshot, record.plan));
+      console.log(formatSessionDiagnosis(await diagnoseSession(workspace, sessionId)));
       return 0;
     }
     if (command.action === "delivery") {

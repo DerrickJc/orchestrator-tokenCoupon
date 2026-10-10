@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, lstat, open, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
-import { hostname } from "node:os";
+import { appendFile, lstat, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AttemptRecord } from "./attempt.js";
+import { currentOwner, observeOwner, acquireLockCoordination } from "./owner-lock.js";
 
 export async function currentAttemptOwner(): Promise<NonNullable<AttemptRecord["owner"]>> {
-  const processStart = await readProcessStart(process.pid);
-  return { pid: process.pid, hostname: hostname(), ...(processStart ? { processStart } : {}) };
+  return currentOwner();
 }
 
 /** Does not kill processes or infer task success. Unknown native cleanup requires operator verification. */
@@ -15,23 +14,18 @@ export async function recoverAbandonedAttempt(options: { workspace: string; atte
   const directory = join(resolve(options.workspace), ".token-coupon", "runs", options.attemptId);
   if ((await lstat(directory)).isSymbolicLink()) throw new Error("Attempt 目录不能为符号链接");
   const lockPath = join(directory, ".recovery.lock");
-  const lock = await open(lockPath, "wx", 0o600);
+  const legacy = await lstat(lockPath).catch(() => undefined);
+  if (legacy) throw new Error("Attempt 历史恢复锁存在，状态 unknown；请先核验");
+  const release = await acquireLockCoordination([lockPath]);
   try {
     const attemptPath = join(directory, "attempt.json");
     const original = await readOrdinaryFile(attemptPath, 1024 * 1024);
     const attempt = JSON.parse(original) as AttemptRecord;
     if (attempt.attemptId !== options.attemptId || !["created", "running"].includes(attempt.status)) throw new Error("只能恢复身份匹配的未结束 Attempt；已结束记录保持不变");
     if (attempt.owner) {
-      if (attempt.owner.hostname !== hostname()) throw new Error("Attempt owner 位于其他主机，无法确认已停止");
-      if (!Number.isSafeInteger(attempt.owner.pid) || attempt.owner.pid < 1) throw new Error("Attempt owner PID 无效");
-      let alive = true;
-      try { process.kill(attempt.owner.pid, 0); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false; }
-      if (alive && attempt.owner.processStart) {
-        const start = await readProcessStart(attempt.owner.pid);
-        if (start && start !== attempt.owner.processStart) alive = false;
-      }
-      if (alive) throw new Error("Attempt owner 仍在运行，拒绝恢复");
+      const observation = await observeOwner(attempt.owner);
+      if (observation.state === "active") throw new Error("Attempt owner 仍在运行，拒绝恢复");
+      if (observation.state === "unknown") throw new Error("Attempt owner 状态 unknown：" + observation.reason);
     } else if (!options.confirmedStopped) throw new Error("历史 Attempt 缺少 owner 信息；确认原生执行已停止后显式使用 --confirm-stopped");
     // A dead parent alone does not prove that its native descendants have stopped.
     if (!options.confirmedStopped) throw new Error("请确认原生子进程已停止后使用 --confirm-stopped；恢复不会终止进程");
@@ -65,15 +59,7 @@ export async function recoverAbandonedAttempt(options: { workspace: string; atte
     await writeFile(temporary, JSON.stringify(recovered, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     await rename(temporary, attemptPath);
     return recovered;
-  } finally { await lock.close(); await unlink(lockPath); }
-}
-
-async function readProcessStart(pid: number): Promise<string | undefined> {
-  if (process.platform !== "linux") return undefined;
-  try {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-    return stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
-  } catch { return undefined; }
+  } finally { await release(); }
 }
 
 async function readOrdinaryFile(path: string, limit: number): Promise<string> {

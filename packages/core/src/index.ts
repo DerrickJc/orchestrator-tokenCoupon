@@ -55,3 +55,8 @@ export {
   revisePlannerDraft, refreshPlannerRequirements,
 } from "./planner-conversation.js";
 export type { PlannerOperationResult, PlannerRunOptions, PlannerStartOptions } from "./planner-conversation.js";
+export { currentOwner, observeOwner, inspectLock } from "./owner-lock.js";
+export { diagnoseSession, formatSessionDiagnosis, recoverSession } from "./session-recovery.js";
+export { PLANNING_DECISION_IDS, PLANNING_STATUSES } from "./planning-protocol.js";
+export { applyReviewActions } from "./review-actions.js";
+export type { ReviewAction } from "./review-actions.js";

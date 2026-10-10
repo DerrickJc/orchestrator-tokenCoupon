@@ -7,7 +7,7 @@ import { executeTask } from "./execute-task.js";
 import type { Runner, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerOutput } from "./runner.js";
 import type { RunnerProfile } from "./runner.js";
 import { runnerProfileHash } from "./runner-registry.js";
-import type { SessionControlRequest, SessionRecord, SessionSnapshot, SessionTaskState, TaskResult } from "./session-types.js";
+import type { SessionControlRequest, SessionRecord, SessionSnapshot, SessionStatus, SessionTaskStatus, SessionTaskState, TaskResult } from "./session-types.js";
 import { SessionLockError, SessionStore } from "./session-store.js";
 import type { TaskDefinition } from "./task.js";
 import { acquireGitRepositoryLock, inspectGitRepository } from "./git-repository.js";
@@ -316,7 +316,15 @@ export async function cleanupSessionWorktrees(options: SessionCleanupOptions): P
 }
 
 export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): string {
+  const labels: Record<SessionStatus | SessionTaskStatus, string> = {
+    ready: "待执行", planned: "待执行", running: "运行中", pausing: "正在暂停", paused: "已暂停",
+    succeeded: "✓ 已完成", failed: "✗ 执行失败", cancelled: "■ 已取消", timed_out: "✗ 执行超时",
+    interrupted: "! 执行中断", blocked: "! 执行受阻",
+  };
+  const count = (status: SessionTaskStatus) => snapshot.tasks.filter((task) => task.status === status).length;
   const lines = [
+    `执行状态：[${labels[snapshot.status]}] ${snapshot.status}`,
+    `任务进度：成功 ${count("succeeded")}/${snapshot.tasks.length}；运行 ${count("running")}；失败 ${count("failed")}；取消 ${count("cancelled")}；受阻 ${count("blocked")}；中断 ${count("interrupted")}；超时 ${count("timed_out")}；待执行 ${count("planned")}`,
     `Session：${snapshot.sessionId}`,
     `计划：${snapshot.planId} — ${snapshot.planTitle}`,
     `状态：${snapshot.status}；revision：${snapshot.revision}`,
@@ -339,7 +347,7 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
   ];
   for (const [index, entry] of plan.tasks.entries()) {
     const state = snapshot.tasks[index]!;
-    lines.push(`  ${entry.task.id} — ${entry.task.title}：${state.status}`);
+    lines.push(`  ${entry.task.id} — ${entry.task.title}：${state.status} [${labels[state.status]}]`);
     lines.push(`    依赖：${entry.dependsOn.length ? entry.dependsOn.join(", ") : "无"}`);
     for (const attempt of state.attempts) {
       lines.push(`    Attempt ${attempt.attemptId}：${attempt.outcome}；${attempt.artifactDir}`);
@@ -352,6 +360,7 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
     if (state.reasonCode) lines.push(`    原因：${state.reasonCode}`);
     if (state.result) lines.push(`    结果：${state.result.summary || "无文本摘要"}${state.result.truncated ? "（已截断）" : ""}`);
   }
+  lines.push(`\n执行结果：[${labels[snapshot.status]}] ${snapshot.status} · 成功 ${count("succeeded")}/${snapshot.tasks.length}`);
   return lines.join("\n");
 }
 
@@ -891,7 +900,12 @@ function assertRunnerProfileStable(profile: RunnerProfile | undefined, snapshot:
   }
 }
 
-async function reconcile(record: SessionRecord, store: SessionStore, worktrees?: WorktreeIsolation): Promise<SessionRecord> {
+/** Recovery projection never performs Git landing or synthesizes a missing handoff. */
+export async function reconcileInterruptedSession(record: SessionRecord, store: SessionStore): Promise<SessionRecord> {
+  return reconcile(record, store, undefined, false);
+}
+
+async function reconcile(record: SessionRecord, store: SessionStore, worktrees?: WorktreeIsolation, allowSyntheticSuccess = true): Promise<SessionRecord> {
   const running = record.snapshot.tasks.filter((state) => state.status === "running");
   if (running.length === 0) return record;
   let currentRecord = record;
@@ -938,7 +952,7 @@ async function reconcile(record: SessionRecord, store: SessionStore, worktrees?:
           continue;
         }
       } catch { /* incomplete success cannot unlock dependants */ }
-      if (gitLandingComplete) {
+      if (gitLandingComplete && allowSyntheticSuccess) {
         const recovered: TaskResult = { taskId: state.taskId, attemptId, status: "succeeded", summary: "", summarySource: "none", truncated: false, artifactDir: attemptDirectory(store.workspace, attemptId) };
         await store.saveHandoff(attemptId, recovered).catch(() => undefined);
         states = states.map((item) => item.taskId === state.taskId ? {

@@ -21,10 +21,8 @@ export interface RequirementsState {
   messageDecisions: RequirementsUpdate["messageDecisions"];
 }
 export type PlanningProfile = "backend_crud" | "documentation" | "script" | "existing_project" | "general";
-export type PlanningDecisionStatus = "confirmed" | "repository" | "defaulted" | "pending";
-export type PlanningDecisionId = "language_runtime" | "web_framework" | "database" | "documentation" | "testing" | "business_rules" |
-  "document_scope" | "audience" | "source_of_truth" | "acceptance" | "inputs_outputs" | "side_effects" |
-  "change_scope" | "compatibility" | "validation" | "scope";
+export type PlanningDecisionStatus = typeof import("./planning-protocol.js").PLANNING_STATUSES[number];
+export type PlanningDecisionId = typeof import("./planning-protocol.js").PLANNING_DECISION_IDS[number];
 export interface PlanningDecision {
   decisionId: PlanningDecisionId;
   value: string;

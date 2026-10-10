@@ -45,7 +45,7 @@ export async function showSessionLogs(options: SessionLogsOptions): Promise<void
   const refs = taskStates.flatMap((task) => task.attempts.map((attempt) => ({ taskId: task.taskId, attempt })));
   const selected = options.attemptId ? refs.filter(({ attempt }) => attempt.attemptId === options.attemptId) : refs;
   if (options.attemptId && selected.length === 0) throw new Error("Attempt 不属于该 Session 或所选任务");
-  if (selected.length === 0) {
+  if (selected.length === 0 && !options.follow) {
     options.output("当前 Session 尚无可读取的 Attempt 日志。");
     return;
   }
@@ -75,6 +75,14 @@ export async function showSessionLogs(options: SessionLogsOptions): Promise<void
 
   while (!options.signal?.aborted) {
     await sleep(300, options.signal);
+    const fresh = await new SessionStore(options.workspace).load(options.sessionId);
+    for (const task of fresh.snapshot.tasks.filter((t) => !options.taskId || t.taskId === options.taskId)) {
+      for (const ref of task.attempts.filter((a) => !options.attemptId || a.attemptId === options.attemptId)) {
+        if (readers.some((r) => r.attemptId === ref.attemptId)) continue;
+        readers.push({ taskId: task.taskId, attemptId: ref.attemptId, path: join(ref.artifactDir, "events.jsonl"), position: 0, carry: Buffer.alloc(0) });
+        options.output(options.json ? JSON.stringify({ taskId: task.taskId, attemptId: ref.attemptId }) : `新增 Attempt：${task.taskId}#${ref.attemptId}`);
+      }
+    }
     for (const reader of readers) {
       const events = await readAppendedEvents(reader);
       for (const event of events) {
@@ -162,21 +170,21 @@ function parseLines(lines: Buffer[], attemptId: string): { events: LogEvent[]; d
 }
 
 function emitJson(output: (line: string) => void, event: LogEvent, raw: boolean): void {
-  if (event.type === "runner.output" && !raw) return;
+  if (["runner.output", "message.delta"].includes(event.type) && !raw) return;
   output(JSON.stringify(event));
 }
 
 function emitHuman(output: (line: string) => void, event: LogEvent, raw: boolean, prefix = ""): void {
-  if (event.type === "runner.output" && !raw) return;
+  if (["runner.output", "message.delta"].includes(event.type) && !raw) return;
   const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
   const suffix = event.type === "attempt.finished" || event.type === "attempt.recovered" ? ` ${String(payload.status ?? "")}${payload.reasonCode ? ` (${String(payload.reasonCode)})` : ""}`
     : event.type === "runner.diagnostic" ? ` ${String(payload.severity ?? "")}: ${String(payload.message ?? "")}`
-      : event.type === "message.completed" ? ` ${truncate(String(payload.text ?? ""), 280)}`
+      : event.type === "message.completed" ? ` ${String(payload.text ?? "")}`
         : event.type === "runner.native.started" ? ` thread=${String(payload.threadId ?? "unknown")} turn=${String(payload.turnId ?? "unknown")} model=${String(payload.reportedModel ?? "unknown")}`
           : event.type === "runner.native.finished" ? ` ${String(payload.outcome ?? "unknown")}${payload.reason ? ` ${String(payload.reason)}` : ""}`
         : event.type.startsWith("interaction.") ? ` ${String(payload.requestId ?? "")} ${String(payload.kind ?? payload.reason ?? "")}`
           : event.type.startsWith("tool.") ? ` ${String(payload.name ?? "")} ${truncate(String(payload.summary ?? ""), 180)}${payload.exitCode === undefined ? "" : ` exit=${String(payload.exitCode)}`}`
-            : event.type === "command.completed" ? ` ${String(payload.command ?? "命令未知")} cwd=${String(payload.cwd ?? "未知")} exit=${payload.exitCode === null || payload.exitCode === undefined ? "unknown" : String(payload.exitCode)} status=${String(payload.status ?? "unknown")}`
+            : event.type === "command.completed" ? ` ${truncate(String(payload.command ?? "命令未知").replace(/\s+/g, " "), 180)} cwd=${String(payload.cwd ?? "未知")} exit=${payload.exitCode === null || payload.exitCode === undefined ? "unknown" : String(payload.exitCode)} status=${String(payload.status ?? "unknown")}`
               : event.type === "runner.output" ? ` ${String(payload.stream ?? "")} ${truncate(String(payload.text ?? ""), 280)}`
                 : "";
   output(`${prefix} ${event.sequence} ${event.timestamp} ${event.type}${suffix}`.trim());

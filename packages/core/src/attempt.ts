@@ -17,7 +17,7 @@ export interface AttemptRecord {
   cwd: string;
   runnerId: string;
   execution: ExecutionConfig;
-  owner?: { pid: number; hostname: string; processStart?: string };
+  owner?: { pid: number; hostname: string; processStart?: string; bootId?: string };
   /** Policy actually used by this new Attempt; legacy timeoutMs is informational only. */
   executionPolicy?: { mode: "idle_notice"; idleAfterMs: number };
   completionToken: string;
