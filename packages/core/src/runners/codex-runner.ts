@@ -102,6 +102,10 @@ export class CodexRunner implements Runner {
         await context.recordEvent?.({ type: "interaction.forwarded", requestId: answer.interactionId, evidence: "codex-app-server-approval" });
         pendingInteractions.set(String(params.itemId ?? nativeId), answer.interactionId);
         await rpc.respond(id, { decision: answer.decision === "allow-once" ? "accept" : "decline" });
+        if (answer.decision === "deny" && answer.guidance) followUpAnswers.push({
+          text: `用户拒绝了刚才的工具操作。请按以下用户指导调整方案，只在确有必要时重新请求审批：\n${answer.guidance}`,
+          interactionId: answer.interactionId,
+        });
         return;
       }
       if (method === "item/permissions/requestApproval") {
@@ -155,6 +159,7 @@ export class CodexRunner implements Runner {
                 exitCode: exitCode ?? null,
                 status: exitCode === undefined ? "unknown" : exitCode === 0 ? "succeeded" : "failed",
                 evidenceSource: "codex-app-server-item",
+                ...(typeof item.aggregatedOutput === "string" ? { outputSummary: item.aggregatedOutput.length > 256 * 1024 ? item.aggregatedOutput.slice(0, 256 * 1024) + "\n[工具输出超过 256 KiB，记录已截断]" : item.aggregatedOutput } : {}),
               });
             }
             const interactionId = itemId ? pendingInteractions.get(itemId) : undefined;

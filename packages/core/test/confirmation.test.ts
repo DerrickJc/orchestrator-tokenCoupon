@@ -324,4 +324,54 @@ describe("structured confirmation and decision context", () => {
     expect(revoked.snapshot.planningAssessment?.decisions.find(({ decisionId }) => decisionId === "database")?.status).toBe("pending");
     expect(revoked.snapshot.confirmationState?.activeProposal?.questions[0]?.decisionIds).toEqual(["database"]);
   });
+  it("binds letter choices to concrete values, rejects ambiguity and fences old proposal references", () => {
+    const base = assessment(uuid(80), "创建一个后端");
+    const optionValues = decisionIds.map((decisionId, index) => ({ decisionId, value: values[index]! }));
+    const reply: PlannerReply = { kind: "clarification", message: "请选择", questions: ["Q1：A Java，B Python，C 自定义"], planningAssessment: base,
+      questionBindings: [{ questionId: "stack", displayIndex: 1, decisionIds: [...decisionIds], answerMode: "accept_proposal", options: [
+        { optionId: "java", label: "Java + Spring Boot，其余范围保持不变", values: optionValues },
+        { optionId: "python", label: "Python + FastAPI，保留 SQLite 与文档范围", values: optionValues.map(item => ({ ...item, value: item.decisionId === "language_runtime" ? "Python 3.12" : item.decisionId === "web_framework" ? "FastAPI" : item.value })) },
+        { optionId: "custom", label: "自定义", custom: true },
+      ] }] };
+    const proposal = makeConfirmationProposal(reply, uuid(81), 4)!;
+    const state = { schemaVersion: 1 as const, activeProposal: proposal, events: [] };
+    const events = parseConfirmationInput("B", uuid(82), state)!;
+    expect(events[0]).toMatchObject({ questionId: "stack", optionId: "python", proposalHash: proposal.hash, proposalRevision: 4 });
+    const applied = applyCommittedConfirmations(base, { ...state, events }, [uuid(82)]);
+    expect(applied.decisions.find(item => item.decisionId === "language_runtime")).toMatchObject({ status: "defaulted", value: "Python 3.12", sourceMessageId: uuid(82) });
+    expect(applied.decisions.find(item => item.decisionId === "web_framework")?.value).toBe("FastAPI");
+    expect(parseConfirmationInput("Q1-A", uuid(83), state)?.[0]?.optionId).toBe("java");
+    expect(() => parseConfirmationInput(`proposal:${proposal.proposalId}@3 Q1-A`, uuid(84), state)).toThrow("过期");
+    expect(() => parseConfirmationInput("C", uuid(85), state)).toThrow("说明具体方案");
+    expect(() => parseConfirmationInput("Q1-A,Q1-B", uuid(86), state)).toThrow("重复");
+    const multiple = { ...proposal, questions: [...proposal.questions, { ...proposal.questions[0]!, questionId: "other", displayIndex: 2 }] };
+    expect(() => parseConfirmationInput("A", uuid(87), { ...state, activeProposal: multiple })).toThrow("多个问题");
+    expect(parseConfirmationInput("A，同时改用 MySQL", uuid(88), state)).toBeUndefined(); // Let the model reconcile conflicting prose.
+    reply.questionBindings![0]!.options![1]!.values!.pop();
+    expect(() => makeConfirmationProposal(reply, uuid(89), 5)).toThrow("恰好覆盖");
+  });
+
+  it("commits a short alternative choice through requirements, decision context and a new draft", async () => {
+    const root = await workspace(); let calls = 0;
+    const planner: Planner = { id: "mock", generate: async (input) => {
+      if (calls++) return draftReply(input);
+      const reply = clarification(input);
+      reply.questions = ["Q1：A Java + Spring Boot，B Python + FastAPI，C 自定义；数据库与文档、测试范围保持不变"];
+      const concrete = decisionIds.map((decisionId, index) => ({ decisionId, value: values[index]! }));
+      reply.questionBindings = [{ questionId: "complete-stack", displayIndex: 1, decisionIds: [...decisionIds], answerMode: "accept_proposal", options: [
+        { optionId: "java", label: "Java + Spring Boot", values: concrete },
+        { optionId: "python", label: "Python + FastAPI", values: concrete.map(item => ({ ...item, value: item.decisionId === "language_runtime" ? "Python 3.12" : item.decisionId === "web_framework" ? "FastAPI" : item.value })) },
+        { optionId: "custom", label: "自定义", custom: true },
+      ] }]; return reply;
+    } };
+    const initial = await startPlannerConversation({ workspace: root, request: "排课系统后端 CRUD，先编写文档，再测试交付", config: { provider: "mock", model: "mock", baseUrl: "mock://local" }, executionDefaults: { runnerId: "mock", mode: "managed" }, planner });
+    expect(initial.error).toBeUndefined();
+    const next = await replyToPlanner({ workspace: root, planningId: initial.snapshot.planningId, message: "B", planner });
+    expect(next.error).toBeUndefined(); expect(next.snapshot.status).toBe("draft_ready");
+    expect(next.snapshot.requirements?.items.find(item => item.requirementId === "R-decision-language_runtime" && item.status === "active")?.text).toContain("Python 3.12");
+    expect(next.draft?.plan.decisionContext?.decisions.find(item => item.decisionId === "web_framework")?.value).toBe("FastAPI");
+    expect(next.snapshot.confirmationState?.events.at(-1)?.optionId).toBe("python");
+    expect(next.snapshot.requirements?.messageDecisions.at(-1)?.kind).toBe("requirement");
+  });
+
 });

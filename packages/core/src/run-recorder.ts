@@ -3,6 +3,7 @@ import { appendFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AttemptRecord } from "./attempt.js";
 import type { TaskDefinition } from "./task.js";
+import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
 
 export interface RunRecorderOptions {
   cwd: string;
@@ -38,6 +39,7 @@ export class RunRecorder {
   }
 
   static async create(options: RunRecorderOptions): Promise<RunRecorder> {
+    await ensureRuntimeMetadataIgnored(options.artifactWorkspace ?? options.cwd);
     const artifactDir = join(options.artifactWorkspace ?? options.cwd, ".token-coupon", "runs", options.attemptId);
     const recorder = new RunRecorder(artifactDir, options.attemptId, options.maxQueuedBytes ?? 1024 * 1024);
 

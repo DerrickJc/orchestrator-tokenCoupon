@@ -40,7 +40,24 @@ describe("CodexRunner app-server transport", () => {
     expect(events).toContainEqual({ type: "interaction.forwarded", requestId: "broker-question", evidence: "codex-app-server-user-input" });
     expect(events).toContainEqual({ type: "interaction.resolved", requestId: "broker-approval", evidence: "tool_exit_0" });
     expect(events).toContainEqual(expect.objectContaining({ type: "command.completed", command: "node --test", cwd: process.cwd(), exitCode: 0, status: "succeeded", evidenceSource: "codex-app-server-item" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "command.completed", outputSummary: "2 tests passed" }));
     expect(events).toContainEqual({ type: "runner.native.finished", outcome: "completed" });
+  });
+
+  it("delivers denial guidance in a follow-up turn within the same Codex Attempt", async () => {
+    const guidance = "Use the dependency already present in package.json; do not install another package.";
+    const events: RunnerEvent[] = [];
+    const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", codexGuidanceScript()] });
+    const result = await runner.run({ attemptId: "attempt-guidance", cwd: process.cwd(), task, execution: task.execution, prompt: "Complete the task and report marker", completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {},
+      async recordEvent(event) { events.push(event); },
+      async requestInteraction(request) {
+        expect(request.kind).toBe("approval");
+        return { kind: "approval", decision: "deny", guidance, interactionId: "approval-guidance" };
+      },
+    });
+    expect(result).toMatchObject({ started: true, nativeOutcome: "completed", exitCode: 0, cleanupStatus: "completed" });
+    expect(events).toContainEqual({ type: "interaction.forwarded", requestId: "approval-guidance", evidence: "codex-app-server-follow-up-turn" });
   });
 
   it("rejects permission expansion instead of asking the user to grant a broader scope", async () => {
@@ -196,11 +213,35 @@ rl.on('line',(line)=>{let m;try{m=JSON.parse(line)}catch{return}
     if(${approvalMode !== "broad"} && m.result?.decision!=='accept')process.exitCode=32;
     if(${approvalMode === "broad"} && m.result?.decision!=='decline')process.exitCode=33;
     send({jsonrpc:'2.0',method:'item/started',params:{threadId:'thread-1',turnId:'turn-1',startedAtMs:2,item:{id:'command-item',type:'commandExecution',command:'node --test'}}});
-    send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'thread-1',turnId:'turn-1',completedAtMs:3,item:{id:'command-item',type:'commandExecution',command:'node --test',exitCode:0}}});
+    send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'thread-1',turnId:'turn-1',completedAtMs:3,item:{id:'command-item',type:'commandExecution',command:'node --test',exitCode:0,aggregatedOutput:'2 tests passed'}}});
     send({jsonrpc:'2.0',method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:'turn-1',itemId:'message-1',delta:'<<<TOKEN_COUPON_DONE:abc123>>>'}});
     send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:'thread-1',turn:{id:'turn-1',status:'completed'}}});
     return;
   }
+});
+rl.on('close',()=>process.exit());
+`;
+}
+
+function codexGuidanceScript(): string {
+  return String.raw`
+const rl=require('node:readline').createInterface({input:process.stdin});
+const send=m=>process.stdout.write(JSON.stringify(m)+'\n'); let turns=0;
+rl.on('line',line=>{const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:'guidance-thread'}}});
+ if(m.method==='turn/start'){
+  turns++; send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'guidance-turn-'+turns}}});
+  if(turns===1)setTimeout(()=>send({jsonrpc:'2.0',id:'guidance-approval',method:'item/commandExecution/requestApproval',params:{itemId:'command-1',threadId:'guidance-thread',turnId:'guidance-turn-1',command:'npm install example',cwd:process.cwd(),reason:'Install dependency'}}),5);
+  else {
+   if(!JSON.stringify(m.params.input).includes('Use the dependency already present'))process.exitCode=41;
+   setTimeout(()=>{send({jsonrpc:'2.0',method:'item/agentMessage/delta',params:{threadId:'guidance-thread',turnId:'guidance-turn-2',itemId:'message-2',delta:'marker'}});send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:'guidance-thread',turn:{id:'guidance-turn-2',status:'completed'}}});},5);
+  }
+ }
+ if(m.id==='guidance-approval'){
+  if(m.result?.decision!=='decline')process.exitCode=42;
+  setTimeout(()=>send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:'guidance-thread',turn:{id:'guidance-turn-1',status:'completed'}}}),5);
+ }
 });
 rl.on('close',()=>process.exit());
 `;

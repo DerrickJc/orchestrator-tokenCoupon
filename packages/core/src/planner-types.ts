@@ -41,12 +41,19 @@ export interface PlanningAssessment {
   decisions: PlanningDecision[];
 }
 export type ConfirmationAnswerMode = "accept_proposal" | "delegate_choice" | "provide_value";
+export interface ConfirmationOption {
+  optionId: string;
+  label: string;
+  values?: Array<{ decisionId: PlanningDecisionId; value: string }>;
+  custom?: boolean;
+}
 export interface ConfirmationQuestion {
   questionId: string;
   displayIndex: number;
   text: string;
   decisionIds: PlanningDecisionId[];
   answerMode: ConfirmationAnswerMode;
+  options?: ConfirmationOption[];
 }
 export interface ConfirmationProposalSet {
   schemaVersion: 1;
@@ -67,6 +74,7 @@ export interface ConfirmationEvent {
   proposalRevision: number;
   proposalHash: string;
   questionId: string;
+  optionId?: string;
   decisionIds: PlanningDecisionId[];
   action: "accept" | "delegate" | "reject" | "provide_value" | "revoke";
   quote: string;
@@ -82,7 +90,7 @@ export interface ConfirmationState {
 export type PlannerTurnStatus = "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
 
 export interface PlannerConfig {
-  provider: "mock" | "deepseek";
+  provider: "mock" | "deepseek" | "chatgpt-mcp" | "web-mcp";
   model: string;
   baseUrl: string;
 }
@@ -258,6 +266,6 @@ export interface PlanReviewer {
 }
 
 export interface Planner {
-  readonly id: "mock" | "deepseek";
+  readonly id: PlannerConfig["provider"];
   generate(input: PlannerInput, context: PlannerContext): Promise<unknown>;
 }

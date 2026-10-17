@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { join, resolve } from "node:path";
 import type { PlanDefinition, PlannedTask } from "./plan.js";
 import { PlanStore, sessionStatusFor } from "./plan-store.js";
+import { taskWithSessionModel } from "./session-models.js";
 import { executeTask } from "./execute-task.js";
 import type { Runner, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerOutput } from "./runner.js";
 import type { RunnerProfile } from "./runner.js";
@@ -48,6 +49,7 @@ export interface PlanRunOptions {
   beforeCreateSession?: () => Promise<void>;
   onOutput?: (taskId: string, output: RunnerOutput, attemptId?: string) => void;
   onInteraction?: (requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal) => Promise<RunnerInteractionReply>;
+  taskSignal?: (taskId: string, attemptId: string) => AbortSignal;
   onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
@@ -62,10 +64,11 @@ export interface SessionOperationOptions {
   runnerProfile?: RunnerProfile;
   onOutput?: (taskId: string, output: RunnerOutput, attemptId?: string) => void;
   onInteraction?: (requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal) => Promise<RunnerInteractionReply>;
+  taskSignal?: (taskId: string, attemptId: string) => AbortSignal;
   onIdleState?: (taskId: string, state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => void;
 }
 
-type ExecutionOptions = Pick<SessionOperationOptions, "workspace" | "createRunner" | "signal" | "acceptEdits" | "mockTaskScenarios" | "setupProfile" | "runnerProfile" | "onOutput" | "onIdleState" | "onInteraction">;
+type ExecutionOptions = Pick<SessionOperationOptions, "workspace" | "createRunner" | "signal" | "acceptEdits" | "mockTaskScenarios" | "setupProfile" | "runnerProfile" | "onOutput" | "onIdleState" | "onInteraction" | "taskSignal"> & { sessionId?: string };
 
 export interface RetryOptions extends SessionOperationOptions { taskId: string; }
 export interface ContinueLandingOptions extends SessionOperationOptions { taskId: string; }
@@ -365,6 +368,7 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
 }
 
 async function schedule(record: SessionRecord, store: SessionStore, options: ExecutionOptions, retry?: { taskId: string; allowRetry: true; taskStore: PlanStore }, worktrees?: WorktreeIsolation): Promise<SessionOperationResult> {
+  options = { ...options, sessionId: record.snapshot.sessionId };
   if (record.snapshot.schemaVersion === 3 && worktrees) {
     return scheduleParallel(record, store, options, worktrees, retry?.taskId);
   }
@@ -682,7 +686,10 @@ async function scheduleParallel(record: SessionRecord, store: SessionStore, opti
 
 async function executePreparedAttempt(entry: PlannedTask, attemptId: string, states: SessionTaskState[], plan: PlanDefinition, store: SessionStore, options: ExecutionOptions,
   worktrees: WorktreeIsolation, persistActivity: (activity: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => Promise<void>): Promise<BatchAttemptOutcome> {
+  const taskSignal = options.taskSignal?.(entry.task.id, attemptId);
+  if (taskSignal) options = { ...options, signal: AbortSignal.any([...(options.signal ? [options.signal] : []), taskSignal]) };
   try {
+    if (options.sessionId) entry = { ...entry, task: await taskWithSessionModel(entry.task, store.workspace, options.sessionId) };
     await worktrees.runSetup(attemptId, options.setupProfile, options.signal);
   } catch (error) {
     const reasonCode = gitFailureCode(error, "workspace_setup_failed");
@@ -730,6 +737,12 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
   persistActivity: (state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => Promise<void>,
   worktrees?: WorktreeIsolation,
 ): Promise<void> {
+  const taskSignal = options.taskSignal?.(entry.task.id, attemptId);
+  if (taskSignal) options = { ...options, signal: AbortSignal.any([...(options.signal ? [options.signal] : []), taskSignal]) };
+  try {
+    if (options.sessionId) entry = { ...entry, task: await taskWithSessionModel(entry.task, store.workspace, options.sessionId) };
+  }
+  catch { await finish("failed", "session_model_config_invalid", null, false); return; }
   const isVerification = worktrees?.verificationTaskId === entry.task.id;
   let runnerCwd = store.workspace;
   if (worktrees) {

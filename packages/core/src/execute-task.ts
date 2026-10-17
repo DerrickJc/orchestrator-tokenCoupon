@@ -148,6 +148,9 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
     enqueue(recorder.appendEvent("runner.output", {
       stream: output.stream,
       text: output.text,
+      ...(output.agentText === undefined ? {} : { agentText: output.agentText }),
+      ...(output.displayText === undefined ? {} : { displayText: output.displayText }),
+      ...(output.finalText === undefined ? {} : { finalText: output.finalText }),
       ...(output.structuredEvent === undefined ? {} : { structuredEvent: output.structuredEvent }),
     }));
     options.onOutput?.(output);
@@ -276,6 +279,7 @@ async function replaceInteractionRecord(path: string, record: object): Promise<v
 function validateInteractionReply(request: RunnerInteractionRequest, reply: RunnerInteractionReply): RunnerInteractionReply {
   if (request.kind === "approval") {
     if (reply.kind !== "approval" || !(request.decisions ?? ["allow-once", "deny"]).includes(reply.decision)) throw new Error("审批回复与原生请求不匹配");
+    if (reply.guidance !== undefined && (reply.decision !== "deny" || !reply.guidance.trim() || Buffer.byteLength(reply.guidance, "utf8") > 4096)) throw new Error("拒绝指导无效");
     return reply;
   }
   if (reply.kind !== "question" || !request.questions?.length) throw new Error("问题回复与原生请求不匹配");

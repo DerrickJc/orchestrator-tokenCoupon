@@ -79,7 +79,7 @@ export interface RunnerInteractionOwner {
 }
 
 export type RunnerInteractionReply =
-  | { kind: "approval"; decision: "allow-once" | "deny" }
+  | { kind: "approval"; decision: "allow-once" | "deny"; guidance?: string }
   | { kind: "question"; answers: Array<{ questionId: string; optionIds?: string[]; text?: string }> };
 
 export type RunnerInteractionResolution = RunnerInteractionReply & { interactionId: string };

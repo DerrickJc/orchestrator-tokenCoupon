@@ -28,11 +28,15 @@ export async function reviewPlannerDraft(options: {
   workspace: string;
   reviewer?: PlanReviewer;
   signal?: AbortSignal;
+  expectedRevision?: number;
+  repositoryOutputBudgetBytes?: number;
+  beforeCommit?: () => Promise<void>;
 }): Promise<PlanReviewOperationResult> {
   const plannerStore = new PlannerStore(options.workspace);
   const release = await plannerStore.acquireLock(options.planningId);
   try {
     let snapshot = await plannerStore.load(options.planningId);
+    if (options.expectedRevision !== undefined && snapshot.revision !== options.expectedRevision) throw new Error("external_context_stale：审查依据已变化，请重新准备上下文");
     if (snapshot.activeTurnId) throw new Error("规划轮次尚未完成，请先恢复规划对话");
     if (snapshot.execution) throw new Error("已关联执行 Session 的规划只允许查看历史审查");
     if (snapshot.draftRevision === null || !["draft_ready", "approved"].includes(snapshot.status)) throw new Error("当前没有可审查的计划草案");
@@ -73,7 +77,7 @@ export async function reviewPlannerDraft(options: {
     await reviewStore.create(record);
 
     const timed = makeTimeoutSignal(options.signal, REVIEW_TIMEOUT_MS);
-    const reader = new RepositoryReader(plannerStore.workspace, timed.signal, draft.context.reduce((sum, evidence) => sum + evidence.sizeBytes, 0));
+    const reader = new RepositoryReader(plannerStore.workspace, timed.signal, draft.context.reduce((sum, evidence) => sum + evidence.sizeBytes, 0), options.repositoryOutputBudgetBytes);
     const counters = { requests: 0, tools: 0 };
     const context: PlannerContext = {
       signal: timed.signal,
@@ -118,6 +122,7 @@ export async function reviewPlannerDraft(options: {
         ...record, status: "succeeded", context: evidence, ...parsed,
         reportHash: canonicalHash(reviewReportPayload({ ...record, ...parsed })), finishedAt,
       });
+      await options.beforeCommit?.();
       await reviewStore.save(succeeded);
       await reviewStore.appendEvent(options.planningId, reviewId, "review.succeeded", { findings: succeeded.findings.length });
 
@@ -156,7 +161,30 @@ export async function reviewPlannerDraft(options: {
 
 export function createPlanReviewer(config: PlannerConfig, options: { fetchImpl?: typeof fetch } = {}): PlanReviewer {
   if (config.provider === "mock") return new MockPlanReviewer();
+  if (["chatgpt-mcp", "web-mcp"].includes(config.provider)) throw new Error("external_review_required：请在网页中通过 MCP 准备并提交审查，当前没有发出 API 请求");
   return new DeepSeekPlanner({ model: config.model, baseUrl: config.baseUrl, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
+}
+
+/** Prepare under a short lock; no model request or running review is created. */
+export async function prepareExternalReviewInput(planningId: string, workspace: string): Promise<{ expectedRevision: number; input: PlanReviewInput }> {
+  const store = new PlannerStore(workspace);
+  const release = await store.acquireLock(planningId);
+  try {
+    const snapshot = await store.load(planningId);
+    if (!["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider) || snapshot.activeTurnId || snapshot.execution || snapshot.draftRevision === null) throw new Error("external_review_unavailable：当前没有可提交网页审查的草案");
+    const draft = await store.loadDraft(planningId, snapshot.draftRevision);
+    assertPlanningReady(snapshot.planningAssessment, draft.plan);
+    const requirements = requireReconciledRequirements(snapshot);
+    const previousReview = (await new ReviewStore(store.workspace).list(planningId)).filter(({ status }) => status === "succeeded").at(-1);
+    const input: PlanReviewInput = {
+      requirements: effectiveRequirements(requirements).map(({ text }) => text), requirementItems: effectiveRequirements(requirements),
+      ...(snapshot.planningAssessment ? { planningAssessment: snapshot.planningAssessment } : {}),
+      plan: draft.plan, executionDefaults: snapshot.executionDefaults,
+      ...(previousReview ? { previousReview, planChanges: diffPlans((await store.loadDraft(planningId, previousReview.draftRevision)).plan, draft.plan) } : {}),
+    };
+    if (Buffer.byteLength(JSON.stringify(input), "utf8") > HISTORY_LIMIT) throw new Error("context_budget_exceeded：外部审查上下文超过 256 KiB");
+    return { expectedRevision: snapshot.revision, input };
+  } finally { await release(); }
 }
 
 export async function loadCurrentPlanReview(planningId: string, workspace: string): Promise<PlanReviewRecord | undefined> {

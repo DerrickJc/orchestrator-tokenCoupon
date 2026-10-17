@@ -26,6 +26,20 @@ function task(timeoutMs = 2000): TaskDefinition {
 }
 
 describe("executeTask", () => {
+  it("persists readable deltas and final text even when displayText suppresses duplicate console output", async () => {
+    const runner: Runner = { id: "mock", supportsModel: false, checkAvailable: async () => undefined, run: async (input, context) => {
+      context.onStarted();
+      context.onOutput({ stream: "stdout", text: "raw protocol", agentText: "完整正文\n", displayText: "完整正文" });
+      context.onOutput({ stream: "stdout", text: "", displayText: "", finalText: "最终返回".repeat(2000) });
+      context.onOutput({ stream: "stdout", text: input.completionMarker, agentText: input.completionMarker });
+      return { started: true, exitCode: 0, signal: null };
+    } };
+    const result = await executeTask({ task: task(), cwd: await workspace(), runner });
+    const events = (await readFile(join(result.artifactDir, "events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(events.find(event => event.payload?.finalText)?.payload).toMatchObject({ text: "", displayText: "", finalText: "最终返回".repeat(2000) });
+    expect(events.find(event => event.payload?.agentText === "完整正文\n")?.payload.text).toBe("raw protocol");
+    expect(result.attempt.status).toBe("succeeded");
+  });
   it("records one successful attempt with isolated artifacts", async () => {
     const cwd = await workspace();
     const result = await executeTask({ task: task(), cwd, runner: new MockRunner() });
@@ -118,9 +132,10 @@ describe("executeTask", () => {
 
   it("does not treat a completion marker as success if cancellation follows it", async () => {
     const controller = new AbortController();
-    const execution = executeTask({ task: task(), cwd: await workspace(), runner: new MockRunner("marker-then-hang"), signal: controller.signal });
-    setTimeout(() => controller.abort(), 80);
-    const result = await execution;
+    const result = await executeTask({ task: task(), cwd: await workspace(), runner: new MockRunner("marker-then-hang"), signal: controller.signal,
+      // Observe the prerequisite instead of assuming the child starts within 80 ms.
+      onOutput: output => { if (output.agentText?.includes("<<<TOKEN_COUPON_DONE:")) controller.abort(); },
+    });
     expect(result.attempt.markerSeen).toBe(true);
     expect(result.attempt.status).toBe("cancelled");
   });

@@ -82,6 +82,27 @@ describe("read-only repository tools", () => {
 });
 
 describe("Planner conversation and approval", () => {
+  it("applies a field-only draft patch while preserving plan metadata and rejecting protected task fields", async () => {
+    const root = await workspace();
+    const started = await startPlannerConversation({ workspace: root, request: "Implement a greeting", config, executionDefaults: execution(), planner: new MockPlanner() });
+    const before = started.draft!;
+    const entry = before.plan.tasks[0]!;
+    const saved = await replacePlannerDraft({ planningId: started.snapshot.planningId, workspace: root,
+      expectedDraftRevision: before.draftRevision, expectedPlanHash: before.planHash,
+      edits: { title: "Greeting plan revised", tasks: [{ taskId: entry.task.id, fields: { objective: "Implement greeting with an explicit empty-name behavior." } }] } });
+    expect(saved.draft?.draftRevision).toBe(2);
+    expect(saved.draft?.plan.title).toBe("Greeting plan revised");
+    expect(saved.draft?.plan.tasks[0]?.task.objective).toBe("Implement greeting with an explicit empty-name behavior.");
+    expect(saved.draft?.plan.tasks[0]?.task.prompt).toContain("empty-name behavior");
+    expect(saved.draft?.plan.tasks[0]?.task.execution).toEqual(entry.task.execution);
+    expect(saved.draft?.plan.tasks[0]?.dependsOn).toEqual(entry.dependsOn);
+    expect(saved.draft?.plan.id).toBe(before.plan.id);
+    expect(saved.draft?.plan.decisionContext).toEqual(before.plan.decisionContext);
+
+    await expect(replacePlannerDraft({ planningId: started.snapshot.planningId, workspace: root,
+      edits: { tasks: [{ taskId: entry.task.id, fields: { execution: { runnerId: "mock", mode: "managed" } } }] } })).rejects.toThrow("不支持此字段");
+  });
+
   it("persists a draft, gates execution on approval, and reuses one Session on repeated run", async () => {
     const root = await workspace();
     const planner = new MockPlanner([draftReply()]);

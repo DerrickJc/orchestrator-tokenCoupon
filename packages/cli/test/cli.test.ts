@@ -125,7 +125,7 @@ describe("CLI show commands", () => {
 
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("invalid-task.json");
-    expect(result.stderr).toContain("schemaVersion");
+    expect(result.stderr).toContain("task.execution");
   });
 
   test("rejects an unsupported runner instead of silently substituting Claude Code", async () => {

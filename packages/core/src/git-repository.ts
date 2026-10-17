@@ -67,14 +67,20 @@ export async function inspectGitRepository(workspaceValue: string): Promise<GitR
   const workspace = resolve(workspaceValue);
   const actualWorkspace = await realpath(workspace).catch(() => { throw new Error("git-worktree 要求 workspace 是已存在的 Git 仓库根目录"); });
   if (actualWorkspace !== workspace) throw new Error("git-worktree 不接受通过符号链接指定 workspace；请传入仓库真实路径");
-  const rootOutput = (await runGit(workspace, ["rev-parse", "--show-toplevel"])).stdout.trim();
+  const rootOutput = (await runGit(workspace, ["rev-parse", "--show-toplevel"]).catch(error => {
+    if (error instanceof GitCommandError && /not a git repository/i.test(error.message)) throw new Error("git_repository_required：此工作区尚未初始化 Git。请先初始化仓库，或选择已有仓库；也可改用共享工作区串行执行。");
+    throw error;
+  })).stdout.trim();
   const repositoryRoot = await realpath(rootOutput);
   if (repositoryRoot !== workspace) throw new Error("git-worktree 要求 workspace 本身是仓库根目录，不能使用仓库子目录");
   const bare = (await runGit(workspace, ["rev-parse", "--is-bare-repository"])).stdout.trim();
   if (bare !== "false") throw new Error("git-worktree 不支持 bare 仓库");
   const commonOutput = (await runGit(workspace, ["rev-parse", "--git-common-dir"])).stdout.trim();
   const gitCommonDir = await realpath(isAbsolute(commonOutput) ? commonOutput : resolve(workspace, commonOutput));
-  const baseCommit = (await runGit(workspace, ["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim();
+  const baseCommit = (await runGit(workspace, ["rev-parse", "--verify", "HEAD^{commit}"]).catch(error => {
+    if (error instanceof GitCommandError && error.exitCode === 128) throw new Error("git_initial_commit_required：Git 已初始化，但尚无可用的首次提交（HEAD）。请先创建首次提交，再使用 Git worktree 隔离。");
+    throw error;
+  })).stdout.trim();
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(baseCommit)) throw new Error("Git HEAD 不是受支持的完整提交 OID");
   const objectFormat = (await runGit(workspace, ["rev-parse", "--show-object-format"])).stdout.trim();
   if (objectFormat !== "sha1" && objectFormat !== "sha256") throw new Error(`不支持的 Git 对象格式：${objectFormat}`);
@@ -107,8 +113,8 @@ export async function inspectGitRepository(workspaceValue: string): Promise<GitR
     }
   }
   const trackedMetadata = (await runGit(workspace, ["ls-files", "-z", "--", ".token-coupon"])).stdout;
-  if (trackedMetadata.length > 0) throw new Error("workspace/.token-coupon 含有 Git 跟踪文件，不能作为隔离工作目录");
-  const status = (await runGit(workspace, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
+  if (trackedMetadata.length > 0) throw new Error("git_runtime_tracked：workspace/.token-coupon 含有 Git 跟踪文件。这是持续更新的本机运行记录；请取消跟踪并提交该变更。只添加 .gitignore 不会取消已有跟踪，本机记录无需删除。");
+  const status = (await runGit(workspace, ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
   if (status.length > 0) throw new Error("git-worktree 要求 workspace 工作区干净；请先处理 tracked、staged 或未忽略的 untracked 改动。未执行 stash 或删除操作");
   await runGit(workspace, ["var", "GIT_AUTHOR_IDENT"]);
   await runGit(workspace, ["var", "GIT_COMMITTER_IDENT"]);

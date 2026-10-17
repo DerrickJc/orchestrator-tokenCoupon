@@ -7,7 +7,23 @@ import type {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
 const NON_CONCRETE = /(未指定|待确认|尚未|仍未|未明确|未知|待定)/;
-type ConfirmationAnswer = { questionId: string; action: ConfirmationEvent["action"]; preference?: string; value?: string };
+type ConfirmationAnswer = { questionId: string; action: ConfirmationEvent["action"]; preference?: string; value?: string; optionId?: string; values?: ConfirmationEvent["values"] };
+
+/** Choices bind complete concrete values to the same stable question/decision IDs. */
+export function validateConfirmationOptions(value: unknown, decisionIds: string[]): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length < 2 || value.length > 6) throw new Error("问题选项需包含 2~6 项具体方案与自定义入口");
+  const ids = new Set<string>(); let customs = 0;
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("问题选项必须是对象");
+    const option = entry as Record<string, unknown>;
+    if (Object.keys(option).some(key => !["optionId", "label", "values", "custom"].includes(key)) || typeof option.optionId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(option.optionId) || ids.has(option.optionId) || typeof option.label !== "string" || !option.label.trim() || Buffer.byteLength(option.label, "utf8") > 2048 || option.custom !== undefined && typeof option.custom !== "boolean") throw new Error("问题选项标识或说明无效");
+    ids.add(option.optionId);
+    if (option.custom === true) { customs++; if (option.values !== undefined) throw new Error("自定义选项不能预先授予决策值"); continue; }
+    if (!Array.isArray(option.values) || option.values.length !== decisionIds.length || new Set(option.values.map(item => item?.decisionId)).size !== decisionIds.length || option.values.some(item => !item || !decisionIds.includes(item.decisionId) || typeof item.value !== "string" || !item.value.trim() || Buffer.byteLength(item.value, "utf8") > 2048 || NON_CONCRETE.test(item.value))) throw new Error("具体选项必须恰好覆盖所关联的全部决策");
+  }
+  if (customs !== 1) throw new Error("问题选项必须有且仅有一个自定义入口");
+}
 
 export function makeConfirmationProposal(
   reply: PlannerReply,
@@ -24,6 +40,7 @@ export function makeConfirmationProposal(
   const seenIndexes = new Set<number>();
   const seenDecisions = new Set<PlanningDecisionId>();
   const questions: ConfirmationQuestion[] = reply.questionBindings.map((binding) => {
+    validateConfirmationOptions(binding.options, binding.decisionIds);
     if (!Number.isSafeInteger(binding.displayIndex) || binding.displayIndex < 1 || binding.displayIndex > reply.questions!.length ||
         !/^[A-Za-z0-9_-]{1,64}$/.test(binding.questionId) || seenIds.has(binding.questionId) || seenIndexes.has(binding.displayIndex) ||
         !Array.isArray(binding.decisionIds) || binding.decisionIds.length < 1 ||
@@ -50,6 +67,7 @@ export function makeConfirmationProposal(
       text: reply.questions![binding.displayIndex - 1]!,
       decisionIds: [...binding.decisionIds],
       answerMode: binding.answerMode,
+      ...(binding.options ? { options: binding.options } : {}),
     };
   });
   const missingDecisionIds = [...pending.keys()].filter((decisionId) => !seenDecisions.has(decisionId));
@@ -87,16 +105,16 @@ export function parseConfirmationInput(
   if (revoke) return revoke;
   if (!proposal) return undefined;
   const explicit = parseCommand(trimmed, proposal);
-  const answers: ConfirmationAnswer[] | undefined = explicit ?? parseNumberedAnswers(trimmed, proposal) ?? parseGlobalAnswer(trimmed, proposal);
+  const answers: ConfirmationAnswer[] | undefined = explicit ?? parseOptionAnswers(trimmed, proposal) ?? parseNumberedAnswers(trimmed, proposal) ?? parseGlobalAnswer(trimmed, proposal);
   if (!answers || !answers.length) return undefined;
   const events: ConfirmationEvent[] = [];
   for (const answer of answers) {
     const question = proposal.questions.find(({ questionId }) => questionId === answer.questionId)!;
-    const values = answer.action === "accept" || answer.action === "reject"
+    const values = answer.values ?? (answer.action === "accept" || answer.action === "reject"
       ? question.decisionIds.map((decisionId) => ({ decisionId, value: proposal.candidates.find((item) => item.decisionId === decisionId)!.value }))
       : answer.action === "provide_value" && answer.value && question.decisionIds.length === 1
         ? [{ decisionId: question.decisionIds[0]!, value: answer.value }]
-      : undefined;
+      : undefined);
     if (answer.action === "provide_value" && question.decisionIds.length !== 1) throw new Error("一个澄清问题关联多项决策，无法安全地把单个新值分配给它们；请逐项回答");
     events.push({
       schemaVersion: 1,
@@ -107,6 +125,7 @@ export function parseConfirmationInput(
       proposalRevision: proposal.revision,
       proposalHash: proposal.hash,
       questionId: question.questionId,
+      ...(answer.optionId ? { optionId: answer.optionId } : {}),
       decisionIds: [...question.decisionIds],
       action: answer.action,
       quote: text,
@@ -116,6 +135,29 @@ export function parseConfirmationInput(
     });
   }
   return events;
+}
+
+function parseOptionAnswers(text: string, proposal: ConfirmationProposalSet): ConfirmationAnswer[] | undefined {
+  // Optional revision fence for choices copied from a previous proposal.
+  const ref = text.match(/^proposal:(\S+)@([0-9]+)\s+/);
+  if (ref) {
+    if (ref[1] !== proposal.proposalId || Number(ref[2]) !== proposal.revision) throw new Error("选项提案已过期，请读取当前问题后重新选择");
+    text = text.slice(ref[0].length);
+  }
+  const tokens = text.split(/[，,；;\n]+/).map(item => item.trim()).filter(Boolean);
+  if (!tokens.length || !tokens.every(token => /^(?:(?:Q\d+|[A-Za-z0-9_-]+)-)?[A-F]$/i.test(token))) return undefined;
+  if (!proposal.questions.some(question => question.options)) return undefined;
+  const seen = new Set<string>();
+  return tokens.map(token => {
+    const match = token.match(/^(?:(.+)-)?([A-F])$/i)!;
+    const question = match[1] ? proposal.questions.find(item => item.questionId === match[1] || `Q${item.displayIndex}`.toUpperCase() === match[1]!.toUpperCase()) : proposal.questions.length === 1 ? proposal.questions[0] : undefined;
+    if (!question || seen.has(question.questionId)) throw new Error("多个问题请用 Q1-A、Q2-B 分别选择，不能省略或重复问题编号");
+    seen.add(question.questionId);
+    const option = question.options?.[match[2]!.toUpperCase().charCodeAt(0) - 65];
+    if (!option) throw new Error("该问题没有对应选项，请读取当前提案");
+    if (option.custom) throw new Error("请选择自定义后说明具体方案；仅选择字母不会更新决策");
+    return { questionId: question.questionId, action: "accept", optionId: option.optionId, values: option.values };
+  });
 }
 
 function parseCommand(text: string, proposal: ConfirmationProposalSet): ConfirmationAnswer[]|undefined {
@@ -325,6 +367,7 @@ function validateProposal(value: unknown, messageIds: Set<string>): Confirmation
     if (typeof question.questionId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(question.questionId) || !Number.isSafeInteger(question.displayIndex) ||
         typeof question.text !== "string" || !question.text || !Array.isArray(question.decisionIds) || !question.decisionIds.length ||
         !["accept_proposal", "delegate_choice", "provide_value"].includes(String(question.answerMode))) throw new Error("确认问题字段无效");
+    validateConfirmationOptions(question.options, question.decisionIds as string[]);
     return question as unknown as ConfirmationQuestion;
   });
   const candidates = raw.candidates.map((entry) => {

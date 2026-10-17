@@ -67,7 +67,7 @@ export class ClaudeManagedRunner implements Runner {
       if (answer.kind === "approval") {
         return answer.decision === "allow-once"
           ? { behavior: "allow", updatedInput: toolInput, toolUseID: options.toolUseID }
-          : { behavior: "deny", message: "User denied this tool call", interrupt: false, toolUseID: options.toolUseID };
+          : { behavior: "deny", message: answer.guidance ? `User denied this tool call. Follow this user guidance and reconsider the approach: ${answer.guidance}` : "User denied this tool call", interrupt: false, toolUseID: options.toolUseID };
       }
       const answers: Record<string, string> = {};
       for (const item of answer.answers) answers[item.questionId] = item.text ?? item.optionIds?.join(", ") ?? "";
@@ -147,11 +147,12 @@ export class ClaudeManagedRunner implements Runner {
 async function recordClaudeMessage(message: SDKMessage, context: RunnerContext, toolCalls: Map<string, { name: string; input: Record<string, unknown> }>, cwd: string): Promise<void> {
   if (message.type === "assistant") {
     const root = message.parent_tool_use_id === null;
-    for (const block of message.message.content) {
+    for (const [blockIndex, block] of message.message.content.entries()) {
       if (block.type === "text") {
-        await context.recordEvent?.({ type: "message.completed", messageId: message.message.id, text: block.text, root });
+        const messageId = `${message.message.id}:text:${blockIndex}`;
+        await context.recordEvent?.({ type: "message.completed", messageId, text: block.text, root });
         if (root) {
-          context.onOutput({ stream: "stdout", text: block.text, agentText: block.text, displayText: block.text, structuredEvent: { type: "assistant", root, messageId: message.message.id } });
+          context.onOutput({ stream: "stdout", text: block.text, agentText: block.text, displayText: block.text, structuredEvent: { type: "assistant", root, messageId } });
         }
       } else if (block.type === "tool_use") {
         toolCalls.set(block.id, { name: block.name, input: isObject(block.input) ? block.input : {} });

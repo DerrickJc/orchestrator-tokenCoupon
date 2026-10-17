@@ -1,5 +1,6 @@
 import type { PlanDefinition } from "./plan.js";
 import type { PlannerReply, RequirementsUpdate } from "./planner-types.js";
+import { validateConfirmationOptions } from "./confirmation.js";
 
 /** Recoverable output errors are distinct from network, cancellation and budget errors. */
 export class PlannerReplyValidationError extends Error {
@@ -95,12 +96,14 @@ export function parsePlannerReply(value: unknown, requireUpdate = false, require
       questionBindings = raw.questionBindings.map((value, index) => {
         if (!value || typeof value !== "object" || Array.isArray(value)) return fail(`questionBindings[${index}] 必须是对象`);
         const binding = value as Record<string, unknown>;
-        if (Object.keys(binding).some((key) => !["questionId", "displayIndex", "decisionIds", "answerMode"].includes(key)) ||
+        if (Object.keys(binding).some((key) => !["questionId", "displayIndex", "decisionIds", "answerMode", "options"].includes(key)) ||
             typeof binding.questionId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(binding.questionId) ||
             !Number.isSafeInteger(binding.displayIndex) || Number(binding.displayIndex) < 1 || Number(binding.displayIndex) > questionCount || !Array.isArray(binding.decisionIds) || binding.decisionIds.length < 1 ||
             binding.decisionIds.some((id) => typeof id !== "string") ||
             !["accept_proposal", "delegate_choice", "provide_value"].includes(String(binding.answerMode))) return fail(`questionBindings[${index}] 字段无效`);
-        return { questionId: binding.questionId, displayIndex: binding.displayIndex as number, decisionIds: binding.decisionIds as NonNullable<PlannerReply["questionBindings"]>[number]["decisionIds"], answerMode: binding.answerMode as NonNullable<PlannerReply["questionBindings"]>[number]["answerMode"] };
+        try { validateConfirmationOptions(binding.options, binding.decisionIds as string[]); }
+        catch (error) { return fail(error instanceof Error ? error.message : String(error)); }
+        return { questionId: binding.questionId, displayIndex: binding.displayIndex as number, decisionIds: binding.decisionIds as NonNullable<PlannerReply["questionBindings"]>[number]["decisionIds"], answerMode: binding.answerMode as NonNullable<PlannerReply["questionBindings"]>[number]["answerMode"], ...(binding.options !== undefined ? { options: binding.options as NonNullable<PlannerReply["questionBindings"]>[number]["options"] & {} } : {}) };
       });
     }
     return { kind: "clarification", message: raw.message, questions: raw.questions as string[], ...(questionBindings ? { questionBindings } : {}), ...metadata };

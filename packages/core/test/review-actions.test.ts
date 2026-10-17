@@ -17,7 +17,7 @@ async function fixture() {
 test("three selections produce one audited revision; custom requirement stays classifiable", async () => {
   const f = await fixture(); const inputs: PlannerInput[] = [];
   const result = await applyReviewActions({ ...f, actions: [{ findingId: "F1", action: "suggestion" }, { findingId: "F2", action: "custom", text: "Use HTTP tests" }, { findingId: "F3", action: "keep" }], planner: { id: "mock", generate: async (input) => {
-    inputs.push(input); const plan = structuredClone(f.first.draft!.plan); plan.tasks[1]!.task.prompt += " Use HTTP tests and test F1";
+    inputs.push(input); const plan = structuredClone(f.first.draft!.plan); plan.tasks[1]!.task.objective += " Use HTTP tests and test F1";
     return { kind: "draft", message: "Revised", plan, requirementsUpdate: { messageDecisions: input.pendingMessages!.map((m) => ({ messageId: m.messageId, kind: "operation", reason: "Test repair" })), changes: [] } };
   } } });
   expect(inputs).toHaveLength(1); expect(inputs[0]!.operationMessageIds).toEqual([]);
