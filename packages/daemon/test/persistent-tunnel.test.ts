@@ -1,0 +1,115 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { createServer } from "node:http";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterEach, expect, it } from "vitest";
+import { PersistentQuickTunnelAdapter, readTunnelRecord, tunnelControl, tunnelRecordPath } from "../src/persistent-tunnel.js";
+
+const cleanups: Array<() => Promise<unknown>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+async function freePort() {
+  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>(resolve => server.close(() => resolve())); return port;
+}
+async function fixture(delay = 0) {
+  const root = await mkdtemp(join(tmpdir(), "tc-persistent-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "runtime"), executable = join(root, "cloudflared-fixture");
+  await mkdir(directory, { mode: 0o700 });
+  await writeFile(executable, `#!${process.execPath}\nimport('node:fs').then(fs=>fs.appendFileSync(${JSON.stringify(join(root, "starts"))},'start\\n'));\nsetTimeout(()=>process.stderr.write('https://persistent-test.trycloudflare.com\\n'),${delay});\nsetInterval(()=>{},1000);\nprocess.on('SIGTERM',()=>process.exit(0));\n`, { mode: 0o755 });
+  const adapter = new PersistentQuickTunnelAdapter(5000, 50), port = await freePort();
+  cleanups.push(() => adapter.stopSaved(directory));
+  return { root, directory, executable, adapter, port };
+}
+async function backend() {
+  const directory = await mkdtemp(join(tmpdir(), "tc-gateway-")); await chmod(directory, 0o700);
+  const socketPath = join(directory, "gateway.sock"), server = createServer((_request, response) => response.end("backend-connected"));
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  cleanups.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); });
+  return { socketPath, server };
+}
+
+it("retains the tunnel, reserves its port during restart, authenticates control and reconnects a private backend", async () => {
+  const h = await fixture();
+  const runtime = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
+  const record = (await readTunnelRecord(h.directory))!;
+  expect(runtime.persistent).toBe(true);
+  expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
+  expect((await fetch(`http://127.0.0.1:${record.controlPort}/stop`, { method: "POST" })).status).toBe(403);
+  const front = await backend(); await runtime.attach!(front.socketPath);
+  await expect(runtime.attach!(join(h.root, "arbitrary.sock"))).rejects.toThrow("tunnel_control_unavailable");
+  expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("backend-connected");
+  await runtime.detach!();
+  expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
+  const conflicting = createServer();
+  await expect(new Promise<void>((resolve, reject) => { conflicting.once("error", reject); conflicting.listen(h.port, "127.0.0.1", resolve); })).rejects.toMatchObject({ code: "EADDRINUSE" });
+  const restored = await new PersistentQuickTunnelAdapter(5000, 50).recover(h.port, h.directory, new AbortController().signal, () => {});
+  expect(restored?.origin).toBe(runtime.origin); expect((await readTunnelRecord(h.directory))?.pid).toBe(record.pid);
+  await restored!.attach!(front.socketPath);
+  expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("backend-connected");
+  expect((await readFile(join(h.root, "starts"), "utf8")).trim().split("\n")).toHaveLength(1);
+  await restored!.stop(); expect(await readTunnelRecord(h.directory)).toBeUndefined();
+}, 15_000);
+
+it("does not start a public tunnel over a port occupied by another service", async () => {
+  const h = await fixture(), other = createServer((_request, response) => response.end("sentinel"));
+  await new Promise<void>(resolve => other.listen(h.port, "127.0.0.1", resolve));
+  cleanups.push(() => new Promise<void>(resolve => other.close(() => resolve())));
+  await expect(h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {})).rejects.toThrow("remote_port_in_use");
+  expect(await readTunnelRecord(h.directory)).toBeUndefined();
+  await expect(readFile(join(h.root, "starts"))).rejects.toMatchObject({ code: "ENOENT" });
+}, 15_000);
+
+it("survives SIGKILL of the launching business process and can be recovered by another process owner", async () => {
+  const h = await fixture();
+  const module = pathToFileURL(join(process.cwd(), "packages/daemon/dist/persistent-tunnel.js")).href;
+  const script = `import {PersistentQuickTunnelAdapter} from ${JSON.stringify(module)}; const r=await new PersistentQuickTunnelAdapter().start(${JSON.stringify(h.executable)},${h.port},${JSON.stringify(h.directory)},new AbortController().signal,()=>{}); console.log(r.origin); setInterval(()=>{},1000);`;
+  const child: ChildProcess = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+  const done = new Promise<void>(resolve => child.once("close", () => resolve()));
+  cleanups.push(async () => { child.kill("SIGKILL"); await done; });
+  await new Promise<void>((resolve, reject) => { let text = ""; child.stdout!.on("data", chunk => { text += chunk; if (text.includes("trycloudflare.com")) resolve(); }); child.once("exit", code => reject(new Error(`launcher exited ${code}`))); });
+  const before = (await readTunnelRecord(h.directory))!;
+  child.kill("SIGKILL"); await done;
+  const restored = await h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {});
+  expect(restored?.origin).toBe(before.origin); expect((await readTunnelRecord(h.directory))?.pid).toBe(before.pid);
+  expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
+  await restored!.stop();
+}, 15_000);
+
+it("rejects changed ports and inaccessible control instead of silently replacing an alive tunnel", async () => {
+  const h = await fixture();
+  const runtime = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
+  await runtime.detach!();
+  await expect(h.adapter.recover(await freePort(), h.directory, new AbortController().signal, () => {})).rejects.toThrow("tunnel_port_changed");
+  const record = (await readTunnelRecord(h.directory))!;
+  await writeFile(tunnelRecordPath(h.directory), JSON.stringify({ ...record, token: "0".repeat(64) }), { mode: 0o600 });
+  try { await expect(h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {})).rejects.toThrow("tunnel_control_unavailable"); }
+  finally { await writeFile(tunnelRecordPath(h.directory), JSON.stringify(record), { mode: 0o600 }); }
+  expect((await readFile(join(h.root, "starts"), "utf8")).trim()).toBe("start");
+}, 15_000);
+
+it("verifies a dead supervisor and cleans its own orphan before allowing a replacement", async () => {
+  const h = await fixture();
+  const runtime = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
+  await runtime.detach!();
+  const record = (await readTunnelRecord(h.directory))!;
+  process.kill(record.pid, "SIGKILL");
+  await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }).toBe(true);
+  expect(await h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {})).toBeUndefined();
+  const replacement = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
+  expect((await readTunnelRecord(h.directory))?.pid).not.toBe(record.pid);
+  expect((await readFile(join(h.root, "starts"), "utf8")).trim().split("\n")).toHaveLength(2);
+  await replacement.stop();
+}, 15_000);
+
+it("cancels a starting tunnel without leaving its supervisor or child running", async () => {
+  const h = await fixture(10_000), controller = new AbortController();
+  const pending = h.adapter.start(h.executable, h.port, h.directory, controller.signal, () => {});
+  await expect.poll(() => readTunnelRecord(h.directory)).toBeDefined();
+  const record = (await readTunnelRecord(h.directory))!;
+  controller.abort(); await expect(pending).rejects.toBeDefined();
+  await expect.poll(() => readTunnelRecord(h.directory)).toBeUndefined();
+  await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }).toBe(true);
+}, 15_000);

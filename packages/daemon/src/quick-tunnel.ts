@@ -1,12 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 
-export interface TunnelRuntime { origin: string; stop(): Promise<void>; }
+export const PRESERVE_TUNNEL = "daemon_shutdown_preserve_tunnel";
+export interface TunnelRuntime { origin: string; stop(): Promise<void>; detach?(): Promise<void>; attach?(socketPath: string): Promise<void>; persistent?: boolean; }
 export interface TunnelAdapter {
+  readonly persistentGateway?: boolean;
   start(executable: string, port: number, workingDirectory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime>;
+  recover?(port: number, workingDirectory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime | undefined>;
+  stopSaved?(workingDirectory: string): Promise<void>;
 }
 export class QuickTunnelAdapter implements TunnelAdapter {
-  constructor(private readonly discoveryTimeoutMs = 45_000) {}
+  constructor(private readonly discoveryTimeoutMs = 45_000, private readonly onSpawn?: (pid: number) => Promise<void>) {}
   async start(executable: string, port: number, workingDirectory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime> {
     await mkdir(workingDirectory, { recursive: true, mode: 0o700 }); signal.throwIfAborted();
     // An explicit empty config prevents reading the user's named-tunnel config.
@@ -23,6 +27,7 @@ export class QuickTunnelAdapter implements TunnelAdapter {
     const cancel = () => { void stop(); };
     signal.addEventListener("abort", cancel, { once: true });
     try {
+      if (child.pid) await this.onSpawn?.(child.pid);
       const origin = await new Promise<string>((resolve, reject) => {
         let found = false; const pending = { out: "", err: "" };
         const timer = setTimeout(() => reject(new Error("tunnel_url_timeout：未能取得公网地址，请检查 Cloudflare 网络连接后重试")), this.discoveryTimeoutMs);

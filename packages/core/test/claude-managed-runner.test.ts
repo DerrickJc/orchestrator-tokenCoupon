@@ -150,4 +150,21 @@ describe("ClaudeManagedRunner", () => {
     expect(messages).toHaveLength(2);
     expect(new Set(messages.map(event => event.type === "message.completed" ? event.messageId : undefined)).size).toBe(2);
   });
+  it("rejects AskUserQuestion with NO guidance instead of fabricating selected answers", async () => {
+    let permissionResult: unknown;
+    queryMock.mockImplementation((request: { options: { canUseTool: (name: string, input: Record<string, unknown>, options: { signal: AbortSignal; toolUseID: string }) => Promise<unknown> } }) => ({
+      async *[Symbol.asyncIterator]() {
+        permissionResult = await request.options.canUseTool("AskUserQuestion", { questions: [{ question: "安装新依赖吗？", options: [{ label: "Install" }, { label: "Skip" }] }] }, { signal: new AbortController().signal, toolUseID: "question-no" });
+        yield { type: "result", subtype: "success", is_error: false, result: "done", permission_denials: [] };
+      }, close() {},
+    }));
+    const task = { schemaVersion: 1 as const, id: "question-no", title: "Question guidance", prompt: "Ask", execution: { runnerId: "claude-code", mode: "managed" as const } };
+    await new ClaudeManagedRunner().run({ attemptId: "question-no", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {},
+      async requestInteraction(request) { expect(request.kind).toBe("question"); return { kind: "question", answers: [], guidance: "使用本地已有依赖", interactionId: "question-no" }; },
+    });
+    expect(permissionResult).toMatchObject({ behavior: "deny", message: expect.stringContaining("使用本地已有依赖"), interrupt: false, toolUseID: "question-no" });
+    expect(permissionResult).not.toHaveProperty("updatedInput");
+  });
+
 });

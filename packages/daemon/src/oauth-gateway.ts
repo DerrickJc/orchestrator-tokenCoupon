@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
@@ -11,7 +12,8 @@ import { sanitizeOutput, type ApplicationService } from "./application-service.j
 import { createMcpServer } from "./mcp-server.js";
 import type { RemoteMcpPrincipal, RemoteMcpScope } from "./mcp-server.js";
 import { CloudflaredComponent, type ComponentInfo, type ComponentProvider } from "./cloudflared-component.js";
-import { QuickTunnelAdapter, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
+import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
+import { PersistentQuickTunnelAdapter } from "./persistent-tunnel.js";
 import { createProbeMcpServer, probeRemoteMcp, ProbeError, retryableProbeFailure, type PublicProbe } from "./remote-probe.js";
 import { ConnectionDiagnostics, type ConnectionObservation } from "./connection-diagnostics.js";
 
@@ -56,6 +58,7 @@ export interface RemoteConnectionStatus {
   workspaceIds?: string[];
   scopes?: RemoteMcpScope[];
   component?: { version: string; source: "existing" | "managed" };
+  connectionProcess?: { persistent: boolean; recovered: boolean };
   lastProbeAt?: number;
   nextProbeAt?: number;
   startupReadiness?: { startedAt: number; deadlineAt: number; round: number };
@@ -79,6 +82,8 @@ export class RemoteMcpConnection {
   private state: PersistedState = { version: 1, clients: [], requests: [], grants: [], codes: [] };
   private stateQueue: Promise<void> = Promise.resolve();
   private server: Server | undefined;
+  private gatewaySocket: string | undefined;
+  private gatewaySocketDirectory: string | undefined;
   private config: ConnectionConfig | undefined;
   private startupError: string | undefined;
   private loadFailed = false;
@@ -93,6 +98,7 @@ export class RemoteMcpConnection {
   private healthTimer: ReturnType<typeof setTimeout> | undefined;
   private runtime: TunnelRuntime | undefined;
   private componentInfo: ComponentInfo | undefined;
+  private recoveredTunnel = false;
   private phase: ConnectionPhase = "stopped";
   private lastProbeAt: number | undefined;
   private addressChanged = false;
@@ -114,7 +120,7 @@ export class RemoteMcpConnection {
     this.configPath = join(dataDirectory, "remote-mcp-connection.json");
     this.statePath = join(dataDirectory, "remote-mcp-oauth.json");
     this.component = dependencies.component ?? new CloudflaredComponent(dataDirectory);
-    this.tunnel = dependencies.tunnel ?? new QuickTunnelAdapter();
+    this.tunnel = dependencies.tunnel ?? new PersistentQuickTunnelAdapter();
     this.probe = dependencies.probe ?? probeRemoteMcp;
     this.healthInterval = dependencies.healthIntervalMs ?? 30_000;
     this.retryDelays = dependencies.retryDelaysMs ?? [1000, 3000];
@@ -200,6 +206,7 @@ export class RemoteMcpConnection {
     if (this.config?.workspaceId) { base.workspaceId = this.config.workspaceId; base.workspaceIds = this.config.workspaceIds ?? [this.config.workspaceId]; }
     if (this.config?.scopes) base.scopes = this.config.scopes;
     if (this.componentInfo) base.component = { version: this.componentInfo.version, source: this.componentInfo.source };
+    if (this.runtime) base.connectionProcess = { persistent: this.runtime.persistent === true, recovered: this.recoveredTunnel };
     if (this.lastProbeAt) base.lastProbeAt = this.lastProbeAt;
     base.gatewayAddress = `http://127.0.0.1:${this.port}`;
     if (this.startupError) base.lastError = this.startupError;
@@ -212,7 +219,7 @@ export class RemoteMcpConnection {
     const port = validateGatewayPort(requestedPort);
     return this.runConnection(async () => {
       const revoke = this.config?.mode === "quick_tunnel" || this.config?.publicOrigin !== origin;
-      await this.endRuntime(); if (revoke) await this.revokeAll();
+      await this.endRuntime(); await this.tunnel.stopSaved?.(join(this.dataDirectory, "components", "tunnel-runtime")); if (revoke) await this.revokeAll();
       const previousOrigin = this.config?.publicOrigin;
       this.port = port; this.config = { mode: "fixed_https", publicOrigin: origin, enabled: true, port, ...(previousOrigin && previousOrigin !== origin ? { previousOrigin } : {}) };
       await this.writeJson(this.configPath, this.config); this.startupError = undefined; this.addressChanged = Boolean(previousOrigin && previousOrigin !== origin); this.lastProbeAt = undefined;
@@ -244,7 +251,7 @@ export class RemoteMcpConnection {
         return this.status();
       }
       const previousOrigin = this.config?.publicOrigin;
-      await this.endRuntime(); await this.revokeAll();
+      await this.endRuntime();
       this.port = port; this.config = { mode: "quick_tunnel", enabled: true, port, ...(input.workspaceId ? { workspaceId: input.workspaceId, workspaceIds: [...new Set([input.workspaceId, ...(input.workspaceIds ?? [])])] } : { connectionOnly: true, workspaceIds: [] }), scopes: [...new Set(scopes)] as RemoteMcpScope[], ...(previousOrigin ? { publicOrigin: previousOrigin } : {}) };
       await this.writeJson(this.configPath, this.config); this.startupError = undefined; this.lastProbeAt = undefined;
       this.controller = new AbortController(); const signal = this.controller.signal;
@@ -261,7 +268,7 @@ export class RemoteMcpConnection {
   async stop(): Promise<RemoteConnectionStatus> {
     this.controller?.abort();
     return this.runConnection(async () => {
-      await this.endRuntime(); await this.revokeAll();
+      await this.endRuntime(); await this.tunnel.stopSaved?.(join(this.dataDirectory, "components", "tunnel-runtime")); await this.revokeAll();
       if (this.config) { this.config = { ...this.config, enabled: false }; await this.writeJson(this.configPath, this.config); }
       this.startupError = undefined; this.setPhase("stopped");
       await this.service.publish({ type: "remote_connection.stopped" }); return this.status();
@@ -278,8 +285,8 @@ export class RemoteMcpConnection {
     this.probeTokens.clear();
   }
 
-  /** Stop the listener during daemon shutdown without revoking a user's saved grants. */
-  async shutdown(): Promise<void> { this.controller?.abort(); await this.runConnection(() => this.endRuntime()); await this.diagnostics.flush(); }
+  /** Business shutdown detaches the persistent tunnel; only explicit stop revokes access. */
+  async shutdown(): Promise<void> { this.controller?.abort(PRESERVE_TUNNEL); await this.runConnection(() => this.endRuntime(true)); await this.diagnostics.flush(); }
 
   async testConnection(): Promise<RemoteConnectionStatus> {
     return this.runConnection(async () => {
@@ -290,15 +297,25 @@ export class RemoteMcpConnection {
   }
 
   private async beginQuick(signal: AbortSignal, previousOrigin?: string): Promise<void> {
-    this.componentInfo = await this.component.get(signal, (stage) => { if (!signal.aborted) this.setPhase(stage); }); signal.throwIfAborted();
-    this.setPhase("discovering");
-    const runtime = await this.tunnel.start(this.componentInfo.executable, this.port, join(this.dataDirectory, "components", "tunnel-runtime"), signal, () => {
-      if (!signal.aborted) { this.controller?.abort(); void this.runConnection(async () => { await this.endRuntime(); await this.revokeAll(); this.startupError = "tunnel_process_exited：隧道已退出，请重新开启；新地址可能需要更新 ChatGPT"; this.setPhase("disconnected"); }).catch(() => undefined); }
-    });
-    if (signal.aborted) { await runtime.stop(); signal.throwIfAborted(); }
+    const directory = join(this.dataDirectory, "components", "tunnel-runtime");
+    const exited = () => {
+      if (!signal.aborted) { this.controller?.abort(); void this.runConnection(async () => { this.runtime = undefined; await this.endRuntime(); await this.revokeAll(); this.startupError = "tunnel_process_exited：常驻隧道已退出，请重新开启；新地址需要在网页更新并授权"; this.setPhase("disconnected"); }).catch(() => undefined); }
+    };
+    let runtime = await this.tunnel.recover?.(this.port, directory, signal, exited);
+    this.recoveredTunnel = Boolean(runtime);
+    if (!runtime) {
+      // Fresh tunnels change the OAuth resource. Saved grants only survive verified recovery.
+      await this.revokeAll();
+      this.componentInfo = await this.component.get(signal, (stage) => { if (!signal.aborted) this.setPhase(stage); }); signal.throwIfAborted();
+      this.setPhase("discovering");
+      runtime = await this.tunnel.start(this.componentInfo.executable, this.port, directory, signal, exited);
+    }
+    if (signal.aborted) { if (signal.reason === PRESERVE_TUNNEL && runtime.detach) await runtime.detach(); else await runtime.stop(); signal.throwIfAborted(); }
     this.runtime = runtime;
+    if (runtime.attach && this.gatewaySocket) await runtime.attach(this.gatewaySocket);
     const origin = validatePublicOrigin(runtime.origin);
     if (!/^https:\/\/[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com$/.test(origin)) throw new Error("tunnel_origin_invalid：组件未返回有效 Quick Tunnel 地址");
+    if (this.recoveredTunnel && previousOrigin !== origin) await this.revokeAll();
     this.addressChanged = Boolean(previousOrigin && previousOrigin !== origin);
     this.config = { ...this.config!, publicOrigin: origin, ...(previousOrigin && previousOrigin !== origin ? { previousOrigin } : {}) }; await this.writeJson(this.configPath, this.config); signal.throwIfAborted();
     await this.startGateway(origin); signal.throwIfAborted(); this.setPhase("probing"); await this.checkQuickReadiness(signal);
@@ -393,12 +410,17 @@ export class RemoteMcpConnection {
     const next = this.connectionQueue.then(action);
     this.connectionQueue = next.then(() => undefined, () => undefined); return next;
   }
-  private async endRuntime(): Promise<void> {
-    this.controller?.abort(); clearTimeout(this.healthTimer);
+  private async endRuntime(preserveTunnel = false): Promise<void> {
+    this.controller?.abort(preserveTunnel ? PRESERVE_TUNNEL : undefined); clearTimeout(this.healthTimer);
     this.nextProbeAt = undefined;
-    await this.runtime?.stop(); await this.background; await this.healthTask;
-    this.runtime = undefined; this.background = undefined; this.controller = undefined; this.probeCheck = undefined; this.probeTokens.clear();
-    await this.stopGateway();
+    try {
+      // Closing the private socket also makes an unreachable supervisor return 503.
+      if (preserveTunnel && this.runtime?.detach) await this.runtime.detach().catch(() => undefined); else await this.runtime?.stop();
+      await this.background; await this.healthTask;
+    } finally {
+      this.runtime = undefined; this.background = undefined; this.controller = undefined; this.probeCheck = undefined; this.probeTokens.clear();
+      await this.stopGateway();
+    }
   }
 
   approvals(): Array<{ requestId: string; clientName: string; clientId: string; redirectHost: string; requestedScopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; workspaceId?: string }> {
@@ -589,10 +611,19 @@ export class RemoteMcpConnection {
       if (this.gatewayHandler) this.gatewayHandler(request, response);
       else { response.writeHead(503, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end('{"error":"remote_not_ready"}'); }
     });
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(this.port, "127.0.0.1", () => { server.removeListener("error", reject); resolve(); });
-    });
+    const privateGateway = this.tunnel.persistentGateway && this.config?.mode === "quick_tunnel";
+    if (privateGateway) {
+      this.gatewaySocketDirectory = await mkdtemp(join(tmpdir(), "tc-gateway-"));
+      await chmod(this.gatewaySocketDirectory, 0o700);
+      this.gatewaySocket = join(this.gatewaySocketDirectory, "gateway.sock");
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        const ready = () => { server.removeListener("error", reject); resolve(); };
+        if (this.gatewaySocket) server.listen(this.gatewaySocket, ready); else server.listen(this.port, "127.0.0.1", ready);
+      });
+    } catch (error) { await this.clearGatewaySocket(); throw error; }
     this.server = server;
   }
 
@@ -600,6 +631,12 @@ export class RemoteMcpConnection {
     this.gatewayHandler = undefined;
     const server = this.server; this.server = undefined;
     if (server?.listening) await new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); });
+    await this.clearGatewaySocket();
+  }
+
+  private async clearGatewaySocket(): Promise<void> {
+    if (this.gatewaySocketDirectory) await rm(this.gatewaySocketDirectory, { recursive: true, force: true });
+    this.gatewaySocket = undefined; this.gatewaySocketDirectory = undefined;
   }
 
   private async registerClient(input: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">): Promise<OAuthClientInformationFull> {

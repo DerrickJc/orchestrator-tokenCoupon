@@ -205,6 +205,21 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && parts[0] === "workspaces" && parts.length === 7 && parts[2] === "plannings" && parts[4] === "attempts" && parts[6] === "events") {
       sendJson(response, 200, await service.attemptEvents(parts[1]!, parts[3]!, parts[5]!, Number(url.searchParams.get("offset") ?? 0), url.searchParams.get("fileId") ?? undefined)); return;
     }
+    if (parts[0] === "workspaces" && parts.length === 7 && parts[2] === "plannings" && parts[4] === "attempts" && parts[6] === "diagnostics") {
+      if (request.method === "GET") { sendJson(response, 200, await service.attemptDiagnostics(parts[1]!, parts[3]!, parts[5]!)); return; }
+      if (request.method === "POST") {
+        const body = await readJsonBody(request);
+        sendJson(response, 202, await service.analyzeAttemptFailure(parts[1]!, parts[3]!, parts[5]!, requestKey(request, body), stringField(body.runnerId, "runnerId", 32), optionalString(body.modelId, "modelId", 200), optionalString(body.message, "message", 8192))); return;
+      }
+    }
+    if (request.method === "POST" && parts[0] === "workspaces" && parts.length === 8 && parts[2] === "plannings" && parts[4] === "attempts" && parts[6] === "diagnostics" && parts[7] === "export") {
+      await readJsonBody(request);
+      sendJson(response, 200, await service.exportAttemptEvidence(parts[1]!, parts[3]!, parts[5]!)); return;
+    }
+    if (request.method === "POST" && parts[0] === "workspaces" && parts.length === 9 && parts[2] === "plannings" && parts[4] === "attempts" && parts[6] === "diagnostics" && parts[8] === "replies") {
+      const body = await readJsonBody(request);
+      sendJson(response, 202, await service.replyToAttemptDiagnosis(parts[1]!, parts[3]!, parts[5]!, parts[7]!, requestKey(request, body), stringField(body.message, "message", 8192), body.runnerId === undefined ? undefined : { runnerId: stringField(body.runnerId, "runnerId", 32), ...(body.modelId ? { modelId: stringField(body.modelId, "modelId", 200) } : {}) })); return;
+    }
     if (request.method === "GET" && parts[0] === "workspaces" && parts.length === 7 && parts[2] === "plannings" && parts[4] === "tasks" && parts[6] === "files") {
       sendJson(response, 200, await service.taskResults(parts[1]!, parts[3]!, parts[5]!, url.searchParams.get("path") ?? undefined, Number(url.searchParams.get("offset") ?? 0))); return;
     }
@@ -228,7 +243,11 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const body = await readJsonBody(request);
       const key = requestKey(request, body);
       let job;
-      if (action === "handoff") {
+      if (action === "fork") {
+        if (body.confirmed !== true) throw new Error("revision_confirmation_required：请确认创建新的修订计划");
+        job = await service.createRevisionPlanning(workspaceId!, planningId!, key, integerField(body.expectedRevision, "expectedRevision", 1), stringField(body.expectedPlanHash, "expectedPlanHash", 64), optionalString(body.message, "message", 4096));
+      }
+      else if (action === "handoff") {
         const role = body.role === "review" ? "review" : "plan";
         const target = body.target === "chatgpt" || body.target === "claude" || body.target === "other" || body.target === "any" ? body.target : undefined;
         if (!target) throw new Error("handoff_target_invalid");
@@ -334,6 +353,7 @@ function interactionReply(body: Record<string, unknown>): RunnerInteractionReply
     return { kind: "approval", decision: body.decision, ...(guidance ? { guidance } : {}) };
   }
   if (body.kind === "question" && Array.isArray(body.answers) && body.answers.length <= 32) {
+    const guidance = body.guidance === undefined ? undefined : stringField(body.guidance, "guidance", 4096);
     const answers = body.answers.map((answer, index) => {
       if (!answer || typeof answer !== "object" || Array.isArray(answer)) throw new Error(`interaction_reply_invalid：answers[${index}] 格式无效`);
       const item = answer as Record<string, unknown>;
@@ -342,7 +362,28 @@ function interactionReply(body: Record<string, unknown>): RunnerInteractionReply
       const text = item.text === undefined ? undefined : stringField(item.text, `answers[${index}].text`, 4096);
       return { questionId, ...(optionIds ? { optionIds } : {}), ...(text ? { text } : {}) };
     });
-    return { kind: "question", answers };
+    return { kind: "question", answers, ...(guidance ? { guidance } : {}) };
+  }
+  if (body.kind === "elicitation" && ["accept", "decline", "cancel"].includes(String(body.action))) {
+    const guidance = body.guidance === undefined ? undefined : stringField(body.guidance, "guidance", 4096);
+    if (guidance && body.action !== "decline") throw new Error("interaction_reply_invalid：只有拒绝可以附带指导");
+    if (body.content !== undefined && body.content !== null && (!body.content || typeof body.content !== "object" || Array.isArray(body.content))) throw new Error("interaction_reply_invalid：Elicitation content 必须是对象");
+    let content: Record<string, string | number | boolean | string[]> | undefined;
+    if (body.content && typeof body.content === "object" && !Array.isArray(body.content)) {
+      const entries = Object.entries(body.content as Record<string, unknown>);
+      if (entries.length > 32) throw new Error("interaction_reply_invalid：Elicitation 字段不能超过 32 项");
+      content = {};
+      for (const [key, value] of entries) {
+        if (!key || key.length > 128) throw new Error("interaction_reply_invalid：Elicitation 字段名无效");
+        if (typeof value === "string" && Buffer.byteLength(value, "utf8") <= 8192) content[key] = value;
+        else if (typeof value === "boolean" || typeof value === "number" && Number.isFinite(value)) content[key] = value;
+        else if (Array.isArray(value) && value.length <= 128 && value.every((item) => typeof item === "string" && Buffer.byteLength(item, "utf8") <= 1024)) content[key] = value as string[];
+        else throw new Error("interaction_reply_invalid：Elicitation 字段 " + key + " 类型或长度无效");
+      }
+    }
+    const action = body.action as "accept" | "decline" | "cancel";
+    if (action !== "accept" && content) throw new Error("interaction_reply_invalid：拒绝或取消时不能提交表单内容");
+    return { kind: "elicitation", action, ...(content ? { content } : {}), ...(guidance ? { guidance } : {}) };
   }
   throw new Error("interaction_reply_invalid：审批或回答格式无效");
 }

@@ -86,9 +86,9 @@ function scriptedPlanner(): Planner & { inputs: PlannerInput[] } {
 describe("structured confirmation and decision context", () => {
   it("versions the resolution contract for all review formats and preserves the v2 distinction", () => {
     const config = { provider: "deepseek" as const, model: "deepseek-flash", baseUrl: "https://api.deepseek.com" };
-    expect(reviewerConfigHash(config, 1, false)).toBe(canonicalHash({ ...config, reviewPromptVersion: 5 }));
-    expect(reviewerConfigHash(config, 1, true)).toBe(canonicalHash({ ...config, reviewPromptVersion: 6 }));
-    expect(reviewerConfigHash(config, 2)).toBe(canonicalHash({ ...config, reviewPromptVersion: 7 }));
+    expect(reviewerConfigHash(config, 1, false)).toBe(canonicalHash({ ...config, reviewPromptVersion: 6 }));
+    expect(reviewerConfigHash(config, 1, true)).toBe(canonicalHash({ ...config, reviewPromptVersion: 7 }));
+    expect(reviewerConfigHash(config, 2)).toBe(canonicalHash({ ...config, reviewPromptVersion: 8 }));
     expect(reviewerConfigHash(config, 2)).not.toBe(reviewerConfigHash(config, 1));
   });
 

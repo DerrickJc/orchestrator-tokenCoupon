@@ -85,7 +85,7 @@ export async function startPlannerConversation(options: PlannerStartOptions): Pr
 }
 
 /** Creates the domain record without invoking a model or holding a waiting lock. */
-export async function initializePlannerConversation(options: Omit<PlannerStartOptions, "planner" | "signal">): Promise<PlannerConversationSnapshot> {
+export async function initializePlannerConversation(options: Omit<PlannerStartOptions, "planner" | "signal"> & { sourcePlanning?: PlannerConversationSnapshot["sourcePlanning"] }): Promise<PlannerConversationSnapshot> {
   validateRequest(options.request);
   validateExecutionDefaults(options.executionDefaults);
   validateConfig(options.config);
@@ -95,6 +95,7 @@ export async function initializePlannerConversation(options: Omit<PlannerStartOp
     schemaVersion: 1, planningId: randomUUID(), workspace: store.workspace, revision: 1, status: "collecting",
     config: options.config, executionDefaults: options.executionDefaults, messages: [], turns: [], context: [],
     activeTurnId: null, draftRevision: null, approval: null, latestReviewId: null, execution: null,
+    ...(options.sourcePlanning ? { sourcePlanning: options.sourcePlanning } : {}),
     confirmationState: { schemaVersion: 1, activeProposal: null, events: [] }, createdAt: now, updatedAt: now,
   };
   await store.create(snapshot);
@@ -356,6 +357,9 @@ export async function approvePlannerDraft(options: { planningId: string; workspa
     if (snapshot.draftRevision !== options.draftRevision) throw new Error("批准版本不是当前草案版本");
     const requirements = requireReconciledRequirements(snapshot);
     if (effectiveRequirements(requirements).some(({ status }) => status === "pending")) throw new Error("仍有待澄清需求，不能批准，请先回答澄清问题");
+    if (!snapshot.approval && snapshot.planningAssessment?.profile === "existing_project" && snapshot.planningAssessment.schemaVersion !== 2) {
+      throw new Error("planning_technology_gate_missing：此旧版计划没有单独记录高影响技术选型的授权或权威依据。请补齐 technology_selection 决策，重新生成草案并审查后再批准。");
+    }
     const draft = await store.loadDraft(options.planningId, options.draftRevision);
     assertPlanningReady(snapshot.planningAssessment, draft.plan);
     const reviewId = options.reviewId ?? snapshot.latestReviewId;
@@ -420,6 +424,9 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
       }
     }
     if (snapshot.status !== "approved" || !snapshot.approval || snapshot.draftRevision === null) throw new Error("执行前必须批准当前草案版本");
+    if (!snapshot.execution && snapshot.planningAssessment?.profile === "existing_project" && snapshot.planningAssessment.schemaVersion !== 2) {
+      throw new Error("planning_technology_gate_missing：旧版批准记录不能证明技术选型已确认。请补齐 technology_selection 决策并重新审查批准；历史批准记录已保留。");
+    }
     const draft = await store.loadDraft(options.planningId, snapshot.draftRevision);
     assertPlanningReady(snapshot.planningAssessment, draft.plan);
     if (draft.planHash !== snapshot.approval.planHash || canonicalHash(draft.plan) !== snapshot.approval.planHash) throw new Error("批准草案哈希校验失败");
@@ -662,6 +669,7 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
         const source = snapshot.messages.find((message) => message.messageId === messageId && message.role === "user");
         if (!source) throw new PlannerReplyValidationError("planner_readiness_invalid", "Mock 规划缺少当前用户消息来源");
         result = { ...result, planningAssessment: {
+          schemaVersion: 2,
           profile: "general",
           classification: { rationale: "Mock 场景使用通用规划类型", sourceMessageId: messageId, quote: source.content.slice(0, 256) },
           decisions: [],
@@ -683,6 +691,8 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
         ...(snapshot.planningAssessment ? { previous: snapshot.planningAssessment } : {}),
         currentMessageIds,
         confirmationState,
+        // Mock fixtures and old offline demos intentionally keep the v1 assessment shape.
+        requireCurrentSchema: planner.id !== "mock",
       });
       result = { ...result, planningAssessment: assessment };
       if (result.kind === "clarification") {

@@ -21,7 +21,7 @@ const remoteMcp = new RemoteMcpConnection(service, dataDirectory);
 await remoteMcp.initialize();
 const server = await createLocalServer(service, { port, host, dataDirectory, remoteMcp });
 const stdio = process.argv.includes("--mcp-stdio");
-server.listen(port, host, () => (stdio ? process.stderr : process.stdout).write(`Token Coupon 本机控制台已启动：http://${host.includes(":") ? `[${host}]` : host}:${port}\nMCP HTTP 入口：/mcp（独立 Bearer 认证）。按 Ctrl+C 停止 daemon。\n`));
+server.listen(port, host, () => (stdio ? process.stderr : process.stdout).write(`Token Coupon 本机控制台已启动：http://${host.includes(":") ? `[${host}]` : host}:${port}\nMCP HTTP 入口：/mcp（独立 Bearer 认证）。按 Ctrl+C 停止业务后端，常驻快捷隧道保留；彻底断开请先在连接中心停止连接。\n`));
 if (stdio) await createMcpServer(service).connect(new StdioServerTransport());
 server.on("error", (error) => {
   process.stderr.write(`daemon 启动失败：${error.message}\n`);

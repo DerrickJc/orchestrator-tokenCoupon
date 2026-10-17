@@ -20,6 +20,17 @@ function proposal(): ConversationMessage {
 }
 
 describe("default authorization follows persisted conversation context", () => {
+  it("requires the new technology gate only for new existing-project assessments, preserving unrelated protocol compatibility", () => {
+    const input = { messages: [{ messageId: "request", role: "user" as const, content: "维护现有项目" }], requirements: { revision: 0, items: [], messageDecisions: [] }, evidence: [], currentMessageIds: ["request"], requireCurrentSchema: true };
+    const legacy: PlanningAssessment = { profile: "existing_project", classification: { rationale: "维护项目", sourceMessageId: "request", quote: "维护现有项目" }, decisions: (["change_scope", "compatibility", "testing", "validation"] as const).map(decisionId => ({ decisionId, value: "待确认", status: "pending", rationale: "需要用户确认", question: "请确认本项" })) };
+    expect(() => validatePlanningAssessment(legacy, input)).toThrow("schemaVersion=2");
+    expect(() => validatePlanningAssessment({ ...legacy, schemaVersion: 2 }, input)).toThrow("technology_selection");
+    const current = validatePlanningAssessment({ ...legacy, schemaVersion: 2, decisions: [...legacy.decisions, { decisionId: "technology_selection", value: "数据库选型待确认", status: "pending", rationale: "尚无授权或权威来源", question: "是否授权选择数据库？" }] }, input);
+    expect(current.decisions.find(item => item.decisionId === "technology_selection")?.status).toBe("pending");
+    expect(() => assertPlanningReady(current, { schemaVersion: 1, id: "pending", title: "Pending", tasks: [] })).toThrow();
+    expect(validatePlanningAssessment({ profile: "general", classification: legacy.classification, decisions: [] }, input).schemaVersion).toBeUndefined();
+  });
+
   it("identifies the exact decision and index when a required field is missing", () => {
     const reply = assessment("全部由你决定");
     const { rationale: _rationale, ...missing } = reply.decisions[3]!;

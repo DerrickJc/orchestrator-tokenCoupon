@@ -6,7 +6,7 @@ import {
   initializePlannerConversation, prepareExternalPlannerInput, prepareExternalReviewInput,
   reviewPlannerDraft, submitExternalPlannerReply, verifyRepositoryEvidence,
 } from "@token-coupon/core";
-import type { ExecutionConfig, ExternalPlannerPreparation, PlanReviewInput, RepositoryEvidence } from "@token-coupon/core";
+import type { ExecutionConfig, ExternalPlannerPreparation, PlanReviewInput, RepositoryEvidence, PlannerConversationSnapshot } from "@token-coupon/core";
 import { WebHandoffCoordinator } from "./web-handoff.js";
 import type { ClaimProof, WebActor, WebSource } from "./web-handoff.js";
 import type { ApplicationService, JobRecord } from "./application-service.js";
@@ -27,6 +27,7 @@ function formatBudget(value: number): string { return value >= 1024 * 1024 ? `${
 export interface PrepareExternalInput {
   role: "plan" | "review"; planningId?: string; message?: string; model?: string;
   executionDefaults?: ExecutionConfig; retry?: boolean; operation?: boolean; coordinated?: boolean; target?: WebSource; reusePending?: boolean;
+  sourcePlanning?: PlannerConversationSnapshot["sourcePlanning"];
 }
 
 /** Persisted bridge operations; no model call, browser scraping, or waiting domain lock. */
@@ -53,7 +54,7 @@ export class ExternalPlanningService {
       if (!planningId) {
         if (input.role !== "plan" || !input.message || !input.executionDefaults) throw new Error("external_input_invalid：新规划需要需求和执行配置");
         planningId = (await initializePlannerConversation({ workspace: workspace.path, request: input.message,
-          config: { provider: input.coordinated ? "web-mcp" : "chatgpt-mcp", model: input.model || "web-selected-unknown", baseUrl: input.coordinated ? "mcp://web" : "mcp://chatgpt" }, executionDefaults: input.executionDefaults })).planningId;
+          config: { provider: input.coordinated ? "web-mcp" : "chatgpt-mcp", model: input.model || "web-selected-unknown", baseUrl: input.coordinated ? "mcp://web" : "mcp://chatgpt" }, executionDefaults: input.executionDefaults, ...(input.sourcePlanning ? { sourcePlanning: input.sourcePlanning } : {}) })).planningId;
       }
       const id = planningId;
       return this.handoffs.serial(workspaceId, id, input.role, async () => {

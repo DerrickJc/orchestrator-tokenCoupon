@@ -5,6 +5,7 @@ export type StopReason = "timed_out" | "cancelled" | null;
 
 export interface VerdictInput {
   markerSeen: boolean;
+  needsInputSeen?: boolean;
   process: RunnerResult;
   stopReason: StopReason;
   recordingFailed: boolean;
@@ -96,6 +97,22 @@ export function determineVerdict(input: VerdictInput): Verdict {
       status: "failed",
       reasonCode: "process_exit_nonzero",
       reason: `Runner 退出码为 ${input.process.exitCode ?? "未知"}`,
+    };
+  }
+
+  if (input.markerSeen && input.needsInputSeen) {
+    return {
+      status: "failed",
+      reasonCode: "conflicting_completion_outcome",
+      reason: "Runner 同时报告完成与等待用户决策，无法确定本次结果",
+    };
+  }
+
+  if (input.needsInputSeen) {
+    return {
+      status: "needs_input",
+      reasonCode: "user_input_required",
+      reason: "任务已按要求停止，等待用户补充决策或材料",
     };
   }
 

@@ -20,7 +20,7 @@ export async function readAttemptInfo(workspace: string, attemptId: string) {
   if ((await lstat(path)).size > 256 * 1024) throw new Error("attempt_record_invalid");
   const value = JSON.parse(await readFile(path, "utf8"));
   if (value.attemptId !== attemptId) throw new Error("attempt_record_invalid");
-  const { status, runnerId, execution, reportedModel, startedAt, finishedAt, lastActivityAt, reasonCode, reason, exitCode } = value;
+  const { status, runnerId, execution, reportedModel, startedAt, finishedAt, lastActivityAt, reasonCode, reason, exitCode, nativeOutcome, nativeError, cleanupStatus } = value;
   let activity: string | undefined, lastReply: string | undefined, latestAt = lastActivityAt;
   let partial = "", partialId = "", semantic = false;
   const summary = (text: string) => text.replace(/<<<TOKEN_COUPON_DONE:[^>]+>>>/g, "").trim().slice(0, 360);
@@ -50,7 +50,53 @@ export async function readAttemptInfo(workspace: string, attemptId: string) {
       }
     } catch { /* A partial tail line does not invalidate the Attempt snapshot. */ }
   } finally { await log.close(); }
-  return { attemptId, status, runnerId, execution, reportedModel, startedAt, finishedAt, lastActivityAt: latestAt, reasonCode, reason, exitCode, activity, lastReply };
+  return { attemptId, status, runnerId, execution, reportedModel, startedAt, finishedAt, lastActivityAt: latestAt, reasonCode, reason, exitCode, nativeOutcome, nativeError, cleanupStatus, activity, lastReply };
+}
+
+/** Bounded, tail-biased evidence for an explicitly requested failure diagnosis. */
+export async function readAttemptDiagnosticEvidence(workspace: string, attemptId: string, maxBytes = 48 * 1024) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > 96 * 1024) throw new Error("diagnostic_budget_invalid");
+  const path = join(await attemptDirectory(workspace, attemptId), "events.jsonl");
+  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const info = await file.stat();
+    const tailBytes = Math.min(info.size, 128 * 1024);
+    let offset = info.size - tailBytes;
+    const bytes = Buffer.alloc(tailBytes);
+    await file.read(bytes, 0, tailBytes, offset);
+    if (offset > 0) {
+      const newline = bytes.indexOf(10);
+      if (newline < 0) return { events: [], truncated: true, bytesRead: tailBytes };
+      offset += newline + 1;
+    }
+    const lines = bytes.toString("utf8").split("\n").slice(offset > info.size - tailBytes ? 1 : 0).filter(Boolean);
+    const allowed = new Set(["message.completed", "runner.output", "runner.diagnostic", "command.completed", "tool.started", "tool.completed", "interaction.requested", "interaction.resolved"]);
+    const candidates: Array<{ timestamp?: string; type: string; summary: string }> = [];
+    let truncated = info.size > tailBytes;
+    for (const line of lines) {
+      let event: Record<string, unknown>;
+      try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      if (typeof event.type !== "string" || !allowed.has(event.type)) continue;
+      const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : {};
+      let summary = "";
+      if (event.type === "message.completed" && payload.root !== false && typeof payload.text === "string") summary = payload.text;
+      else if (event.type === "runner.output") summary = typeof payload.finalText === "string" ? payload.finalText : typeof payload.agentText === "string" ? payload.agentText : typeof payload.displayText === "string" ? payload.displayText : "";
+      else summary = [payload.code, payload.message, payload.command, payload.outputSummary, payload.summary, payload.name, payload.requestId]
+        .filter((value) => typeof value === "string").join(" · ") + (typeof payload.exitCode === "number" ? ` · exit ${payload.exitCode}` : "");
+      if (!summary) continue;
+      if (Buffer.byteLength(summary, "utf8") > 8 * 1024) { summary = summary.slice(-8 * 1024); truncated = true; }
+      candidates.push({ ...(typeof event.timestamp === "string" ? { timestamp: event.timestamp } : {}), type: event.type, summary });
+    }
+    const events: typeof candidates = [];
+    let used = 0;
+    for (const eventValue of candidates.reverse()) {
+      const size = Buffer.byteLength(JSON.stringify(eventValue), "utf8");
+      if (used + size > maxBytes) { truncated = true; continue; }
+      events.unshift(eventValue); used += size;
+      if (events.length >= 80) { truncated = true; break; }
+    }
+    return { events, truncated, bytesRead: tailBytes };
+  } finally { await file.close(); }
 }
 
 /** Byte cursors are tied to file identity and complete UTF-8 JSONL lines, not daemon's rolling tail. */

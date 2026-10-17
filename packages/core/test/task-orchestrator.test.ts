@@ -19,7 +19,7 @@ it("makes completion, failure, cancellation and blocked progress distinct", asyn
   const mixed = { ...snapshot, status: "failed" as const, tasks: snapshot.tasks.map((task, i) => ({ ...task, status: (["succeeded", "failed", "blocked"] as const)[i]! })) };
   const output = formatSession(mixed, plan);
   expect(output).toContain("执行状态：[✗ 执行失败] failed");
-  expect(output).toContain("成功 1/3；运行 0；失败 1；取消 0；受阻 1");
+  expect(output).toContain("成功 1/3；运行 0；待用户决策 0；失败 1；取消 0；受阻 1");
   expect(output).toContain("verify — verify：blocked [! 执行受阻]");
   expect(formatSession({ ...completed, status: "running" }, plan).split("\n")[0]).toBe("执行状态：[运行中] running");
   expect(formatSession({ ...snapshot, status: "cancelled" }, plan)).toContain("执行状态：[■ 已取消] cancelled");

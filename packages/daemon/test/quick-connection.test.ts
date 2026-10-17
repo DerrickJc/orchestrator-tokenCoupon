@@ -12,6 +12,7 @@ import { createLocalServer } from "../src/http-server.js";
 import { installCloudflared } from "../src/cloudflared-component.js";
 import { RemoteMcpConnection, type ConnectionPhase } from "../src/oauth-gateway.js";
 import { discoverQuickOrigin, QuickTunnelAdapter, type TunnelAdapter } from "../src/quick-tunnel.js";
+import { PersistentQuickTunnelAdapter } from "../src/persistent-tunnel.js";
 import { probeRemoteMcp, ProbeError, type PublicProbe } from "../src/remote-probe.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -26,7 +27,7 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: TunnelAdapter; healthIntervalMs?: number; probeImpl?: PublicProbe; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number } = {}) {
+async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: TunnelAdapter; componentExecutable?: string; healthIntervalMs?: number; probeImpl?: PublicProbe; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-quick-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const path = join(root, "project"); await mkdir(path);
@@ -56,7 +57,7 @@ async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: Tu
       return probeRemoteMcp(url, token, signal, proxyFetch);
     });
   const dependencies = {
-    component: { async get(_signal, stage) { stage("checking"); return { executable: "/fake/cloudflared", version: "cloudflared version 2026.10.0", source: "existing" as const }; } },
+    component: { async get(_signal, stage) { stage("checking"); return { executable: options.componentExecutable ?? "/fake/cloudflared", version: "cloudflared version 2026.10.0", source: "existing" as const }; } },
     tunnel, probe, retryDelaysMs: options.retryDelaysMs ?? [10], probeBudgetMs: options.probeBudgetMs ?? 45000, healthIntervalMs: options.healthIntervalMs ?? 0, startupBudgetMs: options.startupBudgetMs ?? 0, startupRetryDelayMs: options.startupRetryDelayMs ?? 5,
   } satisfies import("../src/oauth-gateway.js").ConnectionDependencies;
   const remote = new RemoteMcpConnection(service, dataDirectory, port, dependencies);
@@ -87,6 +88,66 @@ async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[
 }
 
 describe("Quick Tunnel connection", () => {
+  it("preserves a persistent tunnel while discovery is still pending during business shutdown", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc-discovery-restart-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const executable = join(root, "cloudflared-fixture");
+    await writeFile(executable, `#!${process.execPath}\nsetTimeout(()=>process.stderr.write('https://example-quick.trycloudflare.com\\n'),800);setInterval(()=>{},1000);`, { mode: 0o755 });
+    const tunnel = new PersistentQuickTunnelAdapter(5000, 50);
+    const h = await fixture({ tunnel, componentExecutable: executable }); cleanups.push(() => h.remote.stop());
+    await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId });
+    const { readTunnelRecord } = await import("../src/persistent-tunnel.js");
+    const directory = join(h.dataDirectory, "components", "tunnel-runtime");
+    await expect.poll(() => readTunnelRecord(directory)).toBeDefined();
+    const pid = (await readTunnelRecord(directory))!.pid;
+    await h.remote.shutdown();
+    const restored = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => restored.stop());
+    await restored.initialize(); await expect.poll(() => restored.status().transport, { timeout: 5000 }).toBe("ready");
+    expect((await readTunnelRecord(directory))!.pid).toBe(pid); expect(restored.status().connectionProcess?.recovered).toBe(true);
+  }, 15_000);
+
+  it("recovers a persistent gateway with the same OAuth client, access token, refresh token and real MCP calls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc-persistent-oauth-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const executable = join(root, "cloudflared-fixture");
+    await writeFile(executable, `#!${process.execPath}\nprocess.stderr.write('https://example-quick.trycloudflare.com\\n');setInterval(()=>{},1000);`, { mode: 0o755 });
+    const h = await fixture({ tunnel: new PersistentQuickTunnelAdapter(5000, 50), componentExecutable: executable });
+    cleanups.push(() => h.remote.stop());
+    await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    expect(h.remote.status().connectionProcess).toEqual({ persistent: true, recovered: false });
+    const auth = await authorize(h, ["repository:read", "planning:read"]);
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, scopes: ["repository:read", "planning:read"] });
+    const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+    const exchange = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` }) });
+    const tokens = await exchange.json() as { access_token: string; refresh_token: string }; expect(tokens.access_token).toBeTypeOf("string");
+    const grantId = h.remote.grants()[0]!.grantId;
+    await h.remote.shutdown();
+    const offline = await h.proxyFetch(`${h.origin}/mcp`); expect(offline.status).toBe(503); expect(offline.headers.get("retry-after")).toBe("2");
+    const restored = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, { ...h.dependencies, component: { async get() { throw new Error("recovery must not download components"); } } });
+    cleanups.push(() => restored.stop());
+    await restored.initialize(); await expect.poll(() => restored.status().transport, { timeout: 5000 }).toBe("ready");
+    expect(restored.status().connectionProcess).toEqual({ persistent: true, recovered: true });
+    expect(restored.status().mcpUrl).toBe(`${h.origin}/mcp`); expect(restored.status().addressChanged).toBe(false);
+    expect(restored.grants()[0]!.grantId).toBe(grantId);
+    expect(await restored.principalForToken(tokens.access_token)).toMatchObject({ workspaceId: h.workspace.workspaceId });
+    const client = new Client({ name: "restart-browser-test", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${h.origin}/mcp`), { fetch: h.proxyFetch, requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } } }) as Transport);
+    try {
+      const response = await client.callTool({ name: "workspace_query", arguments: {} }); expect(response.isError).not.toBe(true);
+      const visible = JSON.parse((response.content as Array<{ text: string }>)[0]!.text).workspaces;
+      expect(visible[0].workspaceId).toBe(h.workspace.workspaceId);
+    } finally { await client.close(); }
+    const refresh = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", client_id: auth.client.client_id, refresh_token: tokens.refresh_token, resource: `${h.origin}/mcp` }) });
+    expect(refresh.status).toBe(200);
+    const expiresAt = restored.grants()[0]!.expiresAt;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(expiresAt + 1);
+    try {
+      expect(restored.grants()).toHaveLength(0);
+      expect((await h.proxyFetch(`${h.origin}/mcp`, { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status).toBe(401);
+    } finally { clock.mockRestore(); }
+    await restored.stop(); expect(restored.grants()).toHaveLength(0);
+    const stopped = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => stopped.shutdown());
+    await stopped.initialize(); expect(stopped.status().enabled).toBe(false);
+  }, 20_000);
+
   it("retains dynamic OAuth client metadata for reauthorization and exposes only safe request history", async () => {
     const h = await fixture();
     await h.remote.startQuick({ consent: true, connectionOnly: true }); await h.waitFor("ready");

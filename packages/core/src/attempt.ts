@@ -5,6 +5,7 @@ export type AttemptStatus =
   | "created"
   | "running"
   | "succeeded"
+  | "needs_input"
   | "failed"
   | "cancelled"
   | "timed_out";
@@ -35,6 +36,8 @@ export interface AttemptRecord {
   nativeTurnId?: string;
   runnerSpec?: ResolvedRunnerSpec;
   markerSeen: boolean;
+  /** Exact Attempt-scoped marker indicating the Runner stopped for user input. */
+  needsInputSeen?: boolean;
   reasonCode: string | null;
   reason: string | null;
   artifactDir: string;

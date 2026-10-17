@@ -69,6 +69,8 @@ export class ClaudeManagedRunner implements Runner {
           ? { behavior: "allow", updatedInput: toolInput, toolUseID: options.toolUseID }
           : { behavior: "deny", message: answer.guidance ? `User denied this tool call. Follow this user guidance and reconsider the approach: ${answer.guidance}` : "User denied this tool call", interrupt: false, toolUseID: options.toolUseID };
       }
+      if (answer.kind !== "question") throw new Error("Claude 工具问题收到了不支持的交互回复");
+      if (answer.guidance) return { behavior: "deny", message: `User declined this question. Follow this user guidance: ${answer.guidance}`, interrupt: false, toolUseID: options.toolUseID };
       const answers: Record<string, string> = {};
       for (const item of answer.answers) answers[item.questionId] = item.text ?? item.optionIds?.join(", ") ?? "";
       return { behavior: "allow", updatedInput: { ...toolInput, answers }, toolUseID: options.toolUseID };

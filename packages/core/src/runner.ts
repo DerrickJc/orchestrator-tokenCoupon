@@ -7,6 +7,7 @@ export interface RunnerInput {
   execution: ExecutionConfig;
   prompt: string;
   completionMarker: string;
+  needsInputMarker?: string;
 }
 
 export interface RunnerOutput {
@@ -46,13 +47,13 @@ export type RunnerEvent =
   | { type: "message.delta" | "message.completed"; messageId?: string; text: string; root: boolean }
   | { type: "tool.started" | "tool.completed"; toolId?: string; name: string; summary?: string; exitCode?: number | null }
   | { type: "command.completed"; toolId?: string; command?: string; cwd: string; exitCode: number | null; status: "succeeded" | "failed" | "unknown"; evidenceSource: string; outputSummary?: string }
-  | { type: "runner.diagnostic"; severity: "info" | "warning" | "error"; code: string; message: string; nativeError?: RunnerNativeError; willRetry?: boolean; threadId?: string; turnId?: string }
+  | { type: "runner.diagnostic"; severity: "info" | "warning" | "error"; code: string; message: string; nativeError?: RunnerNativeError; willRetry?: boolean; threadId?: string; turnId?: string; nativeRequestId?: string; serverName?: string; mode?: string }
   | { type: "runner.native.started"; threadId: string; turnId: string; reportedModel?: string; modelProvider?: string }
   | { type: "runner.native.finished"; outcome: "completed" | "failed" | "cancelled" | "incomplete" | "unknown"; reason?: string }
   | { type: "interaction.forwarded" | "interaction.resolved"; requestId: string; evidence?: string };
 
 export interface RunnerInteractionRequest {
-  kind: "approval" | "question";
+  kind: "approval" | "question" | "elicitation";
   nativeRequestId?: string;
   title: string;
   summary: string;
@@ -69,7 +70,24 @@ export interface RunnerInteractionRequest {
     secret?: boolean;
   }>;
   decisions?: Array<"allow-once" | "deny">;
+  elicitation?: {
+    mode: "form" | "url";
+    serverName: string;
+    elicitationId?: string;
+    url?: string;
+    requestedSchema?: {
+      type: "object";
+      properties: Record<string, ElicitationFieldSchema>;
+      required?: string[];
+    };
+  };
 }
+
+export type ElicitationFieldSchema =
+  | { type: "string"; title?: string; description?: string; minLength?: number; maxLength?: number; format?: "date" | "uri" | "email" | "date-time"; default?: string; enum?: string[]; enumNames?: string[]; oneOf?: Array<{ const: string; title: string }> }
+  | { type: "number" | "integer"; title?: string; description?: string; minimum?: number; maximum?: number; default?: number }
+  | { type: "boolean"; title?: string; description?: string; default?: boolean }
+  | { type: "array"; title?: string; description?: string; minItems?: number; maxItems?: number; items: { enum: string[] } | { anyOf: Array<{ const: string; title: string }> }; default?: string[] };
 
 export interface RunnerInteractionOwner {
   attemptId: string;
@@ -80,7 +98,8 @@ export interface RunnerInteractionOwner {
 
 export type RunnerInteractionReply =
   | { kind: "approval"; decision: "allow-once" | "deny"; guidance?: string }
-  | { kind: "question"; answers: Array<{ questionId: string; optionIds?: string[]; text?: string }> };
+  | { kind: "question"; answers: Array<{ questionId: string; optionIds?: string[]; text?: string }>; guidance?: string }
+  | { kind: "elicitation"; action: "accept" | "decline" | "cancel"; content?: Record<string, string | number | boolean | string[]>; guidance?: string };
 
 export type RunnerInteractionResolution = RunnerInteractionReply & { interactionId: string };
 

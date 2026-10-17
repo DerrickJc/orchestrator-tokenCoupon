@@ -76,7 +76,7 @@ export interface SessionCleanupOptions { sessionId: string; workspace: string; }
 
 export interface SessionOperationResult {
   snapshot: SessionSnapshot;
-  operationStatus?: "succeeded" | "failed" | "cancelled" | "timed_out";
+  operationStatus?: "succeeded" | "failed" | "cancelled" | "timed_out" | "blocked";
 }
 
 export function validateMockTaskScenarios(plan: PlanDefinition, scenarios: Map<string, string>): void {
@@ -325,9 +325,10 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
     interrupted: "! 执行中断", blocked: "! 执行受阻",
   };
   const count = (status: SessionTaskStatus) => snapshot.tasks.filter((task) => task.status === status).length;
+  const waitingForUser = snapshot.tasks.filter((task) => task.status === "blocked" && task.reasonCode === "user_input_required").length;
   const lines = [
-    `执行状态：[${labels[snapshot.status]}] ${snapshot.status}`,
-    `任务进度：成功 ${count("succeeded")}/${snapshot.tasks.length}；运行 ${count("running")}；失败 ${count("failed")}；取消 ${count("cancelled")}；受阻 ${count("blocked")}；中断 ${count("interrupted")}；超时 ${count("timed_out")}；待执行 ${count("planned")}`,
+    `执行状态：[${snapshot.status === "blocked" && waitingForUser ? "等待用户决策" : labels[snapshot.status]}] ${snapshot.status}`,
+    `任务进度：成功 ${count("succeeded")}/${snapshot.tasks.length}；运行 ${count("running")}；待用户决策 ${waitingForUser}；失败 ${count("failed")}；取消 ${count("cancelled")}；受阻 ${count("blocked")}；中断 ${count("interrupted")}；超时 ${count("timed_out")}；待执行 ${count("planned")}`,
     `Session：${snapshot.sessionId}`,
     `计划：${snapshot.planId} — ${snapshot.planTitle}`,
     `状态：${snapshot.status}；revision：${snapshot.revision}`,
@@ -350,7 +351,8 @@ export function formatSession(snapshot: SessionSnapshot, plan: PlanDefinition): 
   ];
   for (const [index, entry] of plan.tasks.entries()) {
     const state = snapshot.tasks[index]!;
-    lines.push(`  ${entry.task.id} — ${entry.task.title}：${state.status} [${labels[state.status]}]`);
+    const taskLabel = state.status === "blocked" && state.reasonCode === "user_input_required" ? "等待用户决策" : state.status === "blocked" && state.reasonCode === "dependency_not_succeeded" ? "等待前置任务" : labels[state.status];
+    lines.push(`  ${entry.task.id} — ${entry.task.title}：${state.status} [${taskLabel}]`);
     lines.push(`    依赖：${entry.dependsOn.length ? entry.dependsOn.join(", ") : "无"}`);
     for (const attempt of state.attempts) {
       lines.push(`    Attempt ${attempt.attemptId}：${attempt.outcome}；${attempt.artifactDir}`);
@@ -416,7 +418,7 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
       await save(finished, sessionStatus);
     }, (activity) => persistActivity(retry.taskId, attemptId, activity), worktrees);
     const retryState = states.find((item) => item.taskId === retry.taskId);
-    return { snapshot, operationStatus: retryState?.status === "succeeded" ? "succeeded" : retryState?.status === "timed_out" ? "timed_out" : retryState?.status === "cancelled" ? "cancelled" : "failed" };
+    return { snapshot, operationStatus: retryState?.status === "succeeded" ? "succeeded" : retryState?.status === "blocked" && retryState.reasonCode === "user_input_required" ? "blocked" : retryState?.status === "timed_out" ? "timed_out" : retryState?.status === "cancelled" ? "cancelled" : "failed" };
   }
 
   if (states.length > 0 && states.every((state) => state.status === "succeeded")) {
@@ -445,6 +447,10 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
     await save(states, "succeeded");
   } else if (options.signal?.aborted && !states.some((state) => ["failed", "timed_out", "interrupted"].includes(state.status))) {
     await save(states, "cancelled");
+  } else if (states.some((state) => ["failed", "timed_out"].includes(state.status))) {
+    if (snapshot.status !== "failed") await save(states, "failed");
+  } else if (states.some((state) => state.status === "blocked" && state.reasonCode === "user_input_required")) {
+    if (snapshot.status !== "blocked") await save(states, "blocked");
   } else if (states.some((state) => ["failed", "timed_out", "blocked"].includes(state.status))) {
     if (snapshot.status !== "failed") await save(states, "failed");
   } else if (states.some((state) => state.status === "cancelled")) {
@@ -458,7 +464,7 @@ async function schedule(record: SessionRecord, store: SessionStore, options: Exe
 interface BatchAttemptOutcome {
   taskId: string;
   attemptId: string;
-  status: "succeeded" | "failed" | "cancelled" | "timed_out";
+  status: "succeeded" | "failed" | "cancelled" | "timed_out" | "blocked";
   reasonCode: string | null;
   result: TaskResult | null;
   recorded: boolean;
@@ -606,7 +612,7 @@ async function scheduleParallel(record: SessionRecord, store: SessionStore, opti
       let result = outcome.result;
       let recorded = outcome.recorded;
       if (outcome.status !== "succeeded") {
-        await worktrees.markAttempt(outcome.attemptId, outcome.status === "cancelled" ? "cancelled" : "failed", { reasonCode: reasonCode ?? "runner_failed" }).catch(() => undefined);
+        await worktrees.markAttempt(outcome.attemptId, outcome.status === "cancelled" ? "cancelled" : outcome.status === "blocked" ? "blocked" : "failed", { reasonCode: reasonCode ?? "runner_failed" }).catch(() => undefined);
       }
       if (outcome.status === "succeeded" && !landingBlocked) {
         try {
@@ -634,7 +640,7 @@ async function scheduleParallel(record: SessionRecord, store: SessionStore, opti
         result = null;
         await emitScheduler("task.waiting_landing", { taskId: entry.task.id, attemptId: outcome.attemptId, waveId, reasonCode });
       } else if (outcome.status !== "succeeded") {
-        await emitScheduler(outcome.status === "cancelled" ? "task.cancelled" : "task.failed", {
+        await emitScheduler(outcome.status === "blocked" ? "task.needs_input" : outcome.status === "cancelled" ? "task.cancelled" : "task.failed", {
           taskId: entry.task.id, attemptId: outcome.attemptId, waveId, ...(reasonCode ? { reasonCode } : {}),
         });
       }
@@ -665,7 +671,9 @@ async function scheduleParallel(record: SessionRecord, store: SessionStore, opti
     if (states.length > 0 && states.every((state) => state.status === "succeeded")) { status = "succeeded"; schedulerState = "idle"; }
     else if (options.signal?.aborted || cancelRequested || states.some((state) => state.status === "cancelled")) { status = "cancelled"; schedulerState = "cancelled"; }
     else if (pauseRequested) { status = "paused"; schedulerState = "paused"; }
-    else if (states.some((state) => ["failed", "timed_out", "blocked"].includes(state.status))) { status = "failed"; schedulerState = "failed"; }
+    else if (states.some((state) => ["failed", "timed_out"].includes(state.status))) { status = "failed"; schedulerState = "failed"; }
+    else if (states.some((state) => state.status === "blocked" && state.reasonCode === "user_input_required")) { status = "blocked"; schedulerState = "blocked"; }
+    else if (states.some((state) => state.status === "blocked")) { status = "failed"; schedulerState = "failed"; }
     else if (states.some((state) => state.status === "interrupted")) { status = "interrupted"; schedulerState = "blocked"; }
     else { status = "ready"; schedulerState = "idle"; }
     const acknowledgedAt = controlRequest ? new Date().toISOString() : null;
@@ -681,7 +689,7 @@ async function scheduleParallel(record: SessionRecord, store: SessionStore, opti
   }
   if (!retryTaskId) return { snapshot };
   const retryState = snapshot.tasks.find((state) => state.taskId === retryTaskId);
-  return { snapshot, operationStatus: retryState?.status === "succeeded" ? "succeeded" : retryState?.status === "timed_out" ? "timed_out" : retryState?.status === "cancelled" ? "cancelled" : "failed" };
+  return { snapshot, operationStatus: retryState?.status === "succeeded" ? "succeeded" : retryState?.status === "blocked" && retryState.reasonCode === "user_input_required" ? "blocked" : retryState?.status === "timed_out" ? "timed_out" : retryState?.status === "cancelled" ? "cancelled" : "failed" };
 }
 
 async function executePreparedAttempt(entry: PlannedTask, attemptId: string, states: SessionTaskState[], plan: PlanDefinition, store: SessionStore, options: ExecutionOptions,
@@ -713,7 +721,7 @@ async function executePreparedAttempt(entry: PlannedTask, attemptId: string, sta
     });
     const status = result.attempt.status;
     if (status === "succeeded") return { taskId: entry.task.id, attemptId, status, reasonCode: null, result: collector.toResult(entry.task.id, attemptId, result.artifactDir), recorded: true };
-    const mapped = status === "timed_out" ? "timed_out" : status === "cancelled" ? "cancelled" : "failed";
+    const mapped = status === "needs_input" ? "blocked" : status === "timed_out" ? "timed_out" : status === "cancelled" ? "cancelled" : "failed";
     return { taskId: entry.task.id, attemptId, status: mapped, reasonCode: result.attempt.reasonCode, result: null, recorded: true };
   } catch (error) {
     if (error instanceof SessionLockError) throw error;
@@ -733,7 +741,7 @@ function schedulerStateFor(status: SessionSnapshot["status"]): NonNullable<Sessi
 }
 
 async function runOne(entry: PlannedTask, attemptId: string, states: SessionTaskState[], plan: PlanDefinition, store: SessionStore, options: ExecutionOptions,
-  finish: (status: "succeeded" | "failed" | "cancelled" | "timed_out", reasonCode: string | null, result: TaskResult | null, recorded: boolean) => Promise<void>,
+  finish: (status: "succeeded" | "failed" | "cancelled" | "timed_out" | "blocked", reasonCode: string | null, result: TaskResult | null, recorded: boolean) => Promise<void>,
   persistActivity: (state: { idle: boolean; idleSince: string | null; lastActivityAt: string }) => Promise<void>,
   worktrees?: WorktreeIsolation,
 ): Promise<void> {
@@ -808,8 +816,8 @@ async function runOne(entry: PlannedTask, attemptId: string, states: SessionTask
     }
     await finish("succeeded", null, handoff, true);
   } else {
-    const mapped = status === "timed_out" ? "timed_out" : status === "cancelled" ? "cancelled" : "failed";
-    if (worktrees) await worktrees.markAttempt(attemptId, "failed", { reasonCode: result.attempt.reasonCode ?? "runner_failed" }).catch(() => undefined);
+    const mapped = status === "needs_input" ? "blocked" : status === "timed_out" ? "timed_out" : status === "cancelled" ? "cancelled" : "failed";
+    if (worktrees) await worktrees.markAttempt(attemptId, status === "needs_input" ? "blocked" : "failed", { reasonCode: result.attempt.reasonCode ?? "runner_failed" }).catch(() => undefined);
     await finish(mapped, result.attempt.reasonCode, null, true);
   }
 }

@@ -7,7 +7,7 @@ import { PlannerReplyValidationError } from "./planner-reply.js";
 import { validateRequirementsState } from "./requirements.js";
 import { decisionValueHash } from "./plan.js";
 
-import { REQUIRED_DECISIONS, PLANNING_DECISION_IDS, PLANNING_STATUSES } from "./planning-protocol.js";
+import { REQUIRED_DECISIONS, PLANNING_DECISION_IDS, PLANNING_STATUSES, requiredPlanningDecisions } from "./planning-protocol.js";
 export { REQUIRED_DECISIONS } from "./planning-protocol.js";
 
 const DECISION_IDS = new Set<PlanningDecisionId>(PLANNING_DECISION_IDS);
@@ -34,7 +34,8 @@ function text(value: unknown, label: string, maxBytes = 4096): string {
 
 export function parsePlanningAssessment(value: unknown): PlanningAssessment {
   const raw = object(value, "planningAssessment");
-  exactKeys(raw, ["profile", "classification", "decisions"], "planningAssessment");
+  exactKeys(raw, ["schemaVersion", "profile", "classification", "decisions"], "planningAssessment");
+  if (raw.schemaVersion !== undefined && raw.schemaVersion !== 2) invalid("planningAssessment.schemaVersion 只能是 2");
   if (!PROFILES.has(raw.profile as PlanningProfile) || !Array.isArray(raw.decisions) || raw.decisions.length > 32) invalid("planningAssessment 的 profile 或 decisions 无效");
   const classification = object(raw.classification, "planningAssessment.classification");
   exactKeys(classification, ["rationale", "sourceMessageId", "quote"], "planningAssessment.classification");
@@ -84,7 +85,7 @@ export function parsePlanningAssessment(value: unknown): PlanningAssessment {
     return { decisionId: id, value: valueText, status, rationale,
       question: fieldText(decision.question, "question") };
   });
-  return { profile: raw.profile as PlanningProfile, classification: parsedClassification, decisions };
+  return { ...(raw.schemaVersion === 2 ? { schemaVersion: 2 as const } : {}), profile: raw.profile as PlanningProfile, classification: parsedClassification, decisions };
 }
 
 export function validatePlanningAssessment(
@@ -96,9 +97,11 @@ export function validatePlanningAssessment(
     previous?: PlanningAssessment;
     currentMessageIds: string[];
     confirmationState?: ConfirmationState;
+    requireCurrentSchema?: boolean;
   },
 ): PlanningAssessment {
   const assessment = parsePlanningAssessment(value);
+  if (input.requireCurrentSchema && assessment.profile === "existing_project" && assessment.schemaVersion !== 2) invalid("现有项目的新规划必须使用 planningAssessment.schemaVersion=2；请补齐 technology_selection 决策，不能沿用旧版清单");
   const messages = new Map(input.messages.filter(({ role }) => role === "user").map((message) => [message.messageId, message.content]));
   const classMessage = messages.get(assessment.classification.sourceMessageId);
   if (!classMessage || !classMessage.includes(assessment.classification.quote)) invalid("规划类型的依据未引用真实用户输入");
@@ -134,7 +137,7 @@ export function validatePlanningAssessment(
     }
   }
   const decisions = new Set(assessment.decisions.map(({ decisionId }) => decisionId));
-  const missing = REQUIRED_DECISIONS[assessment.profile].filter((id) => !decisions.has(id));
+  const missing = requiredPlanningDecisions(assessment.profile, assessment.schemaVersion).filter((id) => !decisions.has(id));
   if (missing.length) invalid("规划决策清单缺少必需项：" + missing.join(", "));
   return assessment;
 }
@@ -168,7 +171,7 @@ export function assertPlanningReady(assessment: PlanningAssessment | undefined, 
     return;
   }
   const text = [plan.title, ...plan.tasks.flatMap(({ task }) => [task.title, task.prompt])].join("\n").toLocaleLowerCase();
-  const missingValues = REQUIRED_DECISIONS[assessment.profile].map((id) => assessment.decisions.find((item) => item.decisionId === id)!)
+  const missingValues = requiredPlanningDecisions(assessment.profile, assessment.schemaVersion).map((id) => assessment.decisions.find((item) => item.decisionId === id)!)
     .filter(({ value }) => !text.includes(value.toLocaleLowerCase()));
   if (missingValues.length) invalid("草案没有落实以下已确认决策，请修订草案：" + missingValues.map(({ decisionId }) => decisionId).join(", ") +
     "；请在最终验证 task.prompt 的独立‘执行约束’段落中逐字列出每项 planningAssessment.decisions 的完整 value，不改写或省略，不把正文写成 JSON 字符串");
@@ -207,7 +210,7 @@ export function syncPlanningDecisionRequirements(
   messages: ConversationMessage[],
 ): RequirementsState {
   const items = state.items.map((item) => ({ ...item, sourceMessageIds: [...item.sourceMessageIds] }));
-  const required = new Set(REQUIRED_DECISIONS[assessment.profile]);
+  const required = new Set(requiredPlanningDecisions(assessment.profile, assessment.schemaVersion));
   const decisionItems = new Set([...state.items, ...previous.items]
     .map(({ requirementId }) => requirementId)
     .filter((requirementId) => requirementId.startsWith("R-decision-")));

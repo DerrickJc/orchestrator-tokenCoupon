@@ -113,7 +113,10 @@ export async function reviewPlannerDraft(options: {
       const reviewer = options.reviewer ?? createPlanReviewer(snapshot.config);
       const raw = await reviewer.review(input, context);
       if (timed.signal.aborted) throw timed.signal.reason ?? new Error("审查已取消");
-      const parsed = parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview);
+      const parsed = ensureTechnologySelectionFinding(
+        parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview),
+        snapshot.planningAssessment,
+      );
       const evidence = mergeEvidence(draft.context, reader.getEvidence());
       const changed = await verifyRepositoryEvidence(plannerStore.workspace, evidence, timed.signal);
       if (changed.length) throw new Error("workspace_changed：审查期间依据文件发生变化：" + changed.join(", "));
@@ -213,8 +216,29 @@ export function requirementsHash(snapshot: PlannerConversationSnapshot): string 
 }
 
 export function reviewerConfigHash(config: PlannerConfig, planSchemaVersion: 1 | 2 = 1, hasStructuredAssessment = true): string {
-  const reviewPromptVersion = planSchemaVersion === 2 ? 7 : hasStructuredAssessment ? 6 : 5;
+  const reviewPromptVersion = planSchemaVersion === 2 ? 8 : hasStructuredAssessment ? 7 : 6;
   return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion });
+}
+
+function ensureTechnologySelectionFinding(
+  reply: { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] },
+  assessment: PlannerConversationSnapshot["planningAssessment"],
+) {
+  if (assessment?.profile !== "existing_project" || assessment.schemaVersion === 2) return reply;
+  if (reply.findings.length >= 100) throw new Error("review_findings_limit：缺少技术选型依据的系统门禁无法加入审查报告");
+  const gateSummary = "系统门禁：此 existing_project 规划沿用旧版 assessment，未结构化记录 technology_selection。即使草案增加‘先核验、缺失则暂停’任务，也不能视为具体技术选择已确认；需重新规划并完成决策审查。";
+  let summary = reply.summary;
+  while (Buffer.byteLength(summary + "\n\n" + gateSummary, "utf8") > 16 * 1024) summary = summary.slice(0, -1);
+  return {
+    ...reply,
+    summary: `${summary}\n\n${gateSummary}`,
+    findings: [...reply.findings, {
+      findingId: "SYS-TECH-SELECTION", severity: "error" as const, category: "technology" as const, taskIds: [], requirementIds: [],
+      description: "缺少高影响技术选型的结构化授权或权威依据。新增核验门禁只定义了发现缺项后的处理方式，没有确认数据库、异步设施、检索实现及适用依赖版本。",
+      basis: "程序检查发现 existing_project planningAssessment 未使用 schemaVersion 2，因而没有有效的 technology_selection 决策记录。",
+      suggestion: "补充具体技术选择及其来源，或记录用户在明确范围内的选择授权；重新生成草案、复审后再批准。旧版批准入口也会被执行门禁拒绝。",
+    }],
+  };
 }
 
 function parseReviewReply(value: unknown, knownTaskIds: string[], knownRequirementIds: string[], previous?: PlanReviewRecord): { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] } {

@@ -5,7 +5,7 @@ import type { TaskDefinition } from "../src/task.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeTask } from "../src/execute-task.js";
+import { executeTask, validateRunnerInteractionReply } from "../src/execute-task.js";
 
 const task: TaskDefinition = {
   schemaVersion: 1, id: "codex-task", title: "Codex interaction fixture", prompt: "Complete a tiny task",
@@ -164,6 +164,115 @@ describe("CodexRunner app-server transport", () => {
       expect(events).toContain('"reason":"attempt_cancelled"');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
+
+  it("routes a typed MCP form through the local interaction owner and validates the accepted content", async () => {
+    const params = { threadId: "thread-1", turnId: "turn-1", serverName: "school-planner", mode: "form", message: "选择项目设置", requestedSchema: {
+      type: "object", properties: {
+        language: { type: "string", title: "语言", enum: ["java", "node"], enumNames: ["Java", "Node.js"] },
+        workers: { type: "integer", title: "并发数", minimum: 1, maximum: 4, default: 2 },
+        enabled: { type: "boolean", title: "启用", default: true },
+        scopes: { type: "array", title: "权限", items: { anyOf: [{ const: "read", title: "读取" }, { const: "write", title: "写入" }] }, minItems: 1 },
+      }, required: ["language", "workers", "enabled", "scopes"],
+    } };
+    const requests: RunnerInteractionRequest[] = [], events: RunnerEvent[] = [];
+    const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer(params, { action: "accept", content: { language: "node", workers: 3, enabled: true, scopes: ["read", "write"] } })] });
+    const result = await runner.run({ attemptId: "elicitation-form", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {}, async recordEvent(event) { events.push(event); },
+      async requestInteraction(request) {
+        requests.push(request);
+        return { kind: "elicitation", action: "accept", content: { language: "node", workers: 3, enabled: true, scopes: ["read", "write"] }, interactionId: "form-interaction" };
+      },
+    });
+    expect(result).toMatchObject({ nativeOutcome: "completed", cleanupStatus: "completed", exitCode: 0 });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ kind: "elicitation", elicitation: { mode: "form", serverName: "school-planner", requestedSchema: { required: ["language", "workers", "enabled", "scopes"] } } });
+    expect(events).toContainEqual(expect.objectContaining({ type: "interaction.resolved", requestId: "form-interaction", evidence: "codex_mcp_elicitation_accept" }));
+    expect(() => validateRunnerInteractionReply(requests[0]!, { kind: "elicitation", action: "accept", content: { language: "invalid" } })).toThrow(/未请求的字段|必填字段/);
+  });
+
+  it.each(["accept", "decline", "cancel"] as const)("routes URL elicitation user action %s without failing the Codex turn", async (action) => {
+    const params = { threadId: "thread-1", serverName: "school-planner", mode: "url", message: "完成网页登录授权", elicitationId: "opaque-flow-id", url: "https://login.example.test/authorize?code=private-code" };
+    const requests: RunnerInteractionRequest[] = [];
+    const expected = { action, content: action === "accept" ? null : null };
+    const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer(params, expected)] });
+    const result = await runner.run({ attemptId: "elicitation-url", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {},
+      async requestInteraction(request) {
+        requests.push(request);
+        return { kind: "elicitation", action, interactionId: "url-interaction" };
+      },
+    });
+    expect(result).toMatchObject({ nativeOutcome: "completed", cleanupStatus: "completed", exitCode: 0 });
+    expect(requests[0]).toMatchObject({ kind: "elicitation", elicitation: { mode: "url", serverName: "school-planner", elicitationId: "opaque-flow-id", url: params.url } });
+  });
+
+  it.each([
+    { mode: "openai/form", requestedSchema: { type: "object", properties: {} } },
+    { mode: "form", requestedSchema: { type: "object", properties: { nested: { type: "object", properties: {} } } } },
+    { mode: "url", url: "http://login.example.test/authorize", elicitationId: "flow" },
+  ])("safely declines unsupported elicitation payloads and allows the native turn to continue", async (patch) => {
+    const params = { threadId: "thread-1", serverName: "untrusted-mcp", message: "continue", mode: "form", requestedSchema: { type: "object", properties: {} }, ...patch };
+    const events: RunnerEvent[] = [];
+    const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer(params, { action: "decline", content: null })] });
+    const result = await runner.run({ attemptId: "elicitation-unsupported", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {}, async recordEvent(event) { events.push(event); },
+      async requestInteraction() { throw new Error("unsupported elicitation must not open a UI prompt"); },
+    });
+    expect(result).toMatchObject({ nativeOutcome: "completed", cleanupStatus: "completed", exitCode: 0 });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "runner.diagnostic", severity: "warning", code: "codex_elicitation_unsupported",
+      nativeRequestId: "native-elicitation", serverName: "untrusted-mcp",
+    }));
+  });
+
+  it("does not persist URL query credentials or accepted elicitation form values", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "codex-elicitation-private-"));
+    try {
+      const params = { threadId: "thread-1", serverName: "private-mcp", mode: "form", message: "Enter project token", requestedSchema: {
+        type: "object", properties: { token: { type: "string", title: "Token", default: "default-private-token" } }, required: ["token"],
+      } };
+      const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer(params, { action: "accept", content: { token: "submitted-private-token" } })] });
+      const result = await executeTask({ task, cwd, runner, onInteraction: async () => ({ kind: "elicitation", action: "accept", content: { token: "submitted-private-token" } }) });
+      expect(result.attempt.status).toBe("succeeded");
+      const requestPath = join(result.artifactDir, "interactions");
+      const { readdir } = await import("node:fs/promises");
+      const requestName = (await readdir(requestPath)).find((name) => name.endsWith(".json") && !name.includes("responses"))!;
+      const responseDirectory = join(requestPath, "responses");
+      const responseName = (await readdir(responseDirectory))[0]!;
+      const stored = (await readFile(join(requestPath, requestName), "utf8")) + (await readFile(join(responseDirectory, responseName), "utf8"));
+      expect(stored).not.toContain("default-private-token");
+      expect(stored).not.toContain("submitted-private-token");
+      expect(stored).toContain("contentSha256");
+
+      const urlParams = { threadId: "thread-1", serverName: "private-mcp", mode: "url", message: "Complete OAuth", elicitationId: "private-flow", url: "https://login.example.test/authorize?code=private-url-code" };
+      const urlRunner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer(urlParams, { action: "accept", content: null })] });
+      const urlResult = await executeTask({ task, cwd, runner: urlRunner, onInteraction: async () => ({ kind: "elicitation", action: "accept", interactionId: "url" }) });
+      const urlInteractionDirectory = join(urlResult.artifactDir, "interactions");
+      const urlRequestName = (await readdir(urlInteractionDirectory)).find((name) => name.endsWith(".json") && !name.includes("responses"))!;
+      const urlStored = await readFile(join(urlInteractionDirectory, urlRequestName), "utf8");
+      expect(urlStored).not.toContain("private-url-code");
+      expect(urlStored).toContain("?redacted");
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it("responds cancel to a pending MCP elicitation before interrupting the Codex turn", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "codex-elicitation-cancel-"));
+    try {
+      const controller = new AbortController();
+      const params = { threadId: "thread-1", serverName: "school-planner", mode: "url", message: "Complete login", elicitationId: "flow", url: "https://login.example.test/" };
+      const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer(params, { action: "cancel", content: null }, true)] });
+      const result = await executeTask({ task, cwd, runner, signal: controller.signal, onInteraction: async (_id, request) => {
+        expect(request.kind).toBe("elicitation");
+        setTimeout(() => controller.abort(), 25);
+        return new Promise(() => undefined);
+      } });
+      expect(result.attempt).toMatchObject({ status: "cancelled", reasonCode: "user_cancelled", nativeOutcome: "cancelled" });
+      const events = await readFile(join(result.artifactDir, "events.jsonl"), "utf8");
+      expect(events).toContain('"reason":"attempt_cancelled"');
+      expect(events).toContain('"code":"codex_elicitation_cancelled"');
+      expect(JSON.parse(await readFile(join(cwd, "elicitation-reply.json"), "utf8"))).toMatchObject({ action: "cancel", content: null });
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
 });
 
 function lifecycleServer(scenario: "failed" | "retry" | "question"): string {
@@ -190,7 +299,7 @@ rl.on('line',line=>{
 });rl.on('close',()=>process.exit());`;
 }
 
-function fakeServerScript(approvalMode: "once" | "broad" | "suggestion" = "once"): string {
+function fakeServerScript(approvalMode: "once" | "broad" | "suggestion" = "once", expectedQuestionAnswer = "TypeScript"): string {
   return String.raw`
 const rl=require('node:readline').createInterface({input:process.stdin});
 const send=(m)=>process.stdout.write(JSON.stringify(m)+'\n');
@@ -204,7 +313,7 @@ rl.on('line',(line)=>{let m;try{m=JSON.parse(line)}catch{return}
     return;
   }
   if(m.id==='question-1'){
-    if(m.result?.answers?.language?.answers?.[0]!=='TypeScript')process.exitCode=31;
+    if(m.result?.answers?.language?.answers?.[0]!==${JSON.stringify(expectedQuestionAnswer)})process.exitCode=31;
     send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'thread-1',turnId:'turn-1',completedAtMs:1,item:{id:'question-item',type:'dynamicToolCall',name:'request_user_input'}}});
     setTimeout(()=>send({jsonrpc:'2.0',id:'approval-1',method:'item/commandExecution/requestApproval',params:{itemId:'command-item',threadId:'thread-1',turnId:'turn-1',startedAtMs:1,command:'node --test',cwd:'${process.cwd()}',reason:'Run tests',additionalPermissions:${approvalMode === "broad" ? "{fileSystem:{write:['/tmp']}}" : "null"},proposedExecpolicyAmendment:${approvalMode === "suggestion" ? "['node','--test']" : "null"},proposedNetworkPolicyAmendments:null}}),5);
     return;
@@ -247,6 +356,34 @@ rl.on('close',()=>process.exit());
 `;
 }
 
+function elicitationServer(params: Record<string, unknown>, expectedResult: Record<string, unknown>, recordResponse = false, guidance?: string): string {
+  return [
+    "const rl=require('node:readline').createInterface({input:process.stdin});",
+    "const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');",
+    "const params=" + JSON.stringify(params) + ";",
+    "const expected=" + JSON.stringify(expectedResult) + ";",
+    "let marker='marker', turns=0;",
+    "rl.on('line',line=>{const m=JSON.parse(line);",
+    "if(m.method==='initialize')send({id:m.id,result:{}});",
+    "if(m.method==='thread/start')send({id:m.id,result:{thread:{id:'elicitation-thread'}}});",
+    "if(m.method==='turn/start'){",
+    "send({id:m.id,result:{turn:{id:'elicitation-turn'}}});",
+    "const input=(m.params.input||[]).map(x=>x.text||'').join('\\n');",
+    "const found=input.match(/<<<TOKEN_COUPON_DONE:[a-f0-9]+>>>/);if(found)marker=found[0];",
+    ...(guidance ? ["if(++turns>1){if(!input.includes("+JSON.stringify(guidance)+"))process.exitCode=52;send({method:'item/agentMessage/delta',params:{itemId:'guidance-result',delta:marker+'\\n'}});send({method:'turn/completed',params:{turn:{id:'elicitation-turn',status:'completed'}}});return;}"] : []),
+    "setTimeout(()=>send({id:'native-elicitation',method:'mcpServer/elicitation/request',params}),5);return;",
+    "}",
+    "if(m.id==='native-elicitation'){",
+    "if(JSON.stringify(m.result)!==JSON.stringify(expected))process.exitCode=51;",
+    ...(recordResponse ? ["require('node:fs').writeFileSync('elicitation-reply.json',JSON.stringify(m.result));"] : []),
+    "send({method:'item/agentMessage/delta',params:{itemId:'elicitation-answer',delta:marker+'\\n'}});",
+    "send({method:'turn/completed',params:{turn:{id:'elicitation-turn',status:'completed'}}});return;",
+    "}",
+    "if(m.method==='turn/interrupt'){send({id:m.id,result:{}});send({method:'turn/completed',params:{turn:{id:'elicitation-turn',status:'interrupted'}}});}",
+    "});rl.on('close',()=>process.exit());",
+  ].join("\n");
+}
+
 function asyncQuestionServer(mode: "completed" | "active"): string {
   return String.raw`
 const rl=require('node:readline').createInterface({input:process.stdin});
@@ -273,3 +410,36 @@ rl.on('line',line=>{
  }
 });rl.on('close',()=>process.exit());`;
 }
+
+
+it("declines MCP elicitation then forwards NO guidance through a follow-up turn in the same Attempt", async () => {
+  const guidance = "不要打开网页；使用已有本地资料继续";
+  const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", elicitationServer({ serverName: "docs", mode: "form", message: "填写数据", requestedSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } }, { action: "decline", content: null }, false, guidance)] });
+  let requests = 0;
+  const result = await runner.run({ attemptId: "elicitation-no", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+    signal: new AbortController().signal, onStarted() {}, onOutput() {}, async recordEvent() {},
+    async requestInteraction() { requests++; return { kind: "elicitation", action: "decline", guidance, interactionId: "no-guidance" }; },
+  });
+  expect(requests).toBe(1); expect(result.nativeOutcome).toBe("completed"); expect(result.exitCode).toBe(0);
+});
+
+it("validates refusal guidance independently of form answers and rejects accidental acceptance", () => {
+  const request: any = { kind: "elicitation", title: "form", elicitation: { mode: "form", serverName: "docs", requestedSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } } };
+  expect(validateRunnerInteractionReply(request, { kind: "elicitation", action: "decline", guidance: "使用本地文件" })).toEqual({ kind: "elicitation", action: "decline", guidance: "使用本地文件" });
+  expect(() => validateRunnerInteractionReply(request, { kind: "elicitation", action: "accept", content: { name: "yes" }, guidance: "no" })).toThrow(/只有拒绝/);
+  expect(() => validateRunnerInteractionReply(request, { kind: "elicitation", action: "decline", guidance: " " })).toThrow(/指导无效/);
+  const question: any = { kind: "question", title: "choose", questions: [{ id: "q", text: "选一个", options: [{ id: "a", label: "A" }], allowFreeText: false }] };
+  expect(validateRunnerInteractionReply(question, { kind: "question", answers: [], guidance: "以上都不采用" })).toEqual({ kind: "question", answers: [], guidance: "以上都不采用" });
+  expect(() => validateRunnerInteractionReply(question, { kind: "question", answers: [{ questionId: "q", optionIds: ["a"] }], guidance: "no" })).toThrow(/不能同时/);
+});
+
+
+it("routes NO guidance for a native question as user instructions rather than a selected option", async () => {
+  const guidance = "不要创建新接口；先修复现有实现";
+  const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", fakeServerScript("once", `用户拒绝当前方案，请调整：${guidance}`)] });
+  const result = await runner.run({ attemptId: "native-question-no", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+    signal: new AbortController().signal, onStarted() {}, onOutput() {}, async recordEvent() {},
+    async requestInteraction(request) { return request.kind === "question" ? { kind: "question", answers: [], guidance, interactionId: "question-no" } : { kind: "approval", decision: "allow-once", interactionId: "next-tool" }; },
+  });
+  expect(result).toMatchObject({ nativeOutcome: "completed", exitCode: 0, cleanupStatus: "completed" });
+});

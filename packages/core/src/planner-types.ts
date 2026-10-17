@@ -36,6 +36,8 @@ export interface PlanningDecision {
   question?: string;
 }
 export interface PlanningAssessment {
+  /** Version 2 adds an explicit technology-selection gate for existing-project plans. */
+  schemaVersion?: 2;
   profile: PlanningProfile;
   classification: { rationale: string; sourceMessageId: string; quote: string };
   decisions: PlanningDecision[];
@@ -207,6 +209,8 @@ export interface PlannerConversationSnapshot {
   /** Optional for compatibility with Phase 3 snapshots created before review support. */
   latestReviewId?: string | null;
   execution: ExecutionReference | null;
+  /** Source of an explicitly created revision; no approval or task status is inherited. */
+  sourcePlanning?: { planningId: string; revision: number; draftRevision: number; planHash: string; sessionId?: string };
   createdAt: string;
   updatedAt: string;
 }
