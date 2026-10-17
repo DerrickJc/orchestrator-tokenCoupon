@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
+import { parseCodexElicitation } from "./codex-elicitation.js";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Runner, RunnerContext, RunnerInput, RunnerInteractionRequest, RunnerResult, RunnerNativeError } from "../runner.js";
 
@@ -38,7 +39,8 @@ export class CodexRunner implements Runner {
     }
 
     const rpc = new CodexRpcConnection(child, context);
-    const abort = () => { void rpc.interruptAndTerminate(); };
+    let pendingElicitationRequests = 0;
+    const abort = () => { if (pendingElicitationRequests === 0) void rpc.interruptAndTerminate(); };
     context.signal.addEventListener("abort", abort, { once: true });
     if (context.signal.aborted) abort();
     let started = false;
@@ -64,6 +66,51 @@ export class CodexRunner implements Runner {
       const params = isObject(message.params) ? message.params : {};
       if (typeof method !== "string" || (typeof id !== "string" && typeof id !== "number")) throw new Error("Codex app-server 发来格式无效的服务端请求");
       const nativeId = String(id);
+      if (method === "mcpServer/elicitation/request") {
+        const parsed = parseCodexElicitation(params, nativeId);
+        if (!parsed.supported) {
+          await context.recordEvent?.({
+            type: "runner.diagnostic", severity: "warning", code: "codex_elicitation_unsupported",
+            message: "已安全拒绝 Codex MCP elicitation：" + parsed.reason,
+            nativeRequestId: nativeId, serverName: redactInline(parsed.serverName), mode: redactInline(parsed.mode),
+          });
+          await rpc.respond(id, { action: "decline", content: null });
+          return;
+        }
+        await context.recordEvent?.({
+          type: "runner.diagnostic", severity: "info", code: "codex_elicitation_requested",
+          message: "Codex MCP 请求用户完成 " + parsed.mode + " 交互",
+          nativeRequestId: nativeId, serverName: redactInline(parsed.serverName), mode: parsed.mode,
+        });
+        pendingElicitationRequests++;
+        try {
+          let answer;
+          try { answer = await context.requestInteraction!(parsed.request, context.signal); }
+          catch (error) {
+            if (!context.signal.aborted) throw error;
+            await rpc.respond(id, { action: "cancel", content: null }).catch(() => undefined);
+            await context.recordEvent?.({
+              type: "runner.diagnostic", severity: "info", code: "codex_elicitation_cancelled",
+              message: "Attempt 取消时已关闭待处理的 MCP elicitation",
+              nativeRequestId: nativeId, serverName: redactInline(parsed.serverName), mode: parsed.mode,
+            }).catch(() => undefined);
+            return;
+          }
+          if (answer.kind !== "elicitation") throw new Error("Codex MCP elicitation 收到了其他类型的交互回复");
+          if (context.signal.aborted) {
+            await rpc.respond(id, { action: "cancel", content: null }).catch(() => undefined);
+            return;
+          }
+          await context.recordEvent?.({ type: "interaction.forwarded", requestId: answer.interactionId, evidence: "codex-app-server-mcp-elicitation" });
+          await rpc.respond(id, { action: answer.action, content: answer.action === "accept" ? answer.content ?? null : null });
+          if (answer.guidance) followUpAnswers.push({ text: `用户拒绝了 MCP 请求，请按以下指导调整方案：\n${answer.guidance}`, interactionId: answer.interactionId });
+          await context.recordEvent?.({ type: "interaction.resolved", requestId: answer.interactionId, evidence: "codex_mcp_elicitation_" + answer.action });
+        } finally {
+          pendingElicitationRequests--;
+          if (context.signal.aborted && pendingElicitationRequests === 0) void rpc.interruptAndTerminate();
+        }
+        return;
+      }
       if (method === "item/tool/requestUserInput") {
         const request = makeCodexQuestion(params, nativeId);
         const answer = await context.requestInteraction!(request, rpc.endedSignal);
@@ -71,7 +118,8 @@ export class CodexRunner implements Runner {
         await context.recordEvent?.({ type: "interaction.forwarded", requestId: answer.interactionId, evidence: "codex-app-server-user-input" });
         const answers: Record<string, { answers: string[] }> = {};
         if (answer.kind !== "question") throw new Error("Codex 问题请求收到了审批回复");
-        for (const item of answer.answers) answers[item.questionId] = { answers: item.optionIds?.length ? item.optionIds : [item.text ?? ""] };
+        if (answer.guidance) for (const question of request.questions ?? []) answers[question.id] = { answers: [`用户拒绝当前方案，请调整：${answer.guidance}`] };
+        else for (const item of answer.answers) answers[item.questionId] = { answers: item.optionIds?.length ? item.optionIds : [item.text ?? ""] };
         pendingInteractions.set(String(params.itemId ?? nativeId), answer.interactionId);
         await rpc.respond(id, { answers });
         return;
@@ -102,6 +150,10 @@ export class CodexRunner implements Runner {
         await context.recordEvent?.({ type: "interaction.forwarded", requestId: answer.interactionId, evidence: "codex-app-server-approval" });
         pendingInteractions.set(String(params.itemId ?? nativeId), answer.interactionId);
         await rpc.respond(id, { decision: answer.decision === "allow-once" ? "accept" : "decline" });
+        if (answer.decision === "deny" && answer.guidance) followUpAnswers.push({
+          text: `用户拒绝了刚才的工具操作。请按以下用户指导调整方案，只在确有必要时重新请求审批：\n${answer.guidance}`,
+          interactionId: answer.interactionId,
+        });
         return;
       }
       if (method === "item/permissions/requestApproval") {
@@ -155,6 +207,7 @@ export class CodexRunner implements Runner {
                 exitCode: exitCode ?? null,
                 status: exitCode === undefined ? "unknown" : exitCode === 0 ? "succeeded" : "failed",
                 evidenceSource: "codex-app-server-item",
+                ...(typeof item.aggregatedOutput === "string" ? { outputSummary: item.aggregatedOutput.length > 256 * 1024 ? item.aggregatedOutput.slice(0, 256 * 1024) + "\n[工具输出超过 256 KiB，记录已截断]" : item.aggregatedOutput } : {}),
               });
             }
             const interactionId = itemId ? pendingInteractions.get(itemId) : undefined;
@@ -176,7 +229,7 @@ export class CodexRunner implements Runner {
               const answer = await context.requestInteraction!(request, AbortSignal.any([rpc.endedSignal, asyncQuestionAbort.signal]));
               if (context.signal.aborted || asyncQuestionAbort.signal.aborted) throw new Error("Codex 异步问题已失效");
               if (answer.kind !== "question") throw new Error("Codex 异步问题收到了审批回复");
-              const text = JSON.stringify({ answers: answer.answers.map((entry) => ({ question: request.questions!.find((q) => q.id === entry.questionId)!.text, answer: entry.text ?? entry.optionIds?.join(", ") ?? "" })) });
+              const text = answer.guidance ? `用户拒绝当前方案，请按以下指导调整：\n${answer.guidance}` : JSON.stringify({ answers: answer.answers.map((entry) => ({ question: request.questions!.find((q) => q.id === entry.questionId)!.text, answer: entry.text ?? entry.optionIds?.join(", ") ?? "" })) });
               if (!completed) {
                 try {
                   await rpc.request("turn/steer", { threadId: nativeThreadId!, expectedTurnId: answerTurnId!, input: [{ type: "text", text }] });
@@ -261,7 +314,7 @@ export class CodexRunner implements Runner {
         if (++followUpCount > 8) throw new Error("Codex 异步问题续轮超过 8 次上限");
         const answers = followUpAnswers.splice(0);
         pendingForwards = answers.map((answer) => answer.interactionId);
-        nextInput = `用户已回答本轮问题：\n${answers.map((answer) => answer.text).join("\n")}\n继续原任务；完成时精确输出标记：\n${input.completionMarker}`;
+        nextInput = `用户已回答本轮问题：\n${answers.map((answer) => answer.text).join("\n")}\n继续原任务。只有任务完成时输出完成标记；如果仍缺用户决定或材料，说明阻塞原因并输出等待用户标记。\n完成标记：\n${input.completionMarker}\n等待用户标记：\n${input.needsInputMarker ?? "未配置"}`;
       }
       const closed = await rpc.closeAfterTurn();
       cleanupStatus = closed ? "completed" : "failed";

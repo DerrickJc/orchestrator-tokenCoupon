@@ -3,10 +3,11 @@ import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 
 import { dirname, join, resolve } from "node:path";
 import { parsePlan } from "./validate-plan.js";
 import type { ExecutionConfig } from "./task.js";
-import type { PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerTurnRef, RepositoryEvidence, RequirementsState } from "./planner-types.js";
+import type { PlannerConfig, PlannerConversationSnapshot, PlannerDraft, PlannerEvent, PlannerTurnRef, RepositoryEvidence, RequirementsState } from "./planner-types.js";
 import { validateRequirementsState } from "./requirements.js";
 import { parsePlanningAssessment, validatePlanningAssessment } from "./planning-readiness.js";
 import { validateConfirmationState } from "./confirmation.js";
+import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
 import type { ConfirmationEvent, ConfirmationProposalSet } from "./planner-types.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,6 +29,7 @@ export class PlannerStore {
 
   async create(snapshot: PlannerConversationSnapshot): Promise<void> {
     validateSnapshot(snapshot, this.workspace);
+    await ensureRuntimeMetadataIgnored(this.workspace);
     await mkdir(this.root, { recursive: true });
     const directory = this.directory(snapshot.planningId);
     await mkdir(directory, { recursive: false });
@@ -198,6 +200,7 @@ export class PlannerStore {
 
   async acquireLock(planningId: string): Promise<() => Promise<void>> {
     this.validateId(planningId);
+    await ensureRuntimeMetadataIgnored(this.workspace);
     const directory = this.directory(planningId);
     await mkdir(directory, { recursive: false }).catch((error) => {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -301,8 +304,8 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
       (raw.draftRevision !== null && (!Number.isSafeInteger(raw.draftRevision) || (raw.draftRevision as number) < 1)) ||
       typeof raw.createdAt !== "string" || typeof raw.updatedAt !== "string") throw new Error("Planner 快照字段无效");
   const config = raw.config as Record<string, unknown>;
-  if (!["mock", "deepseek"].includes(String(config.provider)) || typeof config.model !== "string" || !config.model || Buffer.byteLength(config.model, "utf8") > 256 ||
-      typeof config.baseUrl !== "string" || (config.provider === "mock" ? config.baseUrl !== "mock://local" : !safeEndpoint(config.baseUrl))) {
+  if (!["mock", "deepseek", "chatgpt-mcp", "web-mcp"].includes(String(config.provider)) || typeof config.model !== "string" || !config.model || Buffer.byteLength(config.model, "utf8") > 256 ||
+      typeof config.baseUrl !== "string" || (config.provider === "mock" ? config.baseUrl !== "mock://local" : config.provider === "chatgpt-mcp" ? config.baseUrl !== "mcp://chatgpt" : config.provider === "web-mcp" ? config.baseUrl !== "mcp://web" : !safeEndpoint(config.baseUrl))) {
     throw new Error("Planner 配置快照无效");
   }
   const executionDefaults = parseExecution(raw.executionDefaults);
@@ -332,17 +335,24 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
   const latestReviewId = raw.latestReviewId === undefined || raw.latestReviewId === null ? null : raw.latestReviewId;
   if (latestReviewId !== null && !isUuid(latestReviewId)) throw new Error("Planner latestReviewId 无效");
   const execution = raw.execution === null ? null : parseExecutionReference(raw.execution);
+  let sourcePlanning: PlannerConversationSnapshot["sourcePlanning"];
+  if (raw.sourcePlanning !== undefined) {
+    const source = object(raw.sourcePlanning, "sourcePlanning");
+    if (!isUuid(source.planningId) || source.planningId === raw.planningId || !Number.isSafeInteger(source.revision) || (source.revision as number) < 1 || !Number.isSafeInteger(source.draftRevision) || (source.draftRevision as number) < 1 || typeof source.planHash !== "string" || !HASH.test(source.planHash) || source.sessionId !== undefined && !isUuid(source.sessionId)) throw new Error("关联原规划的身份或版本无效");
+    sourcePlanning = { planningId: source.planningId, revision: source.revision as number, draftRevision: source.draftRevision as number, planHash: source.planHash, ...(source.sessionId ? { sessionId: source.sessionId as string } : {}) };
+  }
   if (raw.status === "approved" && (!approval || raw.draftRevision !== approval.draftRevision)) throw new Error("Planner approved 状态缺少当前批准");
   if (raw.status === "draft_ready" && raw.draftRevision === null) throw new Error("Planner draft_ready 状态缺少草案");
   if (raw.status === "execution_created" && !execution) throw new Error("Planner execution_created 状态缺少 Session 引用");
   if (approval && (raw.draftRevision !== approval.draftRevision || !isUuid(approval.approvalId))) throw new Error("Planner 批准引用无效");
   return {
     schemaVersion: 1, planningId: raw.planningId as string, workspace, revision: raw.revision as number,
-    status: raw.status as PlannerConversationSnapshot["status"], config: { provider: config.provider as "mock" | "deepseek", model: config.model as string, baseUrl: config.baseUrl as string },
+    status: raw.status as PlannerConversationSnapshot["status"], config: { provider: config.provider as PlannerConfig["provider"], model: config.model as string, baseUrl: config.baseUrl as string },
     executionDefaults, messages, ...(requirements === undefined ? {} : { requirements }),
     ...(planningAssessment === undefined ? {} : { planningAssessment }),
     ...(confirmationState === undefined ? {} : { confirmationState }),
     turns, context, activeTurnId: active, draftRevision: raw.draftRevision as number | null, approval, latestReviewId, execution,
+    ...(sourcePlanning ? { sourcePlanning } : {}),
     createdAt: raw.createdAt, updatedAt: raw.updatedAt,
   };
 }

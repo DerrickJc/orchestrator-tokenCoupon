@@ -1,0 +1,21 @@
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, expect, it } from "vitest";
+import { nativePickerScript, normalizePickedPaths } from "../src/native-picker.js";
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+it("uses Windows system dialogs and no user interpolation in its PowerShell source", () => {
+  expect(nativePickerScript("directory")).toContain("System.Windows.Forms.FolderBrowserDialog");
+  expect(nativePickerScript("files")).toContain("System.Windows.Forms.OpenFileDialog"); expect(nativePickerScript("files")).toContain("$dialog.Multiselect = $true");
+  expect(nativePickerScript("directory")).toContain("$dialog.ShowDialog($owner)");
+});
+it("treats cancellation as a normal empty result and checks file containment after resolving symlinks", async () => {
+  expect(await normalizePickedPaths({ cancelled: true, paths: ["invalid"] }, "directory")).toEqual({ cancelled: true, paths: [] });
+  const root = await mkdtemp(join(tmpdir(), "native-picker-")); roots.push(root); const workspace = join(root, "中文 项目"); await mkdir(workspace); await writeFile(join(workspace, "设计.md"), "reference"); await writeFile(join(root, "outside.md"), "outside");
+  expect(await normalizePickedPaths({ cancelled: false, paths: [workspace] }, "directory")).toEqual({ cancelled: false, paths: [workspace] });
+  expect(await normalizePickedPaths({ cancelled: false, paths: [join(workspace, "设计.md")] }, "files", workspace)).toEqual({ cancelled: false, paths: ["设计.md"] });
+  await symlink(join(root, "outside.md"), join(workspace, "link.md"));
+  await expect(normalizePickedPaths({ cancelled: false, paths: [join(workspace, "link.md")] }, "files", workspace)).rejects.toThrow("outside_workspace");
+  await expect(normalizePickedPaths({ cancelled: false, paths: [workspace] }, "files", workspace)).rejects.toThrow("native_picker_invalid");
+});

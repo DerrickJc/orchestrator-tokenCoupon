@@ -32,7 +32,13 @@ export function diffPlans(beforeValue: unknown, afterValue: unknown): PlanChange
       continue;
     }
     compare(changes, entry.task.id, "title", oldEntry.task.title, entry.task.title);
-    compare(changes, entry.task.id, "prompt", oldEntry.task.prompt, entry.task.prompt);
+    compare(changes, entry.task.id, "schemaVersion", oldEntry.task.schemaVersion, entry.task.schemaVersion);
+    if (entry.task.schemaVersion === 1 && oldEntry.task.schemaVersion === 1) compare(changes, entry.task.id, "prompt", oldEntry.task.prompt, entry.task.prompt);
+    if (entry.task.schemaVersion === 2 && oldEntry.task.schemaVersion === 2) {
+      for (const field of ["objective", "approach", "steps", "deliverables", "acceptanceCriteria", "constraints", "notes"] as const) {
+        compare(changes, entry.task.id, field, oldEntry.task[field], entry.task[field]);
+      }
+    }
     compare(changes, entry.task.id, "execution", oldEntry.task.execution, entry.task.execution);
     const oldDependencies = [...oldEntry.dependsOn].sort();
     const newDependencies = [...entry.dependsOn].sort();
@@ -49,7 +55,11 @@ export function diffPlans(beforeValue: unknown, afterValue: unknown): PlanChange
 }
 
 function compactEntry(entry: PlannedTask): unknown {
-  return { title: entry.task.title, prompt: entry.task.prompt, execution: entry.task.execution, dependsOn: [...entry.dependsOn].sort() };
+  const body = entry.task.schemaVersion === 1
+    ? { prompt: entry.task.prompt }
+    : { objective: entry.task.objective, approach: entry.task.approach, steps: entry.task.steps, deliverables: entry.task.deliverables,
+      acceptanceCriteria: entry.task.acceptanceCriteria, constraints: entry.task.constraints, ...(entry.task.notes ? { notes: entry.task.notes } : {}) };
+  return { title: entry.task.title, ...body, execution: entry.task.execution, dependsOn: [...entry.dependsOn].sort() };
 }
 
 function compare(changes: PlanChange[], taskId: string, field: string, before: unknown, after: unknown): void {

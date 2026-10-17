@@ -1,4 +1,5 @@
 import type { PlanReviewInput, PlanReviewer, Planner, PlannerInput, PlannerContext } from "../planner-types.js";
+import { renderTaskPrompt } from "../task.js";
 
 export class MockPlanner implements Planner {
   readonly id = "mock" as const;
@@ -19,8 +20,9 @@ export class MockPlanner implements Planner {
       ...(input.requirements?.items.filter(({ status }) => status === "active").map(({ text }) => text) ?? []),
       [...input.messages].reverse().find((message) => message.role === "user")?.content,
     ].filter(Boolean).join("\n") || "完成用户提出的需求";
-    const makeTask = (id: string, title: string, prompt: string) => ({
-      schemaVersion: 1, id, title, prompt, execution: input.executionDefaults,
+    const makeTask = (id: string, title: string, objective: string, steps: string[], acceptanceCriteria: string[]) => ({
+      schemaVersion: 2, id, title, objective, approach: "沿用工作区现有技术与本次指定的 Runner 配置。", steps,
+      deliverables: [title], acceptanceCriteria, constraints: [], execution: input.executionDefaults,
     });
     return {
       kind: "draft",
@@ -30,8 +32,8 @@ export class MockPlanner implements Planner {
         id: "planner-generated-plan",
         title: "需求实现计划",
         tasks: [
-          { task: makeTask("implement-request", "实现需求", request), dependsOn: [], status: "planned" },
-          { task: makeTask("verify-request", "验证实现", "检查前置任务的代码变更，运行相关测试并汇报实际结果。"), dependsOn: ["implement-request"], status: "planned" },
+          { task: makeTask("implement-request", "实现需求", request, ["按需求完成实现", "补充必要的针对性测试"], ["实现符合有效需求", "新增或受影响的测试通过"]), dependsOn: [], status: "planned" },
+          { task: makeTask("verify-request", "验证实现", "确认实现和测试结果满足需求。", ["检查前置任务变更", "运行相关测试并记录结果"], ["测试通过且结论有命令和输出依据"]), dependsOn: ["implement-request"], status: "planned" },
         ],
       },
     };
@@ -44,9 +46,10 @@ export class MockPlanReviewer implements PlanReviewer {
   async review(input: PlanReviewInput, _context: PlannerContext): Promise<unknown> {
     if (this.response) return this.withResolutions(this.response, input);
     const findings: Array<Record<string, unknown>> = [];
-    const text = (entry: PlanReviewInput["plan"]["tasks"][number]) => `${entry.task.title}\n${entry.task.prompt}`;
-    const producers = input.plan.tasks.filter((entry) => /implement|implementation|实现|数据层|crud|service/i.test(text(entry)));
-    for (const verifier of input.plan.tasks.filter((entry) => /test|testing|测试|验证|verify/i.test(text(entry)))) {
+    const text = (entry: PlanReviewInput["plan"]["tasks"][number]) => `${entry.task.title}\n${renderTaskPrompt(entry.task)}`;
+    const isVerifier = (entry: PlanReviewInput["plan"]["tasks"][number]) => /test|testing|测试|验证|verify/i.test(entry.task.title);
+    const producers = input.plan.tasks.filter((entry) => !isVerifier(entry) && /implement|implementation|实现|数据层|crud|service/i.test(text(entry)));
+    for (const verifier of input.plan.tasks.filter(isVerifier)) {
       const missing = producers.filter((producer) => producer.task.id !== verifier.task.id && !verifier.dependsOn.includes(producer.task.id));
       if (missing.length) findings.push({
         findingId: `F${findings.length + 1}`, severity: "error", category: "dependency", taskIds: [verifier.task.id, ...missing.map(({ task }) => task.id)],

@@ -28,11 +28,15 @@ export async function reviewPlannerDraft(options: {
   workspace: string;
   reviewer?: PlanReviewer;
   signal?: AbortSignal;
+  expectedRevision?: number;
+  repositoryOutputBudgetBytes?: number;
+  beforeCommit?: () => Promise<void>;
 }): Promise<PlanReviewOperationResult> {
   const plannerStore = new PlannerStore(options.workspace);
   const release = await plannerStore.acquireLock(options.planningId);
   try {
     let snapshot = await plannerStore.load(options.planningId);
+    if (options.expectedRevision !== undefined && snapshot.revision !== options.expectedRevision) throw new Error("external_context_stale：审查依据已变化，请重新准备上下文");
     if (snapshot.activeTurnId) throw new Error("规划轮次尚未完成，请先恢复规划对话");
     if (snapshot.execution) throw new Error("已关联执行 Session 的规划只允许查看历史审查");
     if (snapshot.draftRevision === null || !["draft_ready", "approved"].includes(snapshot.status)) throw new Error("当前没有可审查的计划草案");
@@ -73,7 +77,7 @@ export async function reviewPlannerDraft(options: {
     await reviewStore.create(record);
 
     const timed = makeTimeoutSignal(options.signal, REVIEW_TIMEOUT_MS);
-    const reader = new RepositoryReader(plannerStore.workspace, timed.signal, draft.context.reduce((sum, evidence) => sum + evidence.sizeBytes, 0));
+    const reader = new RepositoryReader(plannerStore.workspace, timed.signal, draft.context.reduce((sum, evidence) => sum + evidence.sizeBytes, 0), options.repositoryOutputBudgetBytes);
     const counters = { requests: 0, tools: 0 };
     const context: PlannerContext = {
       signal: timed.signal,
@@ -109,7 +113,10 @@ export async function reviewPlannerDraft(options: {
       const reviewer = options.reviewer ?? createPlanReviewer(snapshot.config);
       const raw = await reviewer.review(input, context);
       if (timed.signal.aborted) throw timed.signal.reason ?? new Error("审查已取消");
-      const parsed = parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview);
+      const parsed = ensureTechnologySelectionFinding(
+        parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview),
+        snapshot.planningAssessment,
+      );
       const evidence = mergeEvidence(draft.context, reader.getEvidence());
       const changed = await verifyRepositoryEvidence(plannerStore.workspace, evidence, timed.signal);
       if (changed.length) throw new Error("workspace_changed：审查期间依据文件发生变化：" + changed.join(", "));
@@ -118,6 +125,7 @@ export async function reviewPlannerDraft(options: {
         ...record, status: "succeeded", context: evidence, ...parsed,
         reportHash: canonicalHash(reviewReportPayload({ ...record, ...parsed })), finishedAt,
       });
+      await options.beforeCommit?.();
       await reviewStore.save(succeeded);
       await reviewStore.appendEvent(options.planningId, reviewId, "review.succeeded", { findings: succeeded.findings.length });
 
@@ -156,7 +164,30 @@ export async function reviewPlannerDraft(options: {
 
 export function createPlanReviewer(config: PlannerConfig, options: { fetchImpl?: typeof fetch } = {}): PlanReviewer {
   if (config.provider === "mock") return new MockPlanReviewer();
+  if (["chatgpt-mcp", "web-mcp"].includes(config.provider)) throw new Error("external_review_required：请在网页中通过 MCP 准备并提交审查，当前没有发出 API 请求");
   return new DeepSeekPlanner({ model: config.model, baseUrl: config.baseUrl, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
+}
+
+/** Prepare under a short lock; no model request or running review is created. */
+export async function prepareExternalReviewInput(planningId: string, workspace: string): Promise<{ expectedRevision: number; input: PlanReviewInput }> {
+  const store = new PlannerStore(workspace);
+  const release = await store.acquireLock(planningId);
+  try {
+    const snapshot = await store.load(planningId);
+    if (!["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider) || snapshot.activeTurnId || snapshot.execution || snapshot.draftRevision === null) throw new Error("external_review_unavailable：当前没有可提交网页审查的草案");
+    const draft = await store.loadDraft(planningId, snapshot.draftRevision);
+    assertPlanningReady(snapshot.planningAssessment, draft.plan);
+    const requirements = requireReconciledRequirements(snapshot);
+    const previousReview = (await new ReviewStore(store.workspace).list(planningId)).filter(({ status }) => status === "succeeded").at(-1);
+    const input: PlanReviewInput = {
+      requirements: effectiveRequirements(requirements).map(({ text }) => text), requirementItems: effectiveRequirements(requirements),
+      ...(snapshot.planningAssessment ? { planningAssessment: snapshot.planningAssessment } : {}),
+      plan: draft.plan, executionDefaults: snapshot.executionDefaults,
+      ...(previousReview ? { previousReview, planChanges: diffPlans((await store.loadDraft(planningId, previousReview.draftRevision)).plan, draft.plan) } : {}),
+    };
+    if (Buffer.byteLength(JSON.stringify(input), "utf8") > HISTORY_LIMIT) throw new Error("context_budget_exceeded：外部审查上下文超过 256 KiB");
+    return { expectedRevision: snapshot.revision, input };
+  } finally { await release(); }
 }
 
 export async function loadCurrentPlanReview(planningId: string, workspace: string): Promise<PlanReviewRecord | undefined> {
@@ -185,8 +216,29 @@ export function requirementsHash(snapshot: PlannerConversationSnapshot): string 
 }
 
 export function reviewerConfigHash(config: PlannerConfig, planSchemaVersion: 1 | 2 = 1, hasStructuredAssessment = true): string {
-  const reviewPromptVersion = planSchemaVersion === 2 ? 7 : hasStructuredAssessment ? 6 : 5;
+  const reviewPromptVersion = planSchemaVersion === 2 ? 8 : hasStructuredAssessment ? 7 : 6;
   return canonicalHash({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, reviewPromptVersion });
+}
+
+function ensureTechnologySelectionFinding(
+  reply: { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] },
+  assessment: PlannerConversationSnapshot["planningAssessment"],
+) {
+  if (assessment?.profile !== "existing_project" || assessment.schemaVersion === 2) return reply;
+  if (reply.findings.length >= 100) throw new Error("review_findings_limit：缺少技术选型依据的系统门禁无法加入审查报告");
+  const gateSummary = "系统门禁：此 existing_project 规划沿用旧版 assessment，未结构化记录 technology_selection。即使草案增加‘先核验、缺失则暂停’任务，也不能视为具体技术选择已确认；需重新规划并完成决策审查。";
+  let summary = reply.summary;
+  while (Buffer.byteLength(summary + "\n\n" + gateSummary, "utf8") > 16 * 1024) summary = summary.slice(0, -1);
+  return {
+    ...reply,
+    summary: `${summary}\n\n${gateSummary}`,
+    findings: [...reply.findings, {
+      findingId: "SYS-TECH-SELECTION", severity: "error" as const, category: "technology" as const, taskIds: [], requirementIds: [],
+      description: "缺少高影响技术选型的结构化授权或权威依据。新增核验门禁只定义了发现缺项后的处理方式，没有确认数据库、异步设施、检索实现及适用依赖版本。",
+      basis: "程序检查发现 existing_project planningAssessment 未使用 schemaVersion 2，因而没有有效的 technology_selection 决策记录。",
+      suggestion: "补充具体技术选择及其来源，或记录用户在明确范围内的选择授权；重新生成草案、复审后再批准。旧版批准入口也会被执行门禁拒绝。",
+    }],
+  };
 }
 
 function parseReviewReply(value: unknown, knownTaskIds: string[], knownRequirementIds: string[], previous?: PlanReviewRecord): { summary: string; findings: PlanReviewFinding[]; resolutions: import("./planner-types.js").ReviewResolution[] } {

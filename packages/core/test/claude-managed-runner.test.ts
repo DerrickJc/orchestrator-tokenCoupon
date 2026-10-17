@@ -26,6 +26,28 @@ afterEach(() => {
 });
 
 describe("ClaudeManagedRunner", () => {
+  it("sends denial guidance through the native tool-permission response", async () => {
+    const guidance = "Use the existing dependency; do not install another package.";
+    let permissionResult: unknown;
+    queryMock.mockImplementation((request: { options: { canUseTool: (name: string, input: Record<string, unknown>, options: { signal: AbortSignal; toolUseID: string }) => Promise<unknown> } }) => ({
+      async *[Symbol.asyncIterator]() {
+        permissionResult = await request.options.canUseTool("Bash", { command: "npm install example" }, { signal: new AbortController().signal, toolUseID: "toolu-denied" });
+        yield { type: "result", subtype: "success", is_error: false, result: "operation denied", permission_denials: [] };
+      },
+      close() {},
+    }));
+    const task = { schemaVersion: 1 as const, id: "claude-denial-guidance", title: "Respect denial guidance", prompt: "Choose dependencies carefully", execution: { runnerId: "claude-code", mode: "managed" as const } };
+    const runner = new ClaudeManagedRunner();
+    await runner.run({ attemptId: "attempt-guidance", cwd: process.cwd(), task, execution: task.execution, prompt: task.prompt, completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {},
+      async requestInteraction(request) {
+        expect(request.kind).toBe("approval");
+        return { kind: "approval", decision: "deny", guidance, interactionId: "approval-guidance" };
+      },
+    });
+    expect(permissionResult).toMatchObject({ behavior: "deny", message: expect.stringContaining(guidance), interrupt: false, toolUseID: "toolu-denied" });
+  });
+
   it("maps a user selection under the full native question text expected by AskUserQuestion", async () => {
     const questionText = "Should an empty name be accepted by greet(name)?";
     let permissionResult: unknown;
@@ -99,7 +121,9 @@ describe("ClaudeManagedRunner", () => {
     queryMock.mockImplementation(() => ({
       async *[Symbol.asyncIterator]() {
         yield { type: "assistant", parent_tool_use_id: null, message: { id: "assistant-1", content: [
+          { type: "text", text: "准备运行测试。" },
           { type: "tool_use", id: "bash-1", name: "Bash", input: { command: "node --test" } },
+          { type: "text", text: "将记录真实返回。" },
         ] } };
         yield { type: "user", parent_tool_use_id: "bash-1", message: { role: "user", content: [
           { type: "tool_result", tool_use_id: "bash-1", content: "tests 2; pass 2; fail 0", is_error: false },
@@ -122,5 +146,25 @@ describe("ClaudeManagedRunner", () => {
       type: "command.completed", toolId: "bash-1", command: "node --test", cwd: "/repo/worktree",
       exitCode: null, status: "unknown", evidenceSource: "claude-sdk-tool-result", outputSummary: "tests 2; pass 2; fail 0",
     }));
+    const messages = events.filter(event => event.type === "message.completed");
+    expect(messages).toHaveLength(2);
+    expect(new Set(messages.map(event => event.type === "message.completed" ? event.messageId : undefined)).size).toBe(2);
   });
+  it("rejects AskUserQuestion with NO guidance instead of fabricating selected answers", async () => {
+    let permissionResult: unknown;
+    queryMock.mockImplementation((request: { options: { canUseTool: (name: string, input: Record<string, unknown>, options: { signal: AbortSignal; toolUseID: string }) => Promise<unknown> } }) => ({
+      async *[Symbol.asyncIterator]() {
+        permissionResult = await request.options.canUseTool("AskUserQuestion", { questions: [{ question: "安装新依赖吗？", options: [{ label: "Install" }, { label: "Skip" }] }] }, { signal: new AbortController().signal, toolUseID: "question-no" });
+        yield { type: "result", subtype: "success", is_error: false, result: "done", permission_denials: [] };
+      }, close() {},
+    }));
+    const task = { schemaVersion: 1 as const, id: "question-no", title: "Question guidance", prompt: "Ask", execution: { runnerId: "claude-code", mode: "managed" as const } };
+    await new ClaudeManagedRunner().run({ attemptId: "question-no", cwd: process.cwd(), task, execution: task.execution, prompt: "run", completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {},
+      async requestInteraction(request) { expect(request.kind).toBe("question"); return { kind: "question", answers: [], guidance: "使用本地已有依赖", interactionId: "question-no" }; },
+    });
+    expect(permissionResult).toMatchObject({ behavior: "deny", message: expect.stringContaining("使用本地已有依赖"), interrupt: false, toolUseID: "question-no" });
+    expect(permissionResult).not.toHaveProperty("updatedInput");
+  });
+
 });

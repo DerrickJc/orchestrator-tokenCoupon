@@ -8,6 +8,7 @@ import { parsePlan } from "./validate-plan.js";
 import { parseRunnerProfile, runnerProfileHash } from "./runner-registry.js";
 
 import { createExecutionLock, inspectLock, lockDescription } from "./owner-lock.js";
+import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_STATUSES = new Set(["ready", "running", "pausing", "paused", "succeeded", "failed", "cancelled", "interrupted", "blocked"]);
@@ -27,6 +28,7 @@ export class SessionStore {
   }
 
   async acquireLock(sessionId?: string): Promise<() => Promise<void>> {
+    await ensureRuntimeMetadataIgnored(this.workspace);
     await mkdir(this.root, { recursive: true });
     const lockPath = join(this.root, "workspace.lock");
     try { return await createExecutionLock(lockPath, sessionId); }
@@ -43,6 +45,7 @@ export class SessionStore {
     if (isolation.mode === "shared" && maxParallel !== 1) throw new Error("shared workspace 只支持 maxParallel=1");
     const executionId = options.executionId ?? randomUUID();
     if (!UUID.test(executionId)) throw new Error("executionId 必须是 UUID");
+    await ensureRuntimeMetadataIgnored(this.workspace);
     const sessionDir = join(this.root, "sessions", sessionId);
     const now = new Date().toISOString();
     const runnerProfile = options.runnerProfile ? parseRunnerProfile(options.runnerProfile) : undefined;

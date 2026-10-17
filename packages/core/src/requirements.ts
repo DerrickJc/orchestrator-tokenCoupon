@@ -12,12 +12,12 @@ export function effectiveRequirements(state: RequirementsState): Requirement[] {
 }
 
 /** Failed/cancelled input stays in the audit history, but is not silently adopted. */
-export function pendingRequirementMessages(snapshot: PlannerConversationSnapshot): ConversationMessage[] {
+export function pendingRequirementMessages(snapshot: PlannerConversationSnapshot, includedMessageIds: string[] = []): ConversationMessage[] {
   const classified = new Set(snapshot.requirements?.messageDecisions.map(({ messageId }) => messageId));
   return snapshot.messages.filter((message) => {
     if (message.role !== "user" || classified.has(message.messageId)) return false;
     const turns = snapshot.turns.filter(({ messageId }) => messageId === message.messageId);
-    return !turns.length || turns.some(({ status, turnId }) => status === "succeeded" || turnId === snapshot.activeTurnId);
+    return includedMessageIds.includes(message.messageId) || !turns.length || turns.some(({ status, turnId }) => status === "succeeded" || turnId === snapshot.activeTurnId);
   });
 }
 
@@ -55,11 +55,11 @@ export function validateRequirementsState(value: unknown, messages: Conversation
   return { revision: raw.revision as number, items, messageDecisions };
 }
 
-export function applyRequirementsUpdate(snapshot: PlannerConversationSnapshot, value: unknown, operationMessageIds: string[] = [], confirmationMessageIds: string[] = []): RequirementsState {
+export function applyRequirementsUpdate(snapshot: PlannerConversationSnapshot, value: unknown, operationMessageIds: string[] = [], confirmationMessageIds: string[] = [], includedMessageIds: string[] = []): RequirementsState {
   const raw = object(value);
   if (Object.keys(raw).some((key) => !["messageDecisions", "changes"].includes(key)) || !Array.isArray(raw.messageDecisions) || !Array.isArray(raw.changes) || raw.changes.length > 128) fail("更新字段无效");
   const initial = snapshot.requirements ?? emptyRequirements();
-  const pending = pendingRequirementMessages(snapshot);
+  const pending = pendingRequirementMessages(snapshot, includedMessageIds);
   const pendingIds = new Set(pending.map(({ messageId }) => messageId));
   const decisions = raw.messageDecisions.map((entry) => {
     const item = object(entry);
@@ -90,8 +90,8 @@ export function applyRequirementsUpdate(snapshot: PlannerConversationSnapshot, v
 }
 
 /** Use only unclassified input and clarification questions, never replay old plans. */
-export function planningMessages(snapshot: PlannerConversationSnapshot): Array<{ role: "user" | "assistant"; content: string }> {
-  const pending = pendingRequirementMessages(snapshot);
+export function planningMessages(snapshot: PlannerConversationSnapshot, includedMessageIds: string[] = []): Array<{ role: "user" | "assistant"; content: string }> {
+  const pending = pendingRequirementMessages(snapshot, includedMessageIds);
   const ids = new Set(pending.map(({ messageId }) => messageId));
   const latestAssistant = snapshot.messages.filter(({ role }) => role === "assistant").at(-1);
   return snapshot.messages.flatMap((message) => {
@@ -105,9 +105,9 @@ export function planningMessages(snapshot: PlannerConversationSnapshot): Array<{
 }
 
 /** Exact-ID retrieval; no filesystem/tool access to the metadata directory. */
-export function createHistoryReader(snapshot: PlannerConversationSnapshot): (ids: string[]) => Promise<string> {
+export function createHistoryReader(snapshot: PlannerConversationSnapshot, includedMessageIds: string[] = []): (ids: string[]) => Promise<string> {
   let bytes = 0;
-  const classifiable = new Set(pendingRequirementMessages(snapshot).map(({ messageId }) => messageId));
+  const classifiable = new Set(pendingRequirementMessages(snapshot, includedMessageIds).map(({ messageId }) => messageId));
   return async (ids) => {
     if (!Array.isArray(ids) || !ids.length || ids.length > 8 || ids.some((id) => typeof id !== "string" || !UUID.test(id)) || new Set(ids).size !== ids.length) throw new Error("conversation_read 需要 1 到 8 个不同的 messageId");
     const results = ids.map((id) => {

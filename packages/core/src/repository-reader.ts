@@ -8,7 +8,8 @@ const SEARCH_FILE_LIMIT = 256 * 1024;
 const SCAN_LIMIT = 256 * 1024;
 const READ_OUTPUT_LIMIT = 16 * 1024;
 const READ_BUDGET = 8 * 1024 * 1024;
-const OUTPUT_BUDGET = 64 * 1024;
+export const DEFAULT_REPOSITORY_OUTPUT_BUDGET = 256 * 1024;
+const LEGACY_REPOSITORY_OUTPUT_BUDGET = 64 * 1024;
 const LIST_PAGE = 200;
 const SEARCH_FILES = 1000;
 const MATCH_LIMIT = 100;
@@ -21,12 +22,16 @@ export class RepositoryReader {
   private readonly evidence = new Map<string, RepositoryEvidence>();
   private scannedEntries = 0;
   private readonly signal: AbortSignal | undefined;
+  private readonly outputBudget: number;
 
-  constructor(workspace: string, signal?: AbortSignal, initialReadBytes = 0) {
+  constructor(workspace: string, signal?: AbortSignal, initialReadBytes = 0, outputBudget = LEGACY_REPOSITORY_OUTPUT_BUDGET) {
     this.workspace = resolve(workspace);
     this.signal = signal;
     this.usedBytes = initialReadBytes;
+    this.outputBudget = outputBudget;
   }
+
+  getOutputBudget() { return { limitBytes: this.outputBudget, usedBytes: this.outputBytes, remainingBytes: Math.max(0, this.outputBudget - this.outputBytes) }; }
 
   getEvidence(): RepositoryEvidence[] { return [...this.evidence.values()].sort((a, b) => a.path.localeCompare(b.path)); }
 
@@ -36,7 +41,7 @@ export class RepositoryReader {
         : name === "repo_read" ? await this.read(args)
           : name === "repo_search" ? await this.search(args)
             : { error: "unknown_tool", message: "此工具不可用" };
-      const remaining = OUTPUT_BUDGET - this.outputBytes;
+      const remaining = this.outputBudget - this.outputBytes;
       let serialized = JSON.stringify(result);
       if (Buffer.byteLength(serialized, "utf8") > remaining) {
         result = shrinkPage(result, remaining);

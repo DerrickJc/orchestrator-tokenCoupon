@@ -5,6 +5,7 @@ import type { AttemptRecord } from "./attempt.js";
 import { createCompletionProtocol, CompletionMarkerDetector } from "./completion-marker.js";
 import { RunRecorder } from "./run-recorder.js";
 import type { Runner, RunnerEvent, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution, RunnerOutput } from "./runner.js";
+import { validateElicitationContent } from "./runners/codex-elicitation.js";
 import type { TaskDefinition } from "./task.js";
 import type { SelectedDecision } from "./plan.js";
 import { decisionValueHash } from "./plan.js";
@@ -61,6 +62,7 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
     exitCode: null,
     signal: null,
     markerSeen: false,
+    needsInputSeen: false,
     reasonCode: null,
     reason: null,
     artifactDir: "",
@@ -79,6 +81,7 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
     });
   }
   const detector = new CompletionMarkerDetector(protocol.marker);
+  const needsInputDetector = new CompletionMarkerDetector(protocol.needsInputMarker);
   const controller = new AbortController();
   let stopReason: "cancelled" | null = null;
   let started = false;
@@ -144,10 +147,16 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   const onOutput = (output: RunnerOutput) => {
     if (output.text || output.agentText) markActivity();
     attempt.outputBytes += Buffer.byteLength(output.text, "utf8");
-    if (output.agentText !== undefined) attempt.markerSeen = detector.push(output.agentText) || attempt.markerSeen;
+    if (output.agentText !== undefined) {
+      attempt.markerSeen = detector.push(output.agentText) || attempt.markerSeen;
+      attempt.needsInputSeen = needsInputDetector.push(output.agentText) || (attempt.needsInputSeen ?? false);
+    }
     enqueue(recorder.appendEvent("runner.output", {
       stream: output.stream,
       text: output.text,
+      ...(output.agentText === undefined ? {} : { agentText: output.agentText }),
+      ...(output.displayText === undefined ? {} : { displayText: output.displayText }),
+      ...(output.finalText === undefined ? {} : { finalText: output.finalText }),
       ...(output.structuredEvent === undefined ? {} : { structuredEvent: output.structuredEvent }),
     }));
     options.onOutput?.(output);
@@ -193,13 +202,13 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
       }
       try {
         const owner: RunnerInteractionOwner = { attemptId, taskId: task.id, runnerId: options.runner.id, cwd };
-        const reply = validateInteractionReply(request, await awaitInteractionReply(
-          options.onInteraction(requestId, record.request as RunnerInteractionRequest, owner, requestSignal), requestSignal,
+        const reply = validateRunnerInteractionReply(request, await awaitInteractionReply(
+          options.onInteraction(requestId, request, owner, requestSignal), requestSignal,
         ));
         if (requestSignal.aborted) throw new Error("交互回复所属 Runner 请求已失效");
         const responseId = randomUUID();
         const responsePath = join(responsesDirectory, `${responseId}.json`);
-        const response = { schemaVersion: 1, responseId, requestId, attemptId, taskId: task.id, reply, submittedAt: new Date().toISOString() };
+        const response = { schemaVersion: 1, responseId, requestId, attemptId, taskId: task.id, reply: persistableInteractionReply(reply), submittedAt: new Date().toISOString() };
         await writeFile(responsePath, `${JSON.stringify(response, null, 2)}\n`, { flag: "wx", mode: 0o600 });
         record.status = "response_submitted";
         record.responseId = responseId;
@@ -221,7 +230,7 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   try {
     processResult = await options.runner.run({
       attemptId, cwd, task, execution: task.execution,
-      prompt: protocol.prompt, completionMarker: protocol.marker,
+      prompt: protocol.prompt, completionMarker: protocol.marker, needsInputMarker: protocol.needsInputMarker,
     }, { signal: controller.signal, onStarted: markStarted, onOutput, onActivity: markActivity, recordEvent: recordRunnerEvent, ...(requestInteraction ? { requestInteraction } : {}) });
   } catch (error) {
     processResult = { started, exitCode: null, signal: null, executionError: error instanceof Error ? error.message : String(error) };
@@ -231,6 +240,7 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   }
   if (processResult.started) markStarted();
   attempt.markerSeen = detector.finish() || attempt.markerSeen;
+  attempt.needsInputSeen = needsInputDetector.finish() || (attempt.needsInputSeen ?? false);
   attempt.exitCode = processResult.exitCode;
   attempt.signal = processResult.signal;
   if (processResult.transport) attempt.transport = processResult.transport;
@@ -243,18 +253,18 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   await Promise.all(writes);
   try { await recorder.flush(); } catch { /* verdict below records the failure when possible */ }
 
-  let verdict = determineVerdict({ markerSeen: attempt.markerSeen, process: processResult, stopReason, recordingFailed: recorder.recordingError !== undefined });
+  let verdict = determineVerdict({ markerSeen: attempt.markerSeen, needsInputSeen: attempt.needsInputSeen ?? false, process: processResult, stopReason, recordingFailed: recorder.recordingError !== undefined });
   attempt.status = verdict.status;
   attempt.reasonCode = verdict.reasonCode;
   attempt.reason = verdict.reason;
   attempt.finishedAt = new Date().toISOString();
   enqueue(recorder.appendEvent("attempt.finished", {
     status: attempt.status, reasonCode: attempt.reasonCode, exitCode: attempt.exitCode, signal: attempt.signal,
-    markerSeen: attempt.markerSeen, outputBytes: attempt.outputBytes,
+    markerSeen: attempt.markerSeen, needsInputSeen: attempt.needsInputSeen ?? false, outputBytes: attempt.outputBytes,
   }));
   await Promise.all(writes);
   try { await recorder.flush(); } catch {
-    verdict = determineVerdict({ markerSeen: attempt.markerSeen, process: processResult, stopReason, recordingFailed: true });
+    verdict = determineVerdict({ markerSeen: attempt.markerSeen, needsInputSeen: attempt.needsInputSeen ?? false, process: processResult, stopReason, recordingFailed: true });
     attempt.status = verdict.status;
     attempt.reasonCode = verdict.reasonCode;
     attempt.reason = verdict.reason;
@@ -273,12 +283,31 @@ async function replaceInteractionRecord(path: string, record: object): Promise<v
   await rename(temporary, path);
 }
 
-function validateInteractionReply(request: RunnerInteractionRequest, reply: RunnerInteractionReply): RunnerInteractionReply {
+export function validateRunnerInteractionReply(request: RunnerInteractionRequest, reply: RunnerInteractionReply): RunnerInteractionReply {
+  if (reply.guidance !== undefined && (typeof reply.guidance !== "string" || !reply.guidance.trim() || Buffer.byteLength(reply.guidance, "utf8") > 4096)) throw new Error("拒绝指导无效");
   if (request.kind === "approval") {
     if (reply.kind !== "approval" || !(request.decisions ?? ["allow-once", "deny"]).includes(reply.decision)) throw new Error("审批回复与原生请求不匹配");
+    if (reply.guidance !== undefined && (reply.decision !== "deny" || !reply.guidance.trim() || Buffer.byteLength(reply.guidance, "utf8") > 4096)) throw new Error("拒绝指导无效");
     return reply;
   }
+  if (request.kind === "elicitation") {
+    if (reply.kind !== "elicitation" || !request.elicitation) throw new Error("Elicitation 回复与原生请求不匹配");
+    if (reply.guidance !== undefined && reply.action !== "decline") throw new Error("只有拒绝 Elicitation 可以附带指导");
+    if (reply.action !== "accept") {
+      if (reply.content !== undefined) throw new Error("拒绝或取消 Elicitation 不能附带表单内容");
+      return { kind: "elicitation", action: reply.action, ...(reply.guidance ? { guidance: reply.guidance } : {}) };
+    }
+    if (request.elicitation.mode === "url") {
+      if (reply.content && Object.keys(reply.content).length > 0) throw new Error("URL Elicitation 不能附带表单内容");
+      return { kind: "elicitation", action: "accept" };
+    }
+    return { kind: "elicitation", action: "accept", content: validateElicitationContent(request.elicitation.requestedSchema, reply.content) };
+  }
   if (reply.kind !== "question" || !request.questions?.length) throw new Error("问题回复与原生请求不匹配");
+  if (reply.guidance !== undefined) {
+    if (reply.answers.length) throw new Error("拒绝并指导不能同时提交问题答案");
+    return { kind: "question", answers: [], guidance: reply.guidance };
+  }
   const questions = new Map(request.questions.map((item) => [item.id, item]));
   const answers = new Map<string, (typeof reply.answers)[number]>();
   for (const answer of reply.answers) {
@@ -307,6 +336,38 @@ function redactInteractionRequest(request: RunnerInteractionRequest): RunnerInte
       ...(question.header ? { header: redactInteractionText(question.header) } : {}),
       ...(question.options ? { options: question.options.map((option) => ({ ...option, label: redactInteractionText(option.label) })) } : {}),
     })) } : {}),
+    ...(request.elicitation ? { elicitation: {
+      ...request.elicitation,
+      ...(request.elicitation.url ? { url: redactElicitationUrl(request.elicitation.url) } : {}),
+      ...(request.elicitation.requestedSchema ? { requestedSchema: {
+        ...request.elicitation.requestedSchema,
+        properties: Object.fromEntries(Object.entries(request.elicitation.requestedSchema.properties).map(([name, field]) => {
+          const { default: _default, ...safeField } = field;
+          return [name, safeField];
+        })),
+      } } : {}),
+    } } : {}),
+  };
+}
+
+function redactElicitationUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    const hadQuery = !!url.search;
+    const hadFragment = !!url.hash;
+    url.search = hadQuery ? "?redacted" : "";
+    url.hash = hadFragment ? "redacted" : "";
+    return url.toString();
+  } catch { return "[invalid URL redacted]"; }
+}
+
+function persistableInteractionReply(reply: RunnerInteractionReply): unknown {
+  if (reply.kind !== "elicitation") return reply;
+  const content = reply.content;
+  return {
+    kind: reply.kind, action: reply.action,
+    ...(reply.guidance ? { guidanceSha256: createHash("sha256").update(reply.guidance, "utf8").digest("hex") } : {}),
+    ...(content ? { contentFields: Object.keys(content), contentSha256: createHash("sha256").update(JSON.stringify(content), "utf8").digest("hex") } : {}),
   };
 }
 

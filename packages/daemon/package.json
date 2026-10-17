@@ -1,0 +1,19 @@
+{
+  "name": "@token-coupon/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.295",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@token-coupon/core": "*",
+    "express": "^5.2.1",
+    "undici": "^7.30.0",
+    "zod": "^4.6.5"
+  }
+}

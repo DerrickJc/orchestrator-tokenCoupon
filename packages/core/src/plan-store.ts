@@ -75,6 +75,8 @@ export class PlanStore {
       const stateById = new Map(result.map((state) => [state.taskId, state]));
       const next = result.map((state) => {
         if (state.status !== "planned" && state.status !== "blocked") return state;
+        // Dependency recalculation cannot clear an explicit decision or recovery blocker.
+        if (state.status === "blocked" && state.reasonCode && state.reasonCode !== "dependency_not_succeeded") return state;
         const dependencies = this.taskById.get(state.taskId)?.dependsOn ?? [];
         if (dependencies.some((id) => failedStates.has(stateById.get(id)?.status ?? ""))) {
           return { ...state, status: "blocked" as const, activeAttemptId: null, reasonCode: "dependency_not_succeeded" };
@@ -98,7 +100,9 @@ export function initialTaskStates(plan: import("./plan.js").PlanDefinition): Ses
 export function sessionStatusFor(states: SessionTaskState[], fallback: SessionSnapshot["status"] = "ready"): SessionSnapshot["status"] {
   if (states.some((state) => state.status === "running")) return "running";
   if (states.some((state) => state.status === "interrupted")) return "interrupted";
-  if (states.some((state) => ["failed", "timed_out", "blocked"].includes(state.status))) return "failed";
+  if (states.some((state) => ["failed", "timed_out"].includes(state.status))) return "failed";
+  if (states.some((state) => state.status === "blocked" && state.reasonCode === "user_input_required")) return "blocked";
+  if (states.some((state) => state.status === "blocked")) return "failed";
   if (states.some((state) => state.status === "cancelled")) return "cancelled";
   if (states.length > 0 && states.every((state) => state.status === "succeeded")) return "succeeded";
   if (fallback === "interrupted") return "interrupted";

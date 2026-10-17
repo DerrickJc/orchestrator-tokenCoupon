@@ -4,6 +4,7 @@ import { MockRunner } from "./runners/mock-runner.js";
 import { ClaudeCodeRunner } from "./runners/claude-runner.js";
 import { ClaudeManagedRunner } from "./runners/claude-managed-runner.js";
 import { CodexRunner } from "./runners/codex-runner.js";
+import { DeepSeekHarnessRunner } from "./runners/dsh-runner.js";
 
 const MODES = ["non_interactive", "managed"] as const;
 const NONE = "unsupported" as const;
@@ -53,6 +54,19 @@ export function createDefaultRunnerRegistry(): RunnerRegistry {
       return { sandbox, approvalPolicy };
     },
     create: (settings) => new CodexRunner(settings as { sandbox: "read-only" | "workspace-write"; approvalPolicy: "on-request" | "untrusted" }),
+  });
+  registry.register({
+    id: "dsh", adapterVersion: "1", configurationVersion: 1, supportedModes: ["managed"], supportsModel: true,
+    capabilities: {
+      non_interactive: { structuredEvents: NONE, userInput: NONE, toolApproval: NONE, cancellation: NONE, reportedModel: NONE },
+      managed: { structuredEvents: "supported", userInput: NONE, toolApproval: "supported", cancellation: "supported", reportedModel: "unverified" },
+    },
+    validateSettings: (settings, version) => {
+      requireVersion(version, 1, "DeepSeek Harness");
+      exactSettings(settings, [], "DeepSeek Harness");
+      return {};
+    },
+    create: () => new DeepSeekHarnessRunner(),
   });
   return registry;
 }
