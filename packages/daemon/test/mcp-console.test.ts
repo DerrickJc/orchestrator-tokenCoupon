@@ -59,6 +59,36 @@ function candidate(messageId: string) {
 }
 
 describe("ChatGPT-direction MCP and local human controls", () => {
+  it("accepts the BIZ-04 mixed Runner matrix in one Planning while rejecting unsupported modes", async () => {
+    const h = await harness();
+    const prepared = await h.call("planning_prepare", { workspaceId: h.workspace.workspaceId, requestKey: randomUUID(), role: "plan", message: "增加问候函数，并补充测试", executionDefaults: { runnerId: "codex", modelId: "gpt-6-luna", mode: "managed" } });
+    const { operationId, planningId, sourceMessageId } = prepared.operation;
+    const context = await h.call("external_context", { workspaceId: h.workspace.workspaceId, operationId });
+    expect(context.protocol).toContain("executionDefaults 仅为缺省配置");
+    const matrix = JSON.parse(await readFile(new URL("../../core/test/fixtures/biz04-task-matrix.json", import.meta.url), "utf8"));
+    // Transport/application regression only: no real webpage or Runner is invoked.
+    const reply = candidate(sourceMessageId);
+    reply.plan = { schemaVersion: 1, id: "biz04-mixed", title: "BIZ-04 mixed execution", tasks: matrix.tasks.map((item: any) => ({
+      task: { schemaVersion: 1, id: item.id, title: item.title, prompt: item.title, execution: item.execution }, dependsOn: item.dependsOn, status: "planned",
+    })) };
+    const invalid = structuredClone(reply);
+    invalid.plan.tasks[2]!.task.execution = { runnerId: "codex", mode: "non_interactive" };
+    const rejected = await h.call("external_submit", { workspaceId: h.workspace.workspaceId, operationId, requestKey: randomUUID(), reply: invalid });
+    expect(rejected.job.status).toBe("failed");
+    expect(rejected.job.error).toContain("不支持 non_interactive");
+    expect((await h.call("planning_query", { workspaceId: h.workspace.workspaceId, planningId })).draft).toBeUndefined();
+
+    const submitted = await h.call("external_submit", { workspaceId: h.workspace.workspaceId, operationId, requestKey: randomUUID(), reply });
+    expect(submitted.job.status).toBe("succeeded");
+    const view = await h.call("planning_query", { workspaceId: h.workspace.workspaceId, planningId });
+    expect(view.planningId).toBe(planningId);
+    expect(view.draft.plan.tasks.map((entry: any) => ({ id: entry.task.id, execution: entry.task.execution }))).toEqual(matrix.tasks.map((item: any) => ({ id: item.id, execution: item.execution })));
+    const stored = await new PlannerStore(h.workspace.path).load(planningId);
+    expect(stored.executionDefaults).toEqual({ runnerId: "codex", modelId: "gpt-6-luna", mode: "managed" });
+    expect(stored.turns.map(turn => turn.status)).toEqual(["failed", "succeeded"]);
+    expect(stored.approval).toBeNull(); expect(stored.execution).toBeNull();
+  }, 30_000);
+
   it("registers a local reply, exposes its pending input, accepts a web result, and validates draft edits", async () => {
     const h = await harness(); const initial = await h.prepare();
     const { operationId, planningId, sourceMessageId } = initial.operation;
@@ -72,6 +102,9 @@ describe("ChatGPT-direction MCP and local human controls", () => {
     const message = "增加问候函数，并补充测试";
     const registered = await post("replies", { message }); expect(registered.status).toBe("succeeded"); expect(registered.result.nextAction).toBe("external_context");
     const waiting = await h.call("planning_query", { workspaceId: h.workspace.workspaceId, planningId });
+    expect(waiting.workspace).toEqual({ workspaceId: h.workspace.workspaceId, label: h.workspace.label });
+    expect(waiting.handoffs).toBeInstanceOf(Array);
+    expect(waiting.messages).toBeUndefined(); expect(waiting.turns).toBeUndefined();
     const pending = waiting.externalOperations.find((item: { operationId: string }) => item.operationId === registered.result.operationId);
     expect(pending).toMatchObject({ state: "prepared", message, expectedRevision: waiting.revision }); expect(pending.sourceMessageId).toBeTypeOf("string");
     expect((await new PlannerStore(h.workspace.path).load(planningId)).messages.some((item) => item.messageId === pending.sourceMessageId)).toBe(false);
@@ -119,6 +152,8 @@ describe("ChatGPT-direction MCP and local human controls", () => {
     const h = await harness();
     const tools = await h.client.listTools();
     expect(tools.tools.find((tool) => tool.name === "workspace_query")?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.tools.find((tool) => tool.name === "planning_query")?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.tools.find((tool) => tool.name === "handoff_claim")?.annotations?.readOnlyHint).toBe(false);
     expect(tools.tools.some((tool) => /approve|answer_interaction|force_unlock/.test(tool.name))).toBe(false);
     expect((await h.call("workspace_query")).workspaces[0].path).toBe(h.workspace.path);
     const unauth = await fetch(`${h.origin}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }); expect(unauth.status).toBe(401);

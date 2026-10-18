@@ -6,6 +6,7 @@ import { executeTask } from "../src/execute-task.js";
 import { MockRunner } from "../src/runners/mock-runner.js";
 import type { Runner } from "../src/runner.js";
 import type { TaskDefinition } from "../src/task.js";
+import { parseTask } from "../src/validate-task.js";
 
 const roots: string[] = [];
 async function workspace(): Promise<string> {
@@ -26,6 +27,30 @@ function task(timeoutMs = 2000): TaskDefinition {
 }
 
 describe("executeTask", () => {
+  it("keeps the BIZ-01 approved task intact while supplying host-owned execution identity and preserving real approvals", async () => {
+    const definition = parseTask(JSON.parse(await readFile(new URL("./fixtures/biz01-design-task.json", import.meta.url), "utf8")));
+    const original = JSON.stringify(definition), cwd = await workspace();
+    let approvalCalls = 0;
+    const runner: Runner = { id: "codex", supportsModel: true, checkAvailable: async () => undefined, run: async (input, context) => {
+      expect(input.executionInstructions).toContain("你就是编排器已经启动的本机 Runner");
+      expect(input.executionInstructions).toContain(input.attemptId);
+      expect(input.executionInstructions).toContain(cwd);
+      expect(input.prompt.indexOf(input.executionInstructions!)).toBe(0);
+      expect(input.prompt).toContain("须经 4177 批准后由本机 Runner 执行");
+      expect(input.prompt).toContain("本上下文不授予额外工具权限");
+      expect(input.prompt).toContain("只完成当前任务的目标");
+      context.onStarted();
+      const decision = await context.requestInteraction!({ kind: "approval", title: "命令审批", summary: "写入文档", operation: { kind: "command", command: "write design" } });
+      expect(decision).toMatchObject({ kind: "approval", decision: "deny" });
+      context.onOutput({ stream: "stdout", text: `缺少实际操作批准\n${input.needsInputMarker}\n`, agentText: `缺少实际操作批准\n${input.needsInputMarker}\n` });
+      return { started: true, exitCode: 0, signal: null };
+    } };
+    const result = await executeTask({ task: definition, cwd, runner, onInteraction: async () => { approvalCalls++; return { kind: "approval", decision: "deny" }; } });
+    expect(approvalCalls).toBe(1);
+    expect(result.attempt).toMatchObject({ status: "needs_input", reasonCode: "user_input_required" });
+    expect(JSON.stringify(definition)).toBe(original);
+    expect(await readFile(join(result.artifactDir, "prompt.txt"), "utf8")).toContain("不要调用 workspace_query");
+  });
   it("persists readable deltas and final text even when displayText suppresses duplicate console output", async () => {
     const runner: Runner = { id: "mock", supportsModel: false, checkAvailable: async () => undefined, run: async (input, context) => {
       context.onStarted();

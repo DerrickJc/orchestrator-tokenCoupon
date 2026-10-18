@@ -73,17 +73,20 @@ export class RepositoryReader {
   }
 
   private async list(value: unknown): Promise<unknown> {
-    const args = exactArgs(value, ["path", "offset"]);
+    const args = exactArgs(value, ["path", "offset", "query"]);
     const path = optionalPath(args.path);
     const offset = optionalInteger(args.offset, 0, 5000, "offset");
+    const query = args.query === undefined ? "" : typeof args.query === "string" ? args.query.trim().normalize("NFKC") : "";
+    if (args.query !== undefined && (typeof args.query !== "string" || Buffer.byteLength(query, "utf8") > 256)) throw new RepositoryReadError("invalid_tool_arguments", "目录名称查询最多 256 字节");
     const directory = await this.resolvePath(path, "directory");
     const entries = (await readDirectoryBounded(directory))
       .filter((entry) => !isExcluded([...pathParts(path), entry.name]) && !entry.isSymbolicLink())
       .map((entry) => ({ name: entry.name, type: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other" }))
+      .filter((entry) => !query || entry.name.normalize("NFKC").toLocaleLowerCase("en-US").includes(query.toLocaleLowerCase("en-US")))
       .sort((a, b) => a.name.localeCompare(b.name));
     this.scannedEntries += entries.length;
     if (this.scannedEntries > 5000) throw new RepositoryReadError("repository_entry_limit", "本轮目录项数量超过 5,000");
-    return { path, offset, entries: entries.slice(offset, offset + LIST_PAGE), nextOffset: offset + LIST_PAGE < entries.length ? offset + LIST_PAGE : null };
+    return { path, query, totalMatches: entries.length, offset, entries: entries.slice(offset, offset + LIST_PAGE), nextOffset: offset + LIST_PAGE < entries.length ? offset + LIST_PAGE : null };
   }
 
   private async read(value: unknown): Promise<unknown> {
@@ -298,7 +301,7 @@ export async function verifyRepositoryEvidence(workspace: string, evidence: Repo
 
 export function repositoryToolDefinitions() {
   return [
-    { type: "function", function: { name: "repo_list", description: "列出 workspace 内的普通文件和目录。path 使用相对路径，offset 用于分页。", parameters: { type: "object", additionalProperties: false, properties: { path: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["path", "offset"] } } },
+    { type: "function", function: { name: "repo_list", description: "列出 workspace 当前目录中的普通文件和目录。path 使用相对路径；可选 query 按名称筛选当前目录；offset 用于筛选后的分页。", parameters: { type: "object", additionalProperties: false, properties: { path: { type: "string" }, offset: { type: "integer", minimum: 0 }, query: { type: "string", maxLength: 256 } }, required: ["path", "offset"] } } },
     { type: "function", function: { name: "repo_read", description: "读取 workspace 内文本文件的指定行。", parameters: { type: "object", additionalProperties: false, properties: { path: { type: "string" }, startLine: { type: "integer", minimum: 1 }, lineCount: { type: "integer", minimum: 1, maximum: 200 } }, required: ["path", "startLine", "lineCount"] } } },
     { type: "function", function: { name: "repo_search", description: "在 workspace 文本文件中按字面字符串搜索。", parameters: { type: "object", additionalProperties: false, properties: { path: { type: "string" }, query: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["path", "query", "offset"] } } },
   ];

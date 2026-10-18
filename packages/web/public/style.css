@@ -76,6 +76,28 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .workspace-form input[type="checkbox"], .workspace-form input[type="radio"] { width:17px; }
 .remote-scope-list label, .file-choice { display:flex; align-items:center; gap:10px; line-height:1.6; font-size:13px; }
 .remote-scope-list label { padding:6px 0; }
+.remote-scope-list.permissions { display:block; }
+.remote-scope-list.permissions .remote-scope-all-row { display:flex; align-items:center; gap:9px; width:max-content; padding:7px 10px; margin:4px 0 10px; border:1px solid #dfe6d8; border-radius:8px; background:#f7f9f4; font-weight:650; }
+.remote-scope-list.permissions .remote-scope-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:4px 14px; border-top:1px solid var(--line); padding-top:8px; }
+.remote-scope-all-row input { width:16px; height:16px; margin:0; accent-color:var(--green-dark); }
+.job-plan-link { display:inline-flex; align-items:center; min-width:0; max-width:min(42vw,520px); color:#e4f1de; font-size:12px; font-weight:700; text-decoration:underline; text-underline-offset:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.job-bar[data-state="succeeded"] .job-plan-link,.job-bar[data-state="failed"] .job-plan-link,.job-bar[data-state="interrupted"] .job-plan-link { color:var(--green-dark); }
+.session-control-status { margin:7px 0 0; padding:7px 10px; border-radius:7px; background:#f5f7f2; color:#43513e; font-size:12px; }
+.approval-text-foldout { margin:8px 0 12px; padding:8px 10px; border:1px solid #dce3e9; border-radius:8px; background:#f8fafc; }
+.approval-text-foldout > summary { cursor:pointer; color:#34495d; font-weight:700; }
+.approval-text-foldout .approval-reason,.approval-text-foldout .approval-command { max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+#file-name-search { width:100%; box-sizing:border-box; margin:8px 0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+#file-search-status { min-height:1.4em; }
+.plan-field-preview section { min-width:0; }
+.plan-field-preview p { min-width:0; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.task-agent-config-list { display:grid; gap:10px; max-height:min(55vh,640px); overflow:auto; margin:12px 0; }
+.task-agent-config-row { min-width:0; padding:12px; border:1px solid var(--line); border-radius:9px; }
+.task-agent-config-row legend { max-width:100%; padding:0 6px; font-size:12px; font-weight:700; overflow-wrap:anywhere; }
+.task-agent-config-fields { grid-template-columns:repeat(2,minmax(0,1fr)); margin:5px 0; }
+.task-agent-config-fields select,.task-agent-config-fields input { width:100%; min-width:0; padding:9px; border:1px solid var(--line); border-radius:7px; background:#fff; }
+.task-agent-config-row>.hint { margin:7px 0 0; }
+@media(max-width:600px) { .task-agent-config-fields { grid-template-columns:1fr; } }
+@media(max-width:600px) { .job-plan-link { max-width:100%; flex-basis:100%; } .remote-scope-list.permissions .remote-scope-options { grid-template-columns:1fr; } }
 .file-choice .file-entry { flex:1; min-width:0; }
 .file-choice { padding:2px 4px; }
 #workspace-connection-summary { border-left:3px solid #91a87a; line-height:1.8; }
@@ -225,6 +247,9 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 #attempt-reader,#attempt-messages,#task-list,#task-dependencies { overflow-anchor:none; }
 .remote-approval-card label { display:grid; gap:8px; margin:10px 0; }
 .remote-approval-card .remote-scope { display:flex; }
+.remote-approval-card .permissions { display:flex; flex-wrap:wrap; align-items:center; gap:8px 20px; }
+.remote-approval-card .permissions > label { display:inline-flex; align-items:center; gap:7px; margin:0; padding:2px 0; width:auto; white-space:nowrap; }
+.remote-approval-card .permissions input[type="checkbox"] { margin:0; }
 @media(min-width:1700px) { .task-board { grid-template-columns:repeat(4,minmax(0,1fr)); } }
 @media(max-width:700px) { .task-board { grid-template-columns:minmax(0,1fr); } }
 .attempt-messages { position:relative; }
@@ -389,3 +414,33 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .grant-editor > .foldout label { display:grid; gap:5px; margin-top:8px; font-size:13px; }
 .grant-editor-feedback { margin:8px 0; }
 .remote-grant-card[data-mode="saved"] .grant-editor-feedback { display:none; }
+
+/* Keep connection status and refresh controls in the lower-left sidebar. */
+.sidebar-footer { display:grid; gap:10px; }
+.sidebar-connection-state { display:flex; align-items:center; gap:8px; }
+.sidebar-footer-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.sidebar-footer-actions .text-button { margin-left:0; white-space:nowrap; }
+@media(max-width:650px) { .topbar .top-actions { display:none; } }
+.review-run-controls { display:flex; align-items:end; justify-content:flex-end; gap:10px; flex-wrap:wrap; }
+.review-run-controls .compact-label { display:grid; gap:5px; min-width:170px; font-size:12px; color:var(--muted); }
+.review-run-controls select,.review-run-controls input { max-width:230px; min-height:36px; }
+#reviewer-mode-hint { margin:8px 0 14px; }
+@media(max-width:720px) { .review-run-controls { justify-content:stretch; } .review-run-controls .compact-label { flex:1 1 100%; } .review-run-controls select,.review-run-controls input { max-width:none; width:100%; } }
+
+/* Runner questions are choices/information requests, separate from tool approval. */
+.runner-question { min-width:0; margin:14px 0; padding:0; border:0; }
+.runner-question legend { margin-bottom:9px; font-size:14px; font-weight:650; }
+.runner-question-option { display:flex; align-items:flex-start; gap:9px; margin:7px 0; padding:10px 12px; border:1px solid #d4deea; background:#f7f9fc; border-radius:9px; line-height:1.6; cursor:pointer; }
+.runner-question-option:has(input:checked) { border-color:#527da9; background:#eef4fb; }
+.runner-question-option input { flex:0 0 auto; width:16px; height:16px; margin:4px 0 0; accent-color:#356a99; }
+.runner-question-option span { min-width:0; overflow-wrap:anywhere; }
+.runner-question-text { display:grid; gap:7px; margin-top:10px; font-size:12px; }
+.runner-question-text input { width:100%; }
+.runner-question-context { margin:10px 0; padding:12px; border:1px solid #d6e0ed; background:#f3f6fa; border-radius:9px; }
+.runner-question-context strong { font-size:12px; }
+.runner-question-context p { max-height:220px; overflow:auto; margin:8px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.65; }
+.pending-approval-box.has-pending .interaction-card .hint { color:#52677e; }
+
+.execution-floating-status{position:fixed;right:24px;bottom:24px;z-index:45;display:grid;gap:7px;width:min(340px,calc(100vw - 32px));padding:16px 19px;border:1px solid #c5d3bf;border-left:4px solid var(--green-dark);border-radius:12px;background:#fbfdf8;color:var(--ink);box-shadow:0 8px 28px #20331f26;text-decoration:none;cursor:pointer}.execution-floating-status strong{font-size:13px;line-height:1.5;overflow-wrap:anywhere}.execution-floating-status span{font-size:12px;color:var(--green-dark)}.execution-floating-status:hover,.execution-floating-status:focus-visible{background:var(--soft);outline:2px solid #b8cbb0}.execution-floating-status[data-state=failed],.execution-floating-status[data-state=cancelled]{border-left-color:var(--red)}
+
+.reference-path-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}.reference-path-row input{flex:1;min-width:160px}#directory-dialog{width:min(720px,calc(100vw - 32px))}#directory-dialog input,#file-directory-path{border:1px solid var(--line);border-radius:7px;padding:10px;font:inherit;background:white}#directory-dialog label{display:block;font-size:12px;margin:12px 0 5px}#directory-query{width:100%}#directory-dialog .file-list{max-height:40vh;overflow:auto;margin:12px 0}

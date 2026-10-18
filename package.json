@@ -26,7 +26,8 @@
     "demo:phase6-mixed-live": "npm run build && node scripts/phase6-mixed-live-demo.mjs",
     "test": "npm run build && vitest run",
     "demo:phase6-bugfix": "npm run build && node scripts/phase6-bugfix-demo.mjs",
-    "demo:phase7-web-handoff": "npm run build && node scripts/phase7-web-handoff-demo.mjs"
+    "demo:phase7-web-handoff": "npm run build && node scripts/phase7-web-handoff-demo.mjs",
+    "demo:phase7-biz01-execution-live": "npm run build && node scripts/phase7-biz01-execution-live-demo.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

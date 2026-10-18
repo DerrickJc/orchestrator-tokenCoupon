@@ -304,8 +304,8 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
       (raw.draftRevision !== null && (!Number.isSafeInteger(raw.draftRevision) || (raw.draftRevision as number) < 1)) ||
       typeof raw.createdAt !== "string" || typeof raw.updatedAt !== "string") throw new Error("Planner 快照字段无效");
   const config = raw.config as Record<string, unknown>;
-  if (!["mock", "deepseek", "chatgpt-mcp", "web-mcp"].includes(String(config.provider)) || typeof config.model !== "string" || !config.model || Buffer.byteLength(config.model, "utf8") > 256 ||
-      typeof config.baseUrl !== "string" || (config.provider === "mock" ? config.baseUrl !== "mock://local" : config.provider === "chatgpt-mcp" ? config.baseUrl !== "mcp://chatgpt" : config.provider === "web-mcp" ? config.baseUrl !== "mcp://web" : !safeEndpoint(config.baseUrl))) {
+  if (!["mock", "deepseek", "chatgpt-mcp", "web-mcp", "codex-agent", "claude-agent"].includes(String(config.provider)) || typeof config.model !== "string" || !config.model || Buffer.byteLength(config.model, "utf8") > 256 ||
+      typeof config.baseUrl !== "string" || (config.provider === "mock" ? config.baseUrl !== "mock://local" : config.provider === "chatgpt-mcp" ? config.baseUrl !== "mcp://chatgpt" : config.provider === "web-mcp" ? config.baseUrl !== "mcp://web" : config.provider === "codex-agent" ? config.baseUrl !== "agent://codex" : config.provider === "claude-agent" ? config.baseUrl !== "agent://claude-code" : !safeEndpoint(config.baseUrl))) {
     throw new Error("Planner 配置快照无效");
   }
   const executionDefaults = parseExecution(raw.executionDefaults);

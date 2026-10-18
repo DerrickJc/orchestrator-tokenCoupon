@@ -4,12 +4,14 @@ import { delimiter, join } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 import type { CanUseTool, PermissionResult, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { Runner, RunnerContext, RunnerInput, RunnerInteractionRequest, RunnerResult } from "../runner.js";
+import type { Runner, RunnerContext, RunnerInput, RunnerInteractionRequest, RunnerResult, RunnerModelSource } from "../runner.js";
 
 export interface ClaudeManagedSettings {
   permissionMode?: "default" | "acceptEdits" | "plan" | "dontAsk";
   allowedTools?: string[];
   disallowedTools?: string[];
+  settingSources?: Array<"user" | "project" | "local">;
+  strictMcpConfig?: boolean;
 }
 
 async function findExecutable(name: string): Promise<string> {
@@ -36,6 +38,17 @@ export class ClaudeManagedRunner implements Runner {
     let started = false;
     let nativeOutcome: RunnerResult["nativeOutcome"] = "unknown";
     let resultSeen = false;
+    let reportedModel: string | undefined;
+    let reportedModelSource: RunnerModelSource | undefined;
+    const modelPriority = { "claude-sdk-init": 1, "claude-sdk-model-usage": 2, "claude-sdk-assistant": 3 };
+    const reportModel = async (value: unknown, source: RunnerModelSource) => {
+      const model = nativeModel(value);
+      if (!model || (reportedModelSource && modelPriority[source] < modelPriority[reportedModelSource])) return;
+      if (reportedModel === model && reportedModelSource === source) return;
+      reportedModel = model;
+      reportedModelSource = source;
+      await context.recordEvent?.({ type: "runner.model.reported", model, source });
+    };
     let executionError: string | undefined;
     let cleanupStatus: RunnerResult["cleanupStatus"] = "completed";
     let query: ReturnType<typeof claudeQuery> | undefined;
@@ -84,7 +97,8 @@ export class ClaudeManagedRunner implements Runner {
         permissionMode: this.settings.permissionMode ?? "default",
         ...(this.settings.allowedTools ? { allowedTools: this.settings.allowedTools } : {}),
         ...(this.settings.disallowedTools ? { disallowedTools: this.settings.disallowedTools } : {}),
-        settingSources: ["user", "project"],
+        settingSources: this.settings.settingSources ?? ["user", "project"],
+        ...(this.settings.strictMcpConfig ? { strictMcpConfig: true, mcpServers: {} } : {}),
         persistSession: false,
         abortController,
         canUseTool,
@@ -95,6 +109,18 @@ export class ClaudeManagedRunner implements Runner {
       if (!abortController.signal.aborted) {
         for await (const message of query) {
           if (!started) { started = true; context.onStarted(); }
+          context.onActivity?.();
+          if (message.type === "system" && message.subtype === "init") {
+            await reportModel(message.model, "claude-sdk-init");
+          } else if (message.type === "assistant" && message.parent_tool_use_id === null && !message.error) {
+            await reportModel(message.message.model, "claude-sdk-assistant");
+          } else if (message.type === "result" && message.modelUsage) {
+            // Query totals also include subagents and auxiliary calls. Never pick
+            // an arbitrary key or let those totals replace a main-agent reply.
+            const models = Object.entries(message.modelUsage).filter(([model, usage]) => nativeModel(model) &&
+              [usage.inputTokens, usage.outputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens].some(tokens => tokens > 0));
+            if (models.length === 1) await reportModel(models[0]![0], "claude-sdk-model-usage");
+          }
           await recordClaudeMessage(message, context, toolCalls, input.cwd);
           if (message.type === "result") {
             resultSeen = true;
@@ -141,9 +167,16 @@ export class ClaudeManagedRunner implements Runner {
       exitCode: nativeOutcome === "completed" ? null : nativeOutcome === "failed" || nativeOutcome === "incomplete" ? 1 : null,
       signal: abortController.signal.aborted ? "ABORTED" : null,
       transport: "sdk", nativeOutcome, cleanupStatus,
+      ...(reportedModel && reportedModelSource ? { reportedModel, reportedModelSource } : {}),
       ...(executionError ? { executionError } : {}),
     };
   }
+}
+
+function nativeModel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const model = value.trim();
+  return model && model !== "unknown" && !/^<.*>$/.test(model) ? model : undefined;
 }
 
 async function recordClaudeMessage(message: SDKMessage, context: RunnerContext, toolCalls: Map<string, { name: string; input: Record<string, unknown> }>, cwd: string): Promise<void> {

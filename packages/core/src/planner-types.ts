@@ -92,7 +92,7 @@ export interface ConfirmationState {
 export type PlannerTurnStatus = "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
 
 export interface PlannerConfig {
-  provider: "mock" | "deepseek" | "chatgpt-mcp" | "web-mcp";
+  provider: "mock" | "deepseek" | "chatgpt-mcp" | "web-mcp" | "codex-agent" | "claude-agent";
   model: string;
   baseUrl: string;
 }
@@ -165,6 +165,10 @@ export interface PlanReviewRecord {
   planHash: string;
   requirementsHash: string;
   reviewerConfigHash: string;
+  /** Backend used for this review; absent on legacy records, which used the planning provider. */
+  reviewerConfig?: PlannerConfig;
+  /** Runner-reported model; absent means the adapter did not report one. */
+  reviewerReportedModel?: string;
   context: RepositoryEvidence[];
   findings: PlanReviewFinding[];
   summary: string;

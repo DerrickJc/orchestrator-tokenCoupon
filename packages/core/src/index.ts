@@ -11,7 +11,7 @@ export type { PlanChange } from "./plan-diff.js";
 export { parseTask } from "./validate-task.js";
 export { InputValidationError } from "./validation.js";
 export type { AttemptRecord, AttemptStatus } from "./attempt.js";
-export type { RunnerNativeError, RunnerDiagnostics } from "./runner.js";
+export type { RunnerNativeError, RunnerDiagnostics, RunnerModelSource } from "./runner.js";
 export { recoverAbandonedAttempt } from "./attempt-recovery.js";
 export type { Runner, RunnerInput, RunnerOutput, RunnerContext, ProcessResult, RunnerResult, RunnerNativeOutcome, RunnerCleanupStatus, RunnerEvent, RunnerInteractionRequest, RunnerInteractionReply, RunnerInteractionResolution, RunnerInteractionOwner, ElicitationFieldSchema, RunnerCapabilityName, RunnerCapabilityState, RunnerCapabilities, RunnerRegistration, RunnerProfile, ResolvedRunnerSpec } from "./runner.js";
 export { RunnerRegistry, parseRunnerProfile, runnerProfileHash } from "./runner-registry.js";

@@ -86,6 +86,10 @@ it("browses only visible directories, preserves Chinese paths and paginates with
   await Promise.all(Array.from({ length: 102 }, (_, i) => mkdir(join(h.path, `folder-${i}`))));
   const first = await browseDirectories(h.path); expect(first.entries).toHaveLength(100); expect(first.nextOffset).toBe(100);
   expect((await browseDirectories(h.path, 100)).entries).toHaveLength(3);
+  await mkdir(join(h.path, "ZZ-Target"));
+  const found = await browseDirectories(h.path, 0, "target");
+  expect(found.entries.map(entry => entry.name)).toEqual(["ZZ-Target"]); expect(found.totalMatches).toBe(1); expect(found.nextOffset).toBeNull();
+  await expect(browseDirectories(h.path, 0, "x".repeat(257))).rejects.toThrow("directory_query_invalid");
 });
 
 it("rejects a symlink runtime directory without writing outside the selected workspace", async () => {

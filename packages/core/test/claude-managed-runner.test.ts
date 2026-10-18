@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
 
 import { ClaudeManagedRunner } from "../src/runners/claude-managed-runner.js";
+import { executeTask } from "../src/execute-task.js";
 
 let fixtureRoot = "";
 beforeEach(() => {
@@ -26,6 +27,71 @@ afterEach(() => {
 });
 
 describe("ClaudeManagedRunner", () => {
+  const modelTask = () => ({ schemaVersion: 1 as const, id: "model-evidence", title: "Model evidence", prompt: "Only report the result", execution: { runnerId: "claude-code", mode: "managed" as const, modelId: "configured-alias" } });
+  async function runMessages(messages: unknown[]) {
+    queryMock.mockImplementation(() => ({ async *[Symbol.asyncIterator]() { yield* messages; }, close() {} }));
+    const events: RunnerEvent[] = [], task = modelTask();
+    const result = await new ClaudeManagedRunner().run({ attemptId: "model-evidence", cwd: fixtureRoot, task, execution: task.execution, prompt: task.prompt, completionMarker: "marker" }, {
+      signal: new AbortController().signal, onStarted() {}, onOutput() {},
+      async recordEvent(event) { events.push(event); },
+      async requestInteraction() { throw new Error("No tools expected"); },
+    });
+    return { result, events };
+  }
+  const reply = (model: string, parent: string | null = null) => ({ type: "assistant", parent_tool_use_id: parent, message: { id: "reply", model, content: [{ type: "text", text: "done" }] } });
+  const success = (modelUsage = {}) => ({ type: "result", subtype: "success", is_error: false, result: "done", permission_denials: [], modelUsage });
+
+  it("records native init and main reply models without substituting the requested alias or subagent model", async () => {
+    const { result, events } = await runMessages([
+      { type: "system", subtype: "init", model: "startup-alias" }, reply("deepseek-flash"), reply("child-model", "child-tool"),
+      success({ "deepseek-flash": { inputTokens: 10 }, "auxiliary-model": { inputTokens: 20 } }),
+    ]);
+    expect(result).toMatchObject({ reportedModel: "deepseek-flash", reportedModelSource: "claude-sdk-assistant", nativeOutcome: "completed" });
+    expect(events.filter(event => event.type === "runner.model.reported")).toEqual([
+      { type: "runner.model.reported", model: "startup-alias", source: "claude-sdk-init" },
+      { type: "runner.model.reported", model: "deepseek-flash", source: "claude-sdk-assistant" },
+    ]);
+    expect(queryMock.mock.calls[0]?.[0].options.model).toBe("configured-alias");
+  });
+
+  it.each([
+    { name: "SDK init only", messages: [{ type: "system", subtype: "init", model: "deepseek-flash" }, success()], model: "deepseek-flash", source: "claude-sdk-init" },
+    { name: "single active usage entry", messages: [success({ "empty-model": { inputTokens: 0 }, "deepseek-flash": { cacheReadInputTokens: 2 } })], model: "deepseek-flash", source: "claude-sdk-model-usage" },
+    { name: "ambiguous usage", messages: [success({ first: { inputTokens: 1 }, second: { outputTokens: 1 } })], model: undefined, source: undefined },
+    { name: "missing native metadata", messages: [success()], model: undefined, source: undefined },
+    { name: "synthetic or empty model", messages: [{ type: "system", subtype: "init", model: " " }, reply("<synthetic>"), reply("unknown"), success()], model: undefined, source: undefined },
+    { name: "error reply is not inference evidence", messages: [{ ...reply("error-model"), error: "model_not_found" }, { type: "result", subtype: "error_during_execution", is_error: true }], model: undefined, source: undefined },
+  ])("handles $name without inventing model evidence", async ({ messages, model, source }) => {
+    const { result } = await runMessages(messages);
+    expect(result.reportedModel).toBe(model);
+    expect(result.reportedModelSource).toBe(source);
+  });
+
+  it("keeps the latest main-agent model and preserves its evidence when execution fails", async () => {
+    const { result } = await runMessages([reply("first-model"), reply("second-model"), { type: "system", subtype: "init", model: "startup-alias" },
+      { type: "result", subtype: "error_during_execution", is_error: true }]);
+    expect(result).toMatchObject({ reportedModel: "second-model", reportedModelSource: "claude-sdk-assistant", nativeOutcome: "failed" });
+  });
+
+  it("persists the reported model while executeTask is still running and in the final Attempt", async () => {
+    queryMock.mockImplementation((request: { prompt: string }) => ({
+      async *[Symbol.asyncIterator]() {
+        const marker = request.prompt.match(/<<<TOKEN_COUPON_DONE:[^>]+>>>/)?.[0];
+        expect(marker).toBeTruthy();
+        yield { ...reply("deepseek-flash"), message: { id: "completed", model: "deepseek-flash", content: [{ type: "text", text: marker }] } };
+        const runs = join(fixtureRoot, ".token-coupon", "runs"), id = readdirSync(runs)[0]!;
+        expect(JSON.parse(readFileSync(join(runs, id, "attempt.json"), "utf8"))).toMatchObject({ status: "running", reportedModel: "deepseek-flash", reportedModelSource: "claude-sdk-assistant" });
+        yield { ...success(), result: marker };
+      }, close() {},
+    }));
+    const result = await executeTask({ cwd: fixtureRoot, task: modelTask(), runner: new ClaudeManagedRunner() });
+    expect(result.attempt).toMatchObject({ status: "succeeded", reportedModel: "deepseek-flash", reportedModelSource: "claude-sdk-assistant" });
+    const saved = JSON.parse(readFileSync(join(result.artifactDir, "attempt.json"), "utf8"));
+    expect(saved.reportedModel).toBe("deepseek-flash");
+    const events = readFileSync(join(result.artifactDir, "events.jsonl"), "utf8");
+    expect(events).toContain('"type":"runner.model.reported"');
+  });
+
   it("sends denial guidance through the native tool-permission response", async () => {
     const guidance = "Use the existing dependency; do not install another package.";
     let permissionResult: unknown;
@@ -89,9 +155,13 @@ describe("ClaudeManagedRunner", () => {
   it("closes the active SDK query when the owner cancels", async () => {
     let finish: (() => void) | undefined;
     let closed = false;
+    let initialized = false;
     queryMock.mockImplementation(() => ({
       [Symbol.asyncIterator]() { return this; },
-      next() { return new Promise((resolve) => { finish = () => resolve({ done: true, value: undefined }); }); },
+      next() {
+        if (!initialized) { initialized = true; return Promise.resolve({ done: false, value: { type: "system", subtype: "init", model: "deepseek-flash" } }); }
+        return new Promise((resolve) => { finish = () => resolve({ done: true, value: undefined }); });
+      },
       return() { finish?.(); return Promise.resolve({ done: true, value: undefined }); },
       close() { closed = true; finish?.(); },
     }));
@@ -108,12 +178,12 @@ describe("ClaudeManagedRunner", () => {
       async recordEvent(event) { events.push(event); },
       async requestInteraction() { throw new Error("no interaction expected"); },
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(events.some(event => event.type === "runner.model.reported")).toBe(true));
     controller.abort(new Error("test cancellation"));
     const result = await run;
 
     expect(closed).toBe(true);
-    expect(result).toMatchObject({ nativeOutcome: "cancelled", signal: "ABORTED", cleanupStatus: "completed" });
+    expect(result).toMatchObject({ nativeOutcome: "cancelled", signal: "ABORTED", cleanupStatus: "completed", reportedModel: "deepseek-flash", reportedModelSource: "claude-sdk-init" });
     expect(events).toContainEqual(expect.objectContaining({ type: "runner.native.finished", outcome: "cancelled" }));
   });
 

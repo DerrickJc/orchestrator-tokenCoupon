@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { continueSessionLanding, parsePlan, PlanStore, resumeSession, retrySession, runPlan, SessionStore } from "../src/index.js";
@@ -43,6 +43,53 @@ function planValue(): unknown {
   };
 }
 
+const crossDagDependencies: Record<string, string[]> = {
+  A: [],
+  B: ["A"],
+  C: ["A"],
+  D: ["A"],
+  E: ["B", "D"],
+  F: ["C", "D"],
+  G: ["E", "F"],
+  H: ["B", "C"],
+  V: ["G", "H"],
+};
+const crossDagArtifacts: Record<string, string> = {
+  A: "docs/contracts.md",
+  B: "src/course.mjs",
+  C: "src/teacher.mjs",
+  D: "src/validation.mjs",
+  E: "src/routes/course.mjs",
+  F: "src/routes/teacher.mjs",
+  G: "src/server.mjs",
+  H: "docs/domain.md",
+};
+
+function crossDagPlanValue(): unknown {
+  const tasks = Object.entries(crossDagDependencies).map(([id, dependsOn]) => ({
+    task: { schemaVersion: 1, id, title: `Task ${id}`, prompt: `Produce ${id}`, execution: { runnerId: "mock", mode: "non_interactive" } },
+    dependsOn,
+    status: "planned",
+  }));
+  return { schemaVersion: 1, id: "phase7-cross-dag-test", title: "Nine task cross dependency test", tasks };
+}
+
+function startBarrier(expected: string[], label: string): (taskId: string) => Promise<void> {
+  const started = new Set<string>();
+  let release!: () => void;
+  const reached = new Promise<void>((resolve) => { release = resolve; });
+  return async (taskId) => {
+    started.add(taskId);
+    if (expected.every((id) => started.has(id))) release();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([reached, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} tasks were not dispatched together`)), 3000);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+  };
+}
+
 type Action = (input: RunnerInput, context: RunnerContext) => Promise<void>;
 class ActionRunner implements Runner {
   readonly id = "mock";
@@ -61,6 +108,113 @@ class ActionRunner implements Runner {
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("Phase 5 bounded Git-worktree scheduling", () => {
+  it("runs a nine-task cross-dependency DAG in dependency-safe waves and verifies every joined artifact", async () => {
+    const { workspace } = await createRepository();
+    const started: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const firstFanOut = startBarrier(["B", "C", "D"], "first fan-out");
+    const crossLineFanOut = startBarrier(["E", "F", "H"], "cross-line fan-out");
+    const barriers = new Map([
+      ["B", firstFanOut], ["C", firstFanOut], ["D", firstFanOut],
+      ["E", crossLineFanOut], ["F", crossLineFanOut], ["H", crossLineFanOut],
+    ]);
+    const createRunner = (task: TaskDefinition) => new ActionRunner(async (input) => {
+      started.push(task.id);
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        await barriers.get(task.id)?.(task.id);
+        for (const dependencyId of crossDagDependencies[task.id] ?? []) {
+          const dependencyPath = crossDagArtifacts[dependencyId];
+          if (dependencyPath) expect(await readFile(join(input.cwd, dependencyPath), "utf8")).toBe(`${dependencyId}\n`);
+        }
+        if (task.id === "V") {
+          for (const artifact of Object.values(crossDagArtifacts)) await access(join(input.cwd, artifact));
+          return;
+        }
+        const artifact = crossDagArtifacts[task.id];
+        await mkdir(dirname(join(input.cwd, artifact)), { recursive: true });
+        await writeFile(join(input.cwd, artifact), `${task.id}\n`);
+      } finally { active -= 1; }
+    });
+
+    const result = await runPlan({
+      plan: parsePlan(crossDagPlanValue()), workspace, createRunner,
+      isolation: "git-worktree", verificationTaskId: "V", maxParallel: 3,
+    });
+
+    expect(result.snapshot.status, JSON.stringify({ tasks: result.snapshot.tasks, started })).toBe("succeeded");
+    expect(result.snapshot.tasks).toHaveLength(9);
+    expect(result.snapshot.tasks.every(({ status }) => status === "succeeded")).toBe(true);
+    expect(result.snapshot.maxParallel).toBe(3);
+    expect(peak).toBe(3);
+    expect(started).toHaveLength(9);
+
+    const store = new SessionStore(workspace);
+    const journal = (await store.load(result.snapshot.sessionId)).isolationJournal!;
+    const finalHead = await git(workspace, ["rev-parse", `refs/heads/token-coupon/session/${result.snapshot.sessionId}`]);
+    for (const [taskId, artifact] of Object.entries(crossDagArtifacts)) {
+      expect(await git(workspace, ["show", `${finalHead}:${artifact}`])).toBe(taskId);
+    }
+    const schedulerEvents = (await readFile(join(store.sessionDirectory(result.snapshot.sessionId), "scheduler-events.jsonl"), "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line) as { sequence: number; event: string; taskId?: string; waveId?: string });
+    const reservations = schedulerEvents.filter((event) => event.event === "task.reserved");
+    const waves = new Map<string, string[]>();
+    for (const event of reservations) {
+      const wave = waves.get(event.waveId!) ?? [];
+      wave.push(event.taskId!);
+      waves.set(event.waveId!, wave);
+    }
+    expect([...waves.values()]).toEqual([["A"], ["B", "C", "D"], ["E", "F", "H"], ["G"], ["V"]]);
+    expect(schedulerEvents.map(({ sequence }) => sequence)).toEqual(schedulerEvents.map((_event, index) => index + 1));
+    expect(journal.attempts.filter(({ taskId }) => taskId !== "V")).toHaveLength(8);
+    expect(journal.attempts.filter(({ status }) => status === "landed")).toHaveLength(8);
+  });
+
+  it("stops dispatch after a failed cross-DAG batch, then resumes only pending tasks after retry", async () => {
+    const { workspace } = await createRepository();
+    const calls = new Map<string, number>();
+    const started: string[] = [];
+    const firstFanOut = startBarrier(["B", "C", "D"], "first fan-out");
+    const createRunner = (task: TaskDefinition) => new ActionRunner(async (input) => {
+      const count = (calls.get(task.id) ?? 0) + 1;
+      calls.set(task.id, count);
+      started.push(task.id);
+      await (task.id === "B" || task.id === "C" || task.id === "D" ? firstFanOut(task.id) : Promise.resolve());
+      for (const dependencyId of crossDagDependencies[task.id] ?? []) {
+        const dependencyPath = crossDagArtifacts[dependencyId];
+        if (dependencyPath) expect(await readFile(join(input.cwd, dependencyPath), "utf8")).toBe(`${dependencyId}\n`);
+      }
+      if (task.id === "D" && count === 1) throw new Error("injected shared prerequisite failure");
+      if (task.id !== "V") {
+        const artifact = crossDagArtifacts[task.id];
+        await mkdir(dirname(join(input.cwd, artifact)), { recursive: true });
+        await writeFile(join(input.cwd, artifact), `${task.id}\n`);
+      } else {
+        for (const artifact of Object.values(crossDagArtifacts)) await access(join(input.cwd, artifact));
+      }
+    });
+    const plan = parsePlan(crossDagPlanValue());
+
+    const failed = await runPlan({ plan, workspace, createRunner, isolation: "git-worktree", verificationTaskId: "V", maxParallel: 3 });
+
+    expect(failed.snapshot.status).toBe("failed");
+    expect(started.sort()).toEqual(["A", "B", "C", "D"]);
+    expect(failed.snapshot.tasks.find(({ taskId }) => taskId === "B")?.status).toBe("succeeded");
+    expect(failed.snapshot.tasks.find(({ taskId }) => taskId === "C")?.status).toBe("succeeded");
+    expect(failed.snapshot.tasks.find(({ taskId }) => taskId === "D")?.status).toBe("failed");
+    expect(failed.snapshot.tasks.filter(({ taskId }) => ["E", "F", "G", "H", "V"].includes(taskId)).every(({ status }) => status !== "running" && status !== "succeeded")).toBe(true);
+
+    const retried = await retrySession({ sessionId: failed.snapshot.sessionId, workspace, taskId: "D", createRunner });
+    expect(retried.snapshot.tasks.find(({ taskId }) => taskId === "D")?.status).toBe("succeeded");
+    const resumed = await resumeSession({ sessionId: failed.snapshot.sessionId, workspace, createRunner });
+
+    expect(resumed.snapshot.status).toBe("succeeded");
+    expect(resumed.snapshot.tasks.every(({ status }) => status === "succeeded")).toBe(true);
+    expect(calls).toEqual(new Map([["A", 1], ["B", 1], ["C", 1], ["D", 2], ["E", 1], ["F", 1], ["H", 1], ["G", 1], ["V", 1]]));
+  });
+
   it("runs independent tasks concurrently, merges their sibling commits, then verifies the integrated tree", async () => {
     const { workspace, baseCommit } = await createRepository();
     let active = 0;

@@ -112,7 +112,7 @@ export async function runPlannerCli(args: string[], chatIO: PlannerChatIO = { in
         return 2;
       }
       console.log(`计划结构有效；SHA-256：${checked.planHash}`);
-      console.log(checked.executionPolicyChecked ? "执行配置：已与规划记录核对。" : "执行配置：未绑定规划记录，未核对。");
+      console.log(checked.executionPolicyChecked ? "执行配置：已应用规划缺省值，逐任务检查 Runner、模式和能力。" : "执行配置：已逐任务检查 Runner、模式和能力；未应用规划缺省值。");
       return 0;
     }
     if (command.action === "diff") {

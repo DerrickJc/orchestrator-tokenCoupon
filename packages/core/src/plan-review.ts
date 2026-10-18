@@ -27,6 +27,7 @@ export async function reviewPlannerDraft(options: {
   planningId: string;
   workspace: string;
   reviewer?: PlanReviewer;
+  reviewerConfig?: PlannerConfig;
   signal?: AbortSignal;
   expectedRevision?: number;
   repositoryOutputBudgetBytes?: number;
@@ -70,7 +71,8 @@ export async function reviewPlannerDraft(options: {
     const startedAt = new Date().toISOString();
     const record: PlanReviewRecord = {
       schemaVersion: 1, planningId: options.planningId, reviewId, status: "running", draftRevision: draft.draftRevision,
-      planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment),
+      planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(options.reviewerConfig ?? snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment),
+      ...(options.reviewerConfig ? { reviewerConfig: options.reviewerConfig } : {}),
       context: draft.context, findings: [], summary: "审查进行中", reportHash: null, reasonCode: null, createdAt: startedAt, finishedAt: null,
       ...(previousReview ? { previousReviewId: previousReview.reviewId } : {}), resolutions: [],
     };
@@ -110,8 +112,9 @@ export async function reviewPlannerDraft(options: {
       },
     };
     try {
-      const reviewer = options.reviewer ?? createPlanReviewer(snapshot.config);
+      const reviewer = options.reviewer ?? createPlanReviewer(options.reviewerConfig ?? snapshot.config);
       const raw = await reviewer.review(input, context);
+      const reviewerReportedModel = (reviewer as PlanReviewer & { reportedModel?: string }).reportedModel;
       if (timed.signal.aborted) throw timed.signal.reason ?? new Error("审查已取消");
       const parsed = ensureTechnologySelectionFinding(
         parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview),
@@ -123,6 +126,7 @@ export async function reviewPlannerDraft(options: {
       const finishedAt = new Date().toISOString();
       const succeeded = validateReviewRecord({
         ...record, status: "succeeded", context: evidence, ...parsed,
+        ...(reviewerReportedModel ? { reviewerReportedModel } : {}),
         reportHash: canonicalHash(reviewReportPayload({ ...record, ...parsed })), finishedAt,
       });
       await options.beforeCommit?.();
@@ -165,6 +169,7 @@ export async function reviewPlannerDraft(options: {
 export function createPlanReviewer(config: PlannerConfig, options: { fetchImpl?: typeof fetch } = {}): PlanReviewer {
   if (config.provider === "mock") return new MockPlanReviewer();
   if (["chatgpt-mcp", "web-mcp"].includes(config.provider)) throw new Error("external_review_required：请在网页中通过 MCP 准备并提交审查，当前没有发出 API 请求");
+  if (["codex-agent", "claude-agent"].includes(config.provider)) throw new Error("local_agent_reviewer_requires_daemon：本机 Agent 审查需由 daemon 使用只读 Runner 适配器调用");
   return new DeepSeekPlanner({ model: config.model, baseUrl: config.baseUrl, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
 }
 
@@ -174,7 +179,7 @@ export async function prepareExternalReviewInput(planningId: string, workspace: 
   const release = await store.acquireLock(planningId);
   try {
     const snapshot = await store.load(planningId);
-    if (!["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider) || snapshot.activeTurnId || snapshot.execution || snapshot.draftRevision === null) throw new Error("external_review_unavailable：当前没有可提交网页审查的草案");
+    if (snapshot.activeTurnId || snapshot.execution || snapshot.draftRevision === null) throw new Error("external_review_unavailable：当前没有可提交网页审查的草案");
     const draft = await store.loadDraft(planningId, snapshot.draftRevision);
     assertPlanningReady(snapshot.planningAssessment, draft.plan);
     const requirements = requireReconciledRequirements(snapshot);
@@ -200,7 +205,7 @@ export async function loadCurrentPlanReview(planningId: string, workspace: strin
     new ReviewStore(workspace).load(planningId, snapshot.latestReviewId),
   ]);
   if (record.status !== "succeeded" || record.draftRevision !== draft.draftRevision || record.planHash !== draft.planHash ||
-      record.requirementsHash !== requirementsHash(snapshot) || record.reviewerConfigHash !== reviewerConfigHash(snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment)) return undefined;
+      record.requirementsHash !== requirementsHash(snapshot) || record.reviewerConfigHash !== reviewerConfigHash(record.reviewerConfig ?? snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment)) return undefined;
   const changed = await verifyRepositoryEvidence(workspace, record.context);
   return changed.length ? undefined : record;
 }

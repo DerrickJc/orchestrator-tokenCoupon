@@ -11,6 +11,7 @@ import type { Runner, RunnerContext, RunnerInput, RunnerInteractionRequest, Runn
 export interface CodexRunnerSettings {
   sandbox?: "read-only" | "workspace-write";
   approvalPolicy?: "on-request" | "untrusted";
+  disableMcp?: boolean;
 }
 
 interface InternalSpawnOptions { executable?: string; args?: string[]; }
@@ -31,7 +32,7 @@ export class CodexRunner implements Runner {
     const executable = await findExecutable(this.internalSpawn.executable ?? "codex");
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(executable, [...(this.internalSpawn.args ?? []), "app-server", "--stdio"], {
+      child = spawn(executable, [...(this.internalSpawn.args ?? []), "app-server", ...(this.settings.disableMcp ? ["-c", "mcp_servers={}"] : []), "--stdio"], {
         cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true,
       });
     } catch (error) {
@@ -194,11 +195,20 @@ export class CodexRunner implements Runner {
         if (typeof item.type === "string" && ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"].includes(item.type)) {
           const name = item.type;
           const command = typeof item.command === "string" ? item.command : undefined;
-          const summary = command ?? (typeof item.title === "string" ? item.title : undefined);
-          if (message.method === "item/started") await context.recordEvent?.({ type: "tool.started", ...(itemId ? { toolId: itemId } : {}), name, ...(summary ? { summary: redactInline(summary) } : {}) });
+          const serverName = item.type === "mcpToolCall" && typeof item.server === "string" ? redactInline(item.server) : undefined;
+          const toolName = item.type === "mcpToolCall" && typeof item.tool === "string" ? redactInline(item.tool) : undefined;
+          const nativeError = item.type === "mcpToolCall" ? normalizeNativeError(item.error) : undefined;
+          const status = item.type === "mcpToolCall" && ["inProgress", "completed", "failed"].includes(String(item.status)) ? item.status as "inProgress" | "completed" | "failed" : undefined;
+          const mcpSummary = [serverName, toolName].filter(Boolean).join(".");
+          const summary = command ?? (typeof item.title === "string" ? item.title : mcpSummary || undefined);
+          const toolDetails = { ...(serverName ? { serverName } : {}), ...(toolName ? { toolName } : {}), ...(status ? { status } : {}), ...(nativeError ? { nativeError } : {}) };
+          if (message.method === "item/started") await context.recordEvent?.({ type: "tool.started", ...(itemId ? { toolId: itemId } : {}), name, ...(summary ? { summary: redactInline(summary) } : {}), ...toolDetails });
           else {
             const exitCode = typeof item.exitCode === "number" ? item.exitCode : undefined;
-            await context.recordEvent?.({ type: "tool.completed", ...(itemId ? { toolId: itemId } : {}), name, ...(summary ? { summary: redactInline(summary) } : {}), ...(exitCode === undefined ? {} : { exitCode }) });
+            await context.recordEvent?.({ type: "tool.completed", ...(itemId ? { toolId: itemId } : {}), name, ...(summary ? { summary: redactInline(summary) } : {}), ...(exitCode === undefined ? {} : { exitCode }), ...toolDetails });
+            if (item.type === "mcpToolCall" && (status === "failed" || nativeError)) {
+              await context.recordEvent?.({ type: "runner.diagnostic", severity: "warning", code: "mcp_tool_failed", message: `MCP 工具 ${mcpSummary || "未知工具"} 调用失败：${nativeError?.message || "原生状态为 failed，未提供错误详情"}`, ...(serverName ? { serverName } : {}), ...(toolName ? { toolName } : {}), ...(nativeError ? { nativeError } : {}) });
+            }
             if (item.type === "commandExecution") {
               await context.recordEvent?.({
                 type: "command.completed", ...(itemId ? { toolId: itemId } : {}),
@@ -273,6 +283,7 @@ export class CodexRunner implements Runner {
         ephemeral: true,
         approvalPolicy: this.settings.approvalPolicy ?? "on-request",
         sandbox: this.settings.sandbox ?? "workspace-write",
+        ...(input.executionInstructions ? { developerInstructions: input.executionInstructions } : {}),
         ...(input.execution.modelId ? { model: input.execution.modelId } : {}),
       });
       const threadInfo = isObject(thread.thread) ? thread.thread : {};

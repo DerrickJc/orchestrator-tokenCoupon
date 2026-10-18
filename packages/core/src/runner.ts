@@ -6,6 +6,8 @@ export interface RunnerInput {
   task: TaskDefinition;
   execution: ExecutionConfig;
   prompt: string;
+  /** Host-owned role/phase instructions; adapters may send these separately from task content. */
+  executionInstructions?: string;
   completionMarker: string;
   needsInputMarker?: string;
 }
@@ -45,10 +47,11 @@ export interface RunnerContext {
 
 export type RunnerEvent =
   | { type: "message.delta" | "message.completed"; messageId?: string; text: string; root: boolean }
-  | { type: "tool.started" | "tool.completed"; toolId?: string; name: string; summary?: string; exitCode?: number | null }
+  | { type: "tool.started" | "tool.completed"; toolId?: string; name: string; summary?: string; exitCode?: number | null; serverName?: string; toolName?: string; status?: "inProgress" | "completed" | "failed"; nativeError?: RunnerNativeError }
   | { type: "command.completed"; toolId?: string; command?: string; cwd: string; exitCode: number | null; status: "succeeded" | "failed" | "unknown"; evidenceSource: string; outputSummary?: string }
-  | { type: "runner.diagnostic"; severity: "info" | "warning" | "error"; code: string; message: string; nativeError?: RunnerNativeError; willRetry?: boolean; threadId?: string; turnId?: string; nativeRequestId?: string; serverName?: string; mode?: string }
+  | { type: "runner.diagnostic"; severity: "info" | "warning" | "error"; code: string; message: string; nativeError?: RunnerNativeError; willRetry?: boolean; threadId?: string; turnId?: string; nativeRequestId?: string; serverName?: string; toolName?: string; mode?: string }
   | { type: "runner.native.started"; threadId: string; turnId: string; reportedModel?: string; modelProvider?: string }
+  | { type: "runner.model.reported"; model: string; source: RunnerModelSource }
   | { type: "runner.native.finished"; outcome: "completed" | "failed" | "cancelled" | "incomplete" | "unknown"; reason?: string }
   | { type: "interaction.forwarded" | "interaction.resolved"; requestId: string; evidence?: string };
 
@@ -143,6 +146,7 @@ export interface ResolvedRunnerSpec {
 
 export type RunnerNativeOutcome = "completed" | "failed" | "cancelled" | "incomplete" | "unknown";
 export type RunnerCleanupStatus = "completed" | "failed" | "unknown";
+export type RunnerModelSource = "claude-sdk-init" | "claude-sdk-assistant" | "claude-sdk-model-usage";
 
 export interface RunnerNativeError { message: string; code?: string; details?: string; httpStatus?: number; }
 
@@ -159,6 +163,7 @@ export interface RunnerResult extends ProcessResult {
   nativeOutcome?: RunnerNativeOutcome;
   cleanupStatus?: RunnerCleanupStatus;
   reportedModel?: string;
+  reportedModelSource?: RunnerModelSource;
   nativeError?: RunnerNativeError;
   nativeThreadId?: string;
   nativeTurnId?: string;

@@ -20,7 +20,7 @@ export async function readAttemptInfo(workspace: string, attemptId: string) {
   if ((await lstat(path)).size > 256 * 1024) throw new Error("attempt_record_invalid");
   const value = JSON.parse(await readFile(path, "utf8"));
   if (value.attemptId !== attemptId) throw new Error("attempt_record_invalid");
-  const { status, runnerId, execution, reportedModel, startedAt, finishedAt, lastActivityAt, reasonCode, reason, exitCode, nativeOutcome, nativeError, cleanupStatus } = value;
+  const { status, runnerId, execution, reportedModel, reportedModelSource, startedAt, finishedAt, lastActivityAt, reasonCode, reason, exitCode, nativeOutcome, nativeError, cleanupStatus } = value;
   let activity: string | undefined, lastReply: string | undefined, latestAt = lastActivityAt;
   let partial = "", partialId = "", semantic = false;
   const summary = (text: string) => text.replace(/<<<TOKEN_COUPON_DONE:[^>]+>>>/g, "").trim().slice(0, 360);
@@ -50,7 +50,7 @@ export async function readAttemptInfo(workspace: string, attemptId: string) {
       }
     } catch { /* A partial tail line does not invalidate the Attempt snapshot. */ }
   } finally { await log.close(); }
-  return { attemptId, status, runnerId, execution, reportedModel, startedAt, finishedAt, lastActivityAt: latestAt, reasonCode, reason, exitCode, nativeOutcome, nativeError, cleanupStatus, activity, lastReply };
+  return { attemptId, status, runnerId, execution, reportedModel, reportedModelSource, startedAt, finishedAt, lastActivityAt: latestAt, reasonCode, reason, exitCode, nativeOutcome, nativeError, cleanupStatus, activity, lastReply };
 }
 
 /** Bounded, tail-biased evidence for an explicitly requested failure diagnosis. */

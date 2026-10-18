@@ -1,5 +1,5 @@
 import type { ExecutionConfig } from "./task.js";
-import type { ResolvedRunnerSpec, RunnerCleanupStatus, RunnerNativeOutcome, RunnerNativeError } from "./runner.js";
+import type { ResolvedRunnerSpec, RunnerCleanupStatus, RunnerNativeOutcome, RunnerNativeError, RunnerModelSource } from "./runner.js";
 
 export type AttemptStatus =
   | "created"
@@ -31,6 +31,7 @@ export interface AttemptRecord {
   nativeOutcome?: RunnerNativeOutcome;
   cleanupStatus?: RunnerCleanupStatus;
   reportedModel?: string;
+  reportedModelSource?: RunnerModelSource;
   nativeError?: RunnerNativeError;
   nativeThreadId?: string;
   nativeTurnId?: string;

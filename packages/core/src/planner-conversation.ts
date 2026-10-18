@@ -75,6 +75,7 @@ export function createPlanner(config: PlannerConfig, options: { fetchImpl?: type
   if (config.provider === "mock") return new MockPlanner();
   if (config.provider === "deepseek") return new DeepSeekPlanner({ model: config.model, baseUrl: config.baseUrl, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
   if (["chatgpt-mcp", "web-mcp"].includes(config.provider)) throw new Error("external_planning_required：请通过网页 MCP 准备并提交规划结果");
+  if (["codex-agent", "claude-agent"].includes(config.provider)) throw new Error("local_agent_planner_requires_daemon：本机 Agent 规划需由 daemon 使用只读 Runner 适配器调用");
   throw new InputValidationError("planner.provider", "不支持的 Planner");
 }
 
@@ -310,8 +311,8 @@ function applyPlanDraftEdits(base: PlanDefinition, value: unknown): unknown {
       if (!target) throw new InputValidationError(`${path}.taskId`, "只能修改当前草案中已存在的任务");
       const fields = expectObject(taskPatch.fields, `${path}.fields`);
       const allowed = target.task.schemaVersion === 1
-        ? ["title", "prompt"]
-        : ["title", "objective", "approach", "steps", "deliverables", "acceptanceCriteria", "constraints", "notes"];
+        ? ["title", "prompt", "execution"]
+        : ["title", "objective", "approach", "steps", "deliverables", "acceptanceCriteria", "constraints", "notes", "execution"];
       expectExactKeys(fields, allowed, `${path}.fields`);
       if (!Object.keys(fields).length) throw new InputValidationError(`${path}.fields`, "至少需要一个可编辑字段");
       if (target.task.schemaVersion === 2 && fields.notes === null) delete target.task.notes;
@@ -324,7 +325,7 @@ function applyPlanDraftEdits(base: PlanDefinition, value: unknown): unknown {
 }
 
 function assertPlanEditPolicy(previous: PlanDefinition, next: PlanDefinition): void {
-  const fail = (reason: string): never => { throw new PlannerOperationError("draft_edit_scope", `本地草案表单只允许修改计划标题和任务的结构化正文；${reason}。请通过规划修订调整结构或执行参数。`); };
+  const fail = (reason: string): never => { throw new PlannerOperationError("draft_edit_scope", `本地草案编辑只允许修改标题、任务正文和逐任务 Runner／模型；${reason}。结构、依赖与决策来源仍需通过规划修订调整。`); };
   if (previous.id !== next.id) fail("计划 ID 不能修改");
   // Legacy plans are upgraded with core-owned decision metadata when saved.
   // Once a plan already has that metadata, local edits must preserve it.
@@ -337,7 +338,7 @@ function assertPlanEditPolicy(previous: PlanDefinition, next: PlanDefinition): v
     if (oldEntry.task.schemaVersion !== newEntry.task.schemaVersion) fail("任务 schema 不能修改");
     if (JSON.stringify(oldEntry.dependsOn) !== JSON.stringify(newEntry.dependsOn)) fail("任务依赖不能修改");
     if (oldEntry.status !== newEntry.status) fail("任务状态不能修改");
-    if (JSON.stringify(oldEntry.task.execution) !== JSON.stringify(newEntry.task.execution)) fail("Runner 与模型配置不能修改");
+    if (oldEntry.task.execution.mode !== newEntry.task.execution.mode || JSON.stringify(oldEntry.task.execution.requiredCapabilities ?? []) !== JSON.stringify(newEntry.task.execution.requiredCapabilities ?? [])) fail(`不支持此字段：任务 ${oldEntry.task.id} 的模式与能力要求不能通过本机配置编辑修改`);
     if (previous.schemaVersion === 2 && JSON.stringify(oldEntry.decisionRefs ?? null) !== JSON.stringify(newEntry.decisionRefs ?? null)) fail("决策引用不能修改");
     if (oldEntry.task.schemaVersion === 1 && newEntry.task.schemaVersion === 1) continue;
     const oldTask = oldEntry.task, newTask = newEntry.task;
@@ -930,6 +931,11 @@ function validateConfig(config: PlannerConfig): void {
   }
   if (config.provider === "chatgpt-mcp" || config.provider === "web-mcp") {
     if (!config.model || Buffer.byteLength(config.model, "utf8") > 256 || config.baseUrl !== (config.provider === "web-mcp" ? "mcp://web" : "mcp://chatgpt")) throw new InputValidationError("planner.config", "网页 MCP 配置无效");
+    return;
+  }
+  if (config.provider === "codex-agent" || config.provider === "claude-agent") {
+    const endpoint = config.provider === "codex-agent" ? "agent://codex" : "agent://claude-code";
+    if (!config.model || Buffer.byteLength(config.model, "utf8") > 256 || config.baseUrl !== endpoint) throw new InputValidationError("planner.config", "本机 Agent 配置无效");
     return;
   }
   if (config.provider !== "deepseek" || !config.model || Buffer.byteLength(config.model, "utf8") > 256) throw new InputValidationError("planner.config", "Planner provider/model 无效");

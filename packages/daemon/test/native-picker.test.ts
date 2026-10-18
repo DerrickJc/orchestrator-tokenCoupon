@@ -6,9 +6,18 @@ import { nativePickerScript, normalizePickedPaths } from "../src/native-picker.j
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 it("uses Windows system dialogs and no user interpolation in its PowerShell source", () => {
-  expect(nativePickerScript("directory")).toContain("System.Windows.Forms.FolderBrowserDialog");
+  const directory = nativePickerScript("directory");
+  expect(directory).toContain("TokenCoupon.FolderPicker");
+  expect(directory).toContain("FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR");
+  expect(directory).toContain("SIGDN_FILESYSPATH");
+  expect(directory).toContain("if (result == Cancelled) return null;");
+  expect(directory).toContain("Marshal.ThrowExceptionForHR(result)");
+  expect(directory).toContain("Marshal.FreeCoTaskMem(name)");
+  expect(directory).toContain("Marshal.ReleaseComObject(dialog)");
+  expect(directory).not.toContain("System.Windows.Forms.FolderBrowserDialog");
   expect(nativePickerScript("files")).toContain("System.Windows.Forms.OpenFileDialog"); expect(nativePickerScript("files")).toContain("$dialog.Multiselect = $true");
-  expect(nativePickerScript("directory")).toContain("$dialog.ShowDialog($owner)");
+  expect(nativePickerScript("files")).not.toContain("TokenCoupon.FolderPicker");
+  expect(directory).toContain("$owner.Close(); $owner.Dispose()");
 });
 it("treats cancellation as a normal empty result and checks file containment after resolving symlinks", async () => {
   expect(await normalizePickedPaths({ cancelled: true, paths: ["invalid"] }, "directory")).toEqual({ cancelled: true, paths: [] });

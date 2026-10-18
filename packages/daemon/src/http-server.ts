@@ -81,7 +81,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && url.pathname === "/api/v1/directories") {
       const offset = Number(url.searchParams.get("offset") ?? 0);
       if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("directory_offset_invalid");
-      sendJson(response, 200, await browseDirectories(url.searchParams.get("path") ?? undefined, offset)); return;
+      sendJson(response, 200, await browseDirectories(url.searchParams.get("path") ?? undefined, offset, url.searchParams.get("query") ?? "")); return;
     }
     if (parts[0] === "workspaces" && parts.length === 3 && parts[2] === "git") {
       if (request.method === "GET") { sendJson(response, 200, await service.gitStatus(parts[1]!)); return; }
@@ -140,7 +140,8 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const body = await readJsonBody(request);
       const source = stringField(body.source, "source", 20);
       if (source !== "chatgpt" && source !== "claude" && source !== "other") throw new Error("oauth_source_invalid");
-      await options.remoteMcp.updateGrant(parts[2]!, { workspaceIds: stringArray(body.workspaceIds, "workspaceIds"), source, ...(body.alias ? { alias: stringField(body.alias, "alias", 80) } : {}) });
+      if (body.alias !== undefined && (typeof body.alias !== "string" || body.alias.length > 80)) throw new Error("oauth_alias_invalid：MCP 名称最多 80 字符");
+      await options.remoteMcp.updateGrant(parts[2]!, { workspaceIds: stringArray(body.workspaceIds, "workspaceIds"), source, ...(typeof body.alias === "string" ? { alias: body.alias } : {}) });
       sendJson(response, 200, { updated: true }); return;
     }
     if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 4 && parts[3] === "revoke") {
@@ -158,7 +159,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       await options.remoteMcp.decideApproval(parts[2]!, { decision: body.decision, ...(workspaceIds ? { workspaceIds } : {}), ...(source ? { source } : {}), ...(workspaceId ? { workspaceId } : {}), ...(scopes ? { scopes } : {}) });
       sendJson(response, 200, { accepted: true }); return;
     }
-    if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, service.providerOptions()); return; }
+    if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, await service.planningProviderOptions()); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/providers/deepseek-api/models") { sendJson(response, 200, await service.plannerModels(url.searchParams.get("refresh") === "1")); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/runners") { sendJson(response, 200, await service.runnerOptions()); return; }
     if (request.method === "GET" && parts[0] === "runners" && parts.length === 3 && parts[2] === "models") {
@@ -170,6 +171,11 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const workspace = await service.addWorkspace(stringField(body.path, "path", 4096), optionalString(body.label, "label", 80));
       sendJson(response, 201, workspace); return;
     }
+    if (request.method === "PATCH" && parts[0] === "workspaces" && parts.length === 2) {
+      const body = await readJsonBody(request);
+      const workspace = await service.renameWorkspace(parts[1]!, stringField(body.label, "label", 80));
+      sendJson(response, 200, workspace); return;
+    }
     if (request.method === "DELETE" && parts[0] === "workspaces" && parts.length === 2) {
       await service.removeWorkspace(parts[1]!); sendJson(response, 200, { removed: true }); return;
     }
@@ -179,6 +185,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       if (tool !== "repo_list" && tool !== "repo_read") throw new Error("repository_tool_invalid：只支持目录列表和只读文件预览");
       const args: Record<string, unknown> = { path: url.searchParams.get("path") ?? "." };
       for (const name of tool === "repo_list" ? ["offset"] : ["startLine"]) if (url.searchParams.has(name)) args[name] = Number(url.searchParams.get(name));
+      if (tool === "repo_list" && url.searchParams.has("query")) args.query = url.searchParams.get("query");
       const result = JSON.parse(await new RepositoryReader(workspace.path).invoke(tool, args)) as { error?: string };
       sendJson(response, result.error ? 400 : 200, result); return;
     }
@@ -254,7 +261,13 @@ export async function createLocalServer(service: ApplicationService, options: { 
         job = await service.external.handoff(workspaceId!, planningId!, key, role, target, optionalString(body.reason, "reason", 1024));
       }
       else if (action === "replies") job = await service.reply(workspaceId!, planningId!, key, stringField(body.message, "message", 8192));
-      else if (action === "review") job = await service.review(workspaceId!, planningId!, key);
+      else if (action === "review") {
+        const reviewer = body.reviewer === undefined ? {} : objectField(body.reviewer, "reviewer");
+        job = await service.review(workspaceId!, planningId!, key, {
+          ...(reviewer.mode === undefined ? {} : { mode: stringField(reviewer.mode, "reviewer.mode", 40) }),
+          ...(reviewer.model === undefined ? {} : { model: stringField(reviewer.model, "reviewer.model", 120) }),
+        });
+      }
       else if (action === "planner-retry") job = await service.retryPlanning(workspaceId!, planningId!, key);
       else if (action === "approve") job = await service.approve(workspaceId!, planningId!, key, integerField(body.draftRevision, "draftRevision", 1), stringArray(body.waivedFindingIds, "waivedFindingIds"), optionalString(body.waiverReason, "waiverReason", 1024));
       else if (action === "run") job = await service.run(workspaceId!, planningId!, key, runOptions(body));
@@ -327,6 +340,10 @@ function requestKey(request: IncomingMessage, body: Record<string, unknown>): st
   const value = request.headers["idempotency-key"] ?? body.requestKey;
   if (typeof value !== "string") throw new Error("idempotency_key_required：请求缺少 requestKey");
   return value;
+}
+function objectField(value: unknown, name: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name}_invalid：必须是对象`);
+  return value as Record<string, unknown>;
 }
 function stringField(value: unknown, name: string, max: number): string { if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > max) throw new Error(`${name}_invalid：必须是 1 到 ${max} 字节的文本`); return value; }
 function optionalString(value: unknown, name: string, max: number): string | undefined { if (value === undefined) return undefined; return stringField(value, name, max); }

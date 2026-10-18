@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { readAttemptEvents } from "../src/attempt-observation.js";
+import { readAttemptEvents, readAttemptInfo } from "../src/attempt-observation.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -12,6 +12,14 @@ async function fixture() {
   const attemptId = randomUUID(), directory = join(root, ".token-coupon", "runs", attemptId); await mkdir(directory, { recursive: true });
   return { root, attemptId, directory, path: join(directory, "events.jsonl") };
 }
+it("returns the native model and its source separately from the requested model", async () => {
+  const h = await fixture();
+  await writeFile(join(h.directory, "attempt.json"), JSON.stringify({ attemptId: h.attemptId, status: "running", runnerId: "claude-code", execution: { modelId: "configured-alias" }, reportedModel: "deepseek-flash", reportedModelSource: "claude-sdk-assistant" }));
+  await writeFile(h.path, "");
+  expect(await readAttemptInfo(h.root, h.attemptId)).toMatchObject({ execution: { modelId: "configured-alias" }, reportedModel: "deepseek-flash", reportedModelSource: "claude-sdk-assistant" });
+  await writeFile(join(h.directory, "attempt.json"), JSON.stringify({ attemptId: h.attemptId, status: "succeeded", execution: { modelId: "configured-alias" } }));
+  expect((await readAttemptInfo(h.root, h.attemptId)).reportedModel).toBeUndefined();
+});
 it("paginates complete UTF-8 events beyond the rolling event window with no lost or repeated bytes", async () => {
   const h = await fixture();
   const events = Array.from({ length: 1800 }, (_, i) => ({ sequence: i + 1, attemptId: h.attemptId, type: "message.delta", payload: { root: true, text: `课程 ${i} ` + "文".repeat(100) } }));

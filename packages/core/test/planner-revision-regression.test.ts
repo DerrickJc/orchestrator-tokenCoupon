@@ -134,7 +134,7 @@ describe("recorded phase3.5-new4 draft revision regression", () => {
       } else if (fault === "invented") testing.sourceMessageId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
       else if (fault === "false-quote") testing.quote = "This statement is not in the user input";
       else if (fault === "dependency") reply.plan.tasks[1].dependsOn = ["missing-task"];
-      else if (fault === "runner") reply.plan.tasks[0].task.execution.runnerId = "mock";
+      else if (fault === "runner") reply.plan.tasks[0].task.execution.runnerId = "unregistered-runner";
       else if (fault === "unknown-field") reply.plan.tasks[0].unknown = source;
     });
     const result = await replyToPlanner({ ...options, message: fixture.request, planner: adapter.planner });

@@ -13,6 +13,7 @@ import { observeSession } from "./session-observation.js";
 import { ExternalPlanningService } from "./external-planning.js";
 import { ModelCatalog, discoverPlannerModels, type ModelCatalogResult } from "./model-catalog.js";
 import { planningWorkflow } from "./planning-workflow.js";
+import { LocalAgentPlanner } from "./local-agent-planner.js";
 import {
   PlannerStore, SessionStore, ReviewStore, approvePlannerDraft, createDefaultRunnerRegistry, createPlanReviewer, validateVerificationTask, ensureRuntimeMetadataIgnored,
   loadPlannerConversation, replyToPlanner, reviewPlannerDraft, runApprovedPlanner, startPlannerConversation, replacePlannerDraft, revisePlannerDraft,
@@ -21,7 +22,7 @@ import {
   renderTaskPrompt,
 } from "@token-coupon/core";
 import type {
-  ExecutionConfig, PlanReviewRecord, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
+  ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
   RunnerOutput, TaskDefinition, TaskRunnerFactory, TaskRunnerFactoryOptions,
 } from "@token-coupon/core";
 
@@ -56,6 +57,7 @@ export class ApplicationService {
   private readonly runnerFactory: TaskRunnerFactory;
   private readonly pendingInteractions = new Map<string, { value: PendingInteraction; resolve(reply: RunnerInteractionReply): void; signal: AbortSignal }>();
   private readonly activeAttemptDiagnostics = new Set<string>();
+  private workspaceMutation = Promise.resolve();
   private workspaces = new Map<string, WorkspaceEntry>();
   private eventSequence = 0;
   private readonly modelCatalog = new ModelCatalog();
@@ -115,19 +117,49 @@ export class ApplicationService {
       throw error;
     }
     if (!(await stat(path)).isDirectory()) throw new Error("workspace_path_invalid：所选路径不是目录");
-    await ensureRuntimeMetadataIgnored(path);
     const workspaceId = createHash("sha256").update(path).digest("hex").slice(0, 16);
-    const label = (labelValue?.trim() || path.split(/[\\/]/).filter(Boolean).at(-1) || path).slice(0, 80);
-    const entry = { workspaceId, path, label, addedAt: this.workspaces.get(workspaceId)?.addedAt ?? new Date().toISOString() };
-    this.workspaces.set(workspaceId, entry);
-    await this.writeAtomic(this.workspacesPath, JSON.stringify(this.listWorkspaces(), null, 2) + "\n");
-    await this.publish({ type: "workspace.registered", workspaceId, payload: { label } });
-    return entry;
+    const label = normalizeWorkspaceLabel(labelValue?.trim() || path.split(/[\\/]/).filter(Boolean).at(-1) || path);
+    return this.withWorkspaceMutation(async () => {
+      const samePath = this.workspaces.get(workspaceId);
+      const collision = [...this.workspaces.values()].find(item => item.workspaceId !== workspaceId && workspaceNameKey(item.label) === workspaceNameKey(label));
+      if (collision) throw new Error(`workspace_label_conflict：名称“${label}”已用于工作区“${collision.label}”（${collision.workspaceId}）。请打开已有工作区或换一个名称。`);
+      await ensureRuntimeMetadataIgnored(path);
+      const entry = { workspaceId, path, label, addedAt: samePath?.addedAt ?? new Date().toISOString() };
+      this.workspaces.set(workspaceId, entry);
+      await this.writeAtomic(this.workspacesPath, JSON.stringify(this.listWorkspaces(), null, 2) + "\n");
+      await this.publish({ type: "workspace.registered", workspaceId, payload: { label } });
+      return entry;
+    });
+  }
+
+  async renameWorkspace(workspaceId: string, labelValue: string): Promise<WorkspaceEntry> {
+    const label = normalizeWorkspaceLabel(labelValue);
+    return this.withWorkspaceMutation(async () => {
+      const current = this.workspaces.get(workspaceId);
+      if (!current) throw new Error("workspace_not_found：项目不存在");
+      const collision = [...this.workspaces.values()].find(item => item.workspaceId !== workspaceId && workspaceNameKey(item.label) === workspaceNameKey(label));
+      if (collision) throw new Error(`workspace_label_conflict：名称“${label}”已用于工作区“${collision.label}”（${collision.workspaceId}）。请打开已有工作区或换一个名称。`);
+      const entry = { ...current, label };
+      this.workspaces.set(workspaceId, entry);
+      await this.writeAtomic(this.workspacesPath, JSON.stringify(this.listWorkspaces(), null, 2) + "\n");
+      await this.publish({ type: "workspace.renamed", workspaceId, payload: { label } });
+      return entry;
+    });
   }
 
   async removeWorkspace(workspaceId: string): Promise<void> {
-    if (!this.workspaces.delete(workspaceId)) throw new Error("workspace_not_found：项目不存在");
-    await this.writeAtomic(this.workspacesPath, JSON.stringify(this.listWorkspaces(), null, 2) + "\n");
+    await this.withWorkspaceMutation(async () => {
+      if (!this.workspaces.delete(workspaceId)) throw new Error("workspace_not_found：项目不存在");
+      await this.writeAtomic(this.workspacesPath, JSON.stringify(this.listWorkspaces(), null, 2) + "\n");
+    });
+  }
+
+  private async withWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.workspaceMutation;
+    let release!: () => void;
+    this.workspaceMutation = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
 
   async gitStatus(workspaceId: string) {
@@ -401,8 +433,22 @@ export class ApplicationService {
       { id: "chatgpt-mcp", label: "ChatGPT + MCP", available: true, connectionVerified: false, reason: "本地 MCP 已提供；规划/审查在 ChatGPT 中调用，账号连接需实际配置验证", capabilities: { plan: "external_submission", review: "external_submission", stream: "unsupported", cancel: "local_operation", usage: "unknown" } },
       { id: "chatgpt-web", label: "ChatGPT 网页", available: false, reason: "browser_bridge_not_connected：需要安装并连接浏览器桥接扩展；当前 WSL 环境没有可用浏览器会话", capabilities: { plan: "unverified", review: "unverified", stream: "unverified", cancel: "unverified", usage: "unverified" } },
       { id: "deepseek-api", label: "DeepSeek API（现有入口）", available: Boolean(process.env.TOKEN_COUPON_PLANNER_API_KEY), model: process.env.TOKEN_COUPON_PLANNER_MODEL ?? "deepseek-flash", capabilities: { plan: "supported", review: "supported", stream: "unsupported", cancel: "supported", usage: "reported" } },
+      { id: "codex-agent", label: "Codex 本机 Agent · 只读规划", available: true, model: "runner-default", runnerId: "codex", capabilities: { plan: "supported", review: "supported", readOnly: true, approval: "local-tool-approval-required-for-execution" } },
+      { id: "claude-agent", label: "Claude Code 本机 Agent · 只读规划", available: true, model: "runner-default", runnerId: "claude-code", capabilities: { plan: "supported", review: "supported", readOnly: true, approval: "local-tool-approval-required-for-execution" } },
       { id: "mock", label: "离线模拟（仅演示）", available: true, model: "mock", capabilities: { plan: "supported", review: "supported", stream: "unsupported", cancel: "supported", usage: "unsupported" } },
     ];
+  }
+
+  async planningProviderOptions(): Promise<unknown[]> {
+    const providers = this.providerOptions() as Array<Record<string, unknown>>;
+    const runners = await this.runnerOptions();
+    const byId = new Map((runners as Array<Record<string, unknown>>).map((runner) => [runner.id, runner]));
+    return providers.map((provider) => {
+      if (provider.id !== "codex-agent" && provider.id !== "claude-agent") return provider;
+      const runnerId = provider.id === "codex-agent" ? "codex" : "claude-code";
+      const runner = byId.get(runnerId);
+      return { ...provider, available: runner?.available === true, ...(runner?.error ? { reason: runner.error } : {}) };
+    });
   }
 
   async getWorkspace(workspaceId: string): Promise<WorkspaceEntry> {
@@ -426,7 +472,9 @@ export class ApplicationService {
       try {
         const record = await new SessionStore(workspace.path).load(loaded.snapshot.execution.sessionId);
         const observation = await observeSession(workspace.path, record.snapshot);
-        session = { ...record.snapshot, models: await readSessionModels(workspace.path, record.snapshot.sessionId), savedStatus: record.snapshot.status, status: observation.status, health: observation.health, tasks: await Promise.all(record.snapshot.tasks.map(async task => {
+        const request = await new SessionStore(workspace.path).readControlRequest(record.snapshot.sessionId);
+        const pendingControl = request && request.executionId === record.snapshot.executionId && ["running", "pausing"].includes(record.snapshot.status) && !(record.snapshot.controlState?.requestId === request.requestId && record.snapshot.controlState.acknowledgedAt) ? request : undefined;
+        session = { ...record.snapshot, ...(pendingControl ? { pendingControl } : {}), models: await readSessionModels(workspace.path, record.snapshot.sessionId), savedStatus: record.snapshot.status, status: observation.status, health: observation.health, tasks: await Promise.all(record.snapshot.tasks.map(async task => {
           const latestId = task.activeAttemptId ?? task.attempts.at(-1)?.attemptId;
           const currentAttempt = latestId ? await readAttemptInfo(workspace.path, latestId).catch(() => null) : null;
           const definition = record.plan.tasks.find(entry => entry.task.id === task.taskId);
@@ -553,7 +601,7 @@ export class ApplicationService {
     if (input.provider === "chatgpt-web") throw new Error("browser_bridge_not_connected：ChatGPT 网页调用未通过真实浏览器验证，目前没有发送请求");
     const config = plannerConfig(input.provider, input.model);
     return this.submit(workspaceId, "planning.start", requestKey, input, async (signal) => {
-      const result = await startPlannerConversation({ workspace: workspace.path, request: input.request, config, executionDefaults: input.executionDefaults, signal });
+      const result = await startPlannerConversation({ workspace: workspace.path, request: input.request, config, executionDefaults: input.executionDefaults, ...(isLocalAgentConfig(config) ? { planner: new LocalAgentPlanner(config, workspace.path) } : {}), signal });
       await this.publish({ type: "planning.updated", workspaceId, planningId: result.snapshot.planningId, payload: { status: result.snapshot.status } });
       return { planningId: result.snapshot.planningId, status: result.snapshot.status };
     });
@@ -564,7 +612,7 @@ export class ApplicationService {
     const snapshot = await new PlannerStore(workspace.path).load(planningId);
     if (["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider)) return this.external.prepare(workspaceId, requestKey, { role: "plan", planningId, message });
     return this.submit(workspaceId, "planning.reply", requestKey, { planningId, message }, async (signal) => {
-      const result = await replyToPlanner({ planningId, workspace: workspace.path, message, signal });
+      const result = await replyToPlanner({ planningId, workspace: workspace.path, message, ...(isLocalAgentConfig(snapshot.config) ? { planner: new LocalAgentPlanner(snapshot.config, workspace.path) } : {}), signal });
       await this.publish({ type: "planning.updated", workspaceId, planningId, payload: { status: result.snapshot.status } });
       return { planningId, status: result.snapshot.status };
     });
@@ -585,12 +633,20 @@ export class ApplicationService {
     return this.external.prepare(workspaceId, requestKey, { role: "plan", message: request, coordinated: true, target: "any", executionDefaults: loaded.snapshot.executionDefaults, sourcePlanning });
   }
 
-  async review(workspaceId: string, planningId: string, requestKey: string): Promise<JobRecord> {
+  async review(workspaceId: string, planningId: string, requestKey: string, selection: { mode?: string; model?: string } = {}): Promise<JobRecord> {
     const workspace = await this.getWorkspace(workspaceId);
     const loaded = await loadPlannerConversation(planningId, workspace.path);
-    if (["chatgpt-mcp", "web-mcp"].includes(loaded.snapshot.config.provider)) return this.external.prepare(workspaceId, requestKey, { role: "review", planningId });
-    return this.submit(workspaceId, "planning.review", requestKey, { planningId, draftRevision: loaded.draft?.draftRevision, hash: loaded.draft?.planHash }, async (signal) => {
-      const result = await reviewPlannerDraft({ planningId, workspace: workspace.path, reviewer: createPlanReviewer(loaded.snapshot.config), signal });
+    const selected = reviewConfig(loaded.snapshot.config, selection.mode, selection.model);
+    if (isWebReviewConfig(selected)) {
+      // A generic web-mcp planning is open to either authorized web source.
+      // Pin a source only when the user explicitly selects it (or for legacy ChatGPT-only plans).
+      const target = selection.mode === "web-claude" ? "claude" : selection.mode === "web-chatgpt" || selected.provider === "chatgpt-mcp" ? "chatgpt" : undefined;
+      return this.external.prepare(workspaceId, requestKey, { role: "review", planningId, coordinated: true, ...(target ? { target } : {}), reviewerConfig: selected });
+    }
+    const existingHandoffs = await this.external.queryHandoffs(workspaceId, planningId) as Array<{ role?: string; state?: string }>;
+    if (existingHandoffs.some((item) => ["prepared", "submitting"].includes(item.state || ""))) throw new Error("external_operation_pending：当前网页规划／审查交接仍处于待处理状态；请先在交接面板完成或取消，再切换到本机 Agent／API 审查");
+    return this.submit(workspaceId, "planning.review", requestKey, { planningId, draftRevision: loaded.draft?.draftRevision, hash: loaded.draft?.planHash, reviewerConfig: selected }, async (signal) => {
+      const result = await reviewPlannerDraft({ planningId, workspace: workspace.path, reviewerConfig: selected, reviewer: isLocalAgentConfig(selected) ? new LocalAgentPlanner(selected, workspace.path) : createPlanReviewer(selected), signal });
       await this.publish({ type: "review.completed", workspaceId, planningId, payload: { reviewId: result.review.reviewId, findings: result.review.findings.length } });
       return { planningId, reviewId: result.review.reviewId, findings: result.review.findings.length };
     });
@@ -661,7 +717,7 @@ export class ApplicationService {
       return this.external.prepare(workspaceId, requestKey, { role: "plan", planningId, message: input.message, operation: true });
     }
     return this.submit(workspaceId, "planning.draft.revise", requestKey, { planningId, ...input }, async (signal) => {
-      const result = await revisePlannerDraft({ planningId, workspace: workspace.path, message: input.message, reviewId: input.reviewId, expectedPlanHash: input.expectedPlanHash, expectedDraftRevision: input.expectedDraftRevision, signal });
+      const result = await revisePlannerDraft({ planningId, workspace: workspace.path, message: input.message, reviewId: input.reviewId, expectedPlanHash: input.expectedPlanHash, expectedDraftRevision: input.expectedDraftRevision, ...(isLocalAgentConfig(current.snapshot.config) ? { planner: new LocalAgentPlanner(current.snapshot.config, workspace.path) } : {}), signal });
       await this.publish({ type: "draft.revised", workspaceId, planningId, payload: { draftRevision: result.draft?.draftRevision } });
       return { planningId, draftRevision: result.draft?.draftRevision };
     });
@@ -669,9 +725,10 @@ export class ApplicationService {
 
   async retryPlanning(workspaceId: string, planningId: string, requestKey: string): Promise<JobRecord> {
     const workspace = await this.getWorkspace(workspaceId);
-    if (["chatgpt-mcp", "web-mcp"].includes((await new PlannerStore(workspace.path).load(planningId)).config.provider)) return this.external.prepare(workspaceId, requestKey, { role: "plan", planningId, retry: true });
+    const snapshot = await new PlannerStore(workspace.path).load(planningId);
+    if (["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider)) return this.external.prepare(workspaceId, requestKey, { role: "plan", planningId, retry: true });
     return this.submit(workspaceId, "planning.retry", requestKey, { planningId }, async (signal) => {
-      const result = await retryPlannerTurn({ planningId, workspace: workspace.path, signal });
+      const result = await retryPlannerTurn({ planningId, workspace: workspace.path, ...(isLocalAgentConfig(snapshot.config) ? { planner: new LocalAgentPlanner(snapshot.config, workspace.path) } : {}), signal });
       await this.publish({ type: "planning.updated", workspaceId, planningId, payload: { status: result.snapshot.status, retried: true } });
       return { planningId, status: result.snapshot.status };
     });
@@ -737,9 +794,10 @@ export class ApplicationService {
     if (!loaded.snapshot.execution) throw new Error("session_not_found：规划尚未创建执行 Session");
     const sessionId = loaded.snapshot.execution.sessionId;
     return this.submit(workspaceId, `session.${kind}`, requestKey, { planningId, sessionId, kind }, async () => {
-      await new SessionStore(workspace.path).requestControl(sessionId, kind);
-      await this.publish({ type: kind === "pause" ? "session.paused" : "session.cancelled", workspaceId, planningId, payload: { sessionId } });
-      return { planningId, sessionId, kind };
+      const request = await new SessionStore(workspace.path).submitControl(sessionId, kind);
+      const final = (await new SessionStore(workspace.path).load(sessionId)).snapshot;
+      await this.publish({ type: "session.control_requested", workspaceId, planningId, payload: { sessionId, requestId: request.requestId, requested: kind, status: final.status } });
+      return { planningId, sessionId, executionId: request.executionId, kind, requestId: request.requestId, phase: "requested", requestedAt: request.requestedAt, status: final.status };
     });
   }
 
@@ -868,10 +926,28 @@ export class ApplicationService {
 
 export function plannerConfig(provider: string, model?: string) {
   if (provider === "mock") return { provider: "mock" as const, model: "mock", baseUrl: "mock://local" };
+  if (provider === "codex-agent") return { provider: "codex-agent" as const, model: model?.trim() || "runner-default", baseUrl: "agent://codex" };
+  if (provider === "claude-agent") return { provider: "claude-agent" as const, model: model?.trim() || "runner-default", baseUrl: "agent://claude-code" };
   if (provider !== "deepseek-api") throw new Error("planner_provider_invalid：当前 provider 不可用");
   if (!process.env.TOKEN_COUPON_PLANNER_API_KEY) throw new Error("planner_api_key_missing：请在启动 daemon 的环境中配置 TOKEN_COUPON_PLANNER_API_KEY");
   return { provider: "deepseek" as const, model: model?.trim() || process.env.TOKEN_COUPON_PLANNER_MODEL || "deepseek-flash", baseUrl: process.env.TOKEN_COUPON_PLANNER_BASE_URL || "https://api.deepseek.com/v1" };
 }
+
+function isLocalAgentConfig(config: PlannerConfig): config is PlannerConfig & { provider: "codex-agent" | "claude-agent" } {
+  return config.provider === "codex-agent" || config.provider === "claude-agent";
+}
+
+function reviewConfig(planConfig: PlannerConfig, mode = "planning", model?: string): PlannerConfig {
+  if (!mode || mode === "planning") return planConfig;
+  if (mode === "codex-agent" || mode === "claude-agent") return plannerConfig(mode, model);
+  if (mode === "web-chatgpt") return { provider: "chatgpt-mcp", model: model?.trim() || "web-selected-unknown", baseUrl: "mcp://chatgpt" };
+  if (mode === "web-claude") return { provider: "web-mcp", model: model?.trim() || "web-selected-unknown", baseUrl: "mcp://web" };
+  if (mode === "deepseek-api") return plannerConfig("deepseek-api", model);
+  if (mode === "mock") return plannerConfig("mock");
+  throw new Error("reviewer_mode_invalid：请选择规划方式、本机 Agent、网页 LLM 或已配置 API");
+}
+
+function isWebReviewConfig(config: PlannerConfig): boolean { return config.provider === "chatgpt-mcp" || config.provider === "web-mcp"; }
 
 const daemonRunnerFactory: TaskRunnerFactory = (task: TaskDefinition, options: TaskRunnerFactoryOptions) => {
   const registry = createDefaultRunnerRegistry();
@@ -888,6 +964,12 @@ const daemonRunnerFactory: TaskRunnerFactory = (task: TaskDefinition, options: T
 function isWorkspaceEntry(value: unknown): value is WorkspaceEntry {
   return !!value && typeof value === "object" && typeof (value as WorkspaceEntry).workspaceId === "string" && typeof (value as WorkspaceEntry).path === "string" && typeof (value as WorkspaceEntry).label === "string";
 }
+function normalizeWorkspaceLabel(value: string): string {
+  const label = value.trim().normalize("NFKC");
+  if (!label || [...label].length > 80) throw new Error("workspace_label_invalid：工作区名称必须为 1–80 个字符");
+  return label;
+}
+function workspaceNameKey(value: string): string { return value.trim().normalize("NFKC").toLocaleLowerCase("en-US"); }
 function compactResult(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const item = value as Record<string, unknown>;

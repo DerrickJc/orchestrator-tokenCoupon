@@ -5,14 +5,17 @@ import { GitCommandError, ensureRuntimeMetadataIgnored, inspectGitRepository, ru
 import { normalizeWorkspacePath, workspaceEnvironment } from "./workspace-path.js";
 
 /** Only exposed on the authenticated local console, never on remote MCP. */
-export async function browseDirectories(input?: string, offset = 0) {
+export async function browseDirectories(input?: string, offset = 0, query = "") {
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("directory_offset_invalid");
+  if (typeof query !== "string" || Buffer.byteLength(query, "utf8") > 256 || /[\x00-\x1f]/.test(query)) throw new Error("directory_query_invalid：目录搜索最多 256 字节，不能包含控制字符");
+  const term = query.trim().normalize("NFKC").toLocaleLowerCase();
   const env = workspaceEnvironment();
   const path = await realpath(await normalizeWorkspacePath(input || env.currentDirectory));
   if (!(await stat(path)).isDirectory()) throw new Error("directory_invalid：请选择一个文件夹");
-  const all = (await readdir(path, { withFileTypes: true })).filter(entry => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules").sort((a, b) => a.name.localeCompare(b.name));
+  const all = (await readdir(path, { withFileTypes: true })).filter(entry => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules" && (!term || entry.name.normalize("NFKC").toLocaleLowerCase().includes(term))).sort((a, b) => a.name.localeCompare(b.name));
   const shortcuts = [{ label: "当前项目目录", path: env.currentDirectory }, { label: "主目录", path: env.home }, { label: "文件系统", path: parse(path).root }];
   if (env.isWsl) shortcuts.push({ label: "Windows 磁盘（/mnt）", path: "/mnt" });
-  return { path, parent: dirname(path) === path ? null : dirname(path), shortcuts, entries: all.slice(offset, offset + 100).map(entry => ({ name: entry.name, path: join(path, entry.name) })), nextOffset: offset + 100 < all.length ? offset + 100 : null };
+  return { path, parent: dirname(path) === path ? null : dirname(path), shortcuts, query: query.trim(), totalMatches: all.length, entries: all.slice(offset, offset + 100).map(entry => ({ name: entry.name, path: join(path, entry.name) })), nextOffset: offset + 100 < all.length ? offset + 100 : null };
 }
 
 export interface WorkspaceGitStatus {

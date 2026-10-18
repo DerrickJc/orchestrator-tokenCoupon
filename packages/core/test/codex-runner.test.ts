@@ -13,6 +13,41 @@ const task: TaskDefinition = {
 };
 
 describe("CodexRunner app-server transport", () => {
+  it("sends execution-role instructions separately and preserves bounded MCP failures without failing a recovered task", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "codex-mcp-observation-"));
+    try {
+      const script = String.raw`
+const fs=require('node:fs');
+const rl=require('node:readline').createInterface({input:process.stdin});
+const send=m=>process.stdout.write(JSON.stringify(m)+'\n');
+rl.on('line',line=>{const m=JSON.parse(line);
+ if(m.method==='initialize')send({id:m.id,result:{}});
+ if(m.method==='thread/start'){
+  fs.writeFileSync('host-instructions.txt',m.params.developerInstructions||'');
+  send({id:m.id,result:{thread:{id:'mcp-observation-thread'}}});
+ }
+ if(m.method==='turn/start'){
+  send({id:m.id,result:{turn:{id:'turn'}}});
+  const item={id:'mcp-call',type:'mcpToolCall',server:'token-coupon',tool:'workspace_query',status:'inProgress',arguments:{token:'argument-private-value'}};
+  send({method:'item/started',params:{item}});
+  send({method:'item/completed',params:{item:{...item,status:'failed',error:{message:'transport ECONNRESET Bearer credential-value'},result:{content:[{type:'text',text:'result-private-value'}]}}}});
+  const marker=m.params.input[0].text.match(/<<<TOKEN_COUPON_DONE:[a-f0-9]+>>>/)[0];
+  send({method:'item/agentMessage/delta',params:{itemId:'final',delta:'本地任务已完成\n'+marker+'\n'}});
+  send({method:'turn/completed',params:{turn:{id:'turn',status:'completed'}}});
+ }
+});rl.on('close',()=>process.exit());`;
+      const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", script] });
+      const result = await executeTask({ task, cwd, runner, onInteraction: async () => { throw new Error("unexpected interaction"); } });
+      expect(result.attempt.status).toBe("succeeded");
+      const instructions = await readFile(join(cwd, "host-instructions.txt"), "utf8");
+      expect(instructions).toContain("你就是编排器已经启动的本机 Runner");
+      expect(instructions).toContain(result.attempt.attemptId);
+      const events = (await readFile(join(result.artifactDir, "events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      expect(events).toContainEqual(expect.objectContaining({ type: "tool.completed", payload: expect.objectContaining({ serverName: "token-coupon", toolName: "workspace_query", status: "failed", nativeError: { message: "transport ECONNRESET Bearer [REDACTED]" } }) }));
+      expect(events).toContainEqual(expect.objectContaining({ type: "runner.diagnostic", payload: expect.objectContaining({ code: "mcp_tool_failed", severity: "warning", serverName: "token-coupon", toolName: "workspace_query" }) }));
+      for (const secret of ["credential-value", "argument-private-value", "result-private-value"]) expect(JSON.stringify(events)).not.toContain(secret);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   it("routes native questions and one-call approvals, then records the completed turn and cleanup", async () => {
     const script = fakeServerScript();
     const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", script] });
@@ -119,6 +154,21 @@ describe("CodexRunner app-server transport", () => {
       const events = await readFile(join(result.artifactDir, "events.jsonl"), "utf8");
       expect(events).toContain(mode === "active" ? "codex-app-server-turn-steer" : "codex-app-server-follow-up-turn");
       expect(result.attempt.nativeTurnId).toBe(mode === "active" ? "turn-1" : "turn-2");
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it("uses the answered follow-up turn's outcome without carrying over the original waiting marker", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "codex-biz01-followup-"));
+    try {
+      const runner = new CodexRunner({}, { executable: process.execPath, args: ["-e", asyncQuestionServer("completed", true)] });
+      const result = await executeTask({ task, cwd, runner, onInteraction: async (_id, request) => {
+        await new Promise(resolve => setTimeout(resolve, 30));
+        return { kind: "question", answers: [{ questionId: request.questions![0]!.id, optionIds: ["Allow"] }] };
+      } });
+      expect(result.attempt).toMatchObject({ status: "succeeded", markerSeen: true, needsInputSeen: false, nativeTurnId: "turn-2" });
+      const events = await readFile(join(result.artifactDir, "events.jsonl"), "utf8");
+      expect(events).toContain("<<<TOKEN_COUPON_NEEDS_INPUT:");
+      expect(events).toContain("<<<TOKEN_COUPON_DONE:");
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
@@ -384,7 +434,7 @@ function elicitationServer(params: Record<string, unknown>, expectedResult: Reco
   ].join("\n");
 }
 
-function asyncQuestionServer(mode: "completed" | "active"): string {
+function asyncQuestionServer(mode: "completed" | "active", emitWaitingMarker = false): string {
   return String.raw`
 const rl=require('node:readline').createInterface({input:process.stdin});
 const send=m=>process.stdout.write(JSON.stringify(m)+'\n');let count=0,marker;
@@ -400,6 +450,10 @@ rl.on('line',line=>{
   count++;send({id:m.id,result:{turn:{id:'turn-'+count}}});
   if(count===1){
    marker=m.params.input[0].text.match(/<<<TOKEN_COUPON_DONE:[a-f0-9]+>>>/)[0];
+   if(${emitWaitingMarker}){
+    const waiting=m.params.input[0].text.match(/<<<TOKEN_COUPON_NEEDS_INPUT:[a-f0-9]+>>>/)[0];
+    send({method:'item/agentMessage/delta',params:{itemId:'waiting',delta:'等待回答\n'+waiting+'\n'}});
+   }
    send({method:'item/completed',params:{item:{id:'async-q',type:'agentMessage',text:'Choose',questions:[{title:'Allow empty names?',options:['Allow','Reject']}]}}});
    if(${JSON.stringify(mode)}==='completed')send({method:'turn/completed',params:{turn:{id:'turn-1',status:'completed'}}});
   }else {if(!m.params.input[0].text.includes('Allow'))process.exitCode=32;complete();}
