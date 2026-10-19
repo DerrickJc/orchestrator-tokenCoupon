@@ -46,14 +46,15 @@ export function createDefaultRunnerRegistry(): RunnerRegistry {
     },
     validateSettings: (settings, version) => {
       requireVersion(version, 1, "Codex");
-      exactSettings(settings, ["sandbox", "approvalPolicy"], "Codex");
+      exactSettings(settings, ["sandbox", "approvalPolicy", "disableMcp"], "Codex");
       const sandbox = settings.sandbox ?? "workspace-write";
       const approvalPolicy = settings.approvalPolicy ?? "on-request";
       if (sandbox !== "read-only" && sandbox !== "workspace-write") throw new Error("Codex sandbox 只允许 read-only 或 workspace-write");
       if (approvalPolicy !== "on-request" && approvalPolicy !== "untrusted") throw new Error("Codex approvalPolicy 只允许 on-request 或 untrusted");
-      return { sandbox, approvalPolicy };
+      if (settings.disableMcp !== undefined && typeof settings.disableMcp !== "boolean") throw new Error("Codex disableMcp 必须是布尔值");
+      return { sandbox, approvalPolicy, ...(settings.disableMcp === true ? { disableMcp: true } : {}) };
     },
-    create: (settings) => new CodexRunner(settings as { sandbox: "read-only" | "workspace-write"; approvalPolicy: "on-request" | "untrusted" }),
+    create: (settings) => new CodexRunner(settings as { sandbox: "read-only" | "workspace-write"; approvalPolicy: "on-request" | "untrusted"; disableMcp?: boolean }),
   });
   registry.register({
     id: "dsh", adapterVersion: "1", configurationVersion: 1, supportedModes: ["managed"], supportsModel: true,
@@ -75,7 +76,7 @@ const MOCK_SCENARIOS = new Set(["success", "missing-marker", "marker-nonzero", "
 
 function validateClaudeSettings(settings: Readonly<Record<string, unknown>>, version: number): Readonly<Record<string, unknown>> {
   requireVersion(version, 1, "Claude Code");
-  exactSettings(settings, ["permissionMode", "allowedTools", "disallowedTools"], "Claude Code");
+  exactSettings(settings, ["permissionMode", "allowedTools", "disallowedTools", "settingSources", "strictMcpConfig"], "Claude Code");
   const output: Record<string, unknown> = {};
   if (settings.permissionMode !== undefined) {
     if (!["default", "acceptEdits", "plan", "dontAsk"].includes(String(settings.permissionMode))) throw new Error("Claude Code permissionMode 无效");
@@ -88,6 +89,14 @@ function validateClaudeSettings(settings: Readonly<Record<string, unknown>>, ver
       throw new Error(`Claude Code ${key} 必须是最多 128 项的非空字符串数组`);
     }
     output[key] = [...value];
+  }
+  if (settings.settingSources !== undefined) {
+    if (!Array.isArray(settings.settingSources) || settings.settingSources.some((item) => !["user", "project", "local"].includes(String(item))) || new Set(settings.settingSources).size !== settings.settingSources.length) throw new Error("Claude Code settingSources 配置无效");
+    output.settingSources = [...settings.settingSources];
+  }
+  if (settings.strictMcpConfig !== undefined) {
+    if (typeof settings.strictMcpConfig !== "boolean") throw new Error("Claude Code strictMcpConfig 必须是布尔值");
+    output.strictMcpConfig = settings.strictMcpConfig;
   }
   return output;
 }

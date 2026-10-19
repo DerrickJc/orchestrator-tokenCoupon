@@ -33,6 +33,7 @@ docs/*
 !docs/PHASE_3_5_PLAN.md
 !docs/PHASE_3_5_BUGFIX_PLAN.md
 !docs/PHASE_3_5_IMPLEMENTATION_GUIDE.md
+!docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md
 examples/
 !examples/
 examples/*

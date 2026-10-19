@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import type { PlanReviewFinding, PlanReviewRecord, RepositoryEvidence } from "./planner-types.js";
+import type { PlanReviewFinding, PlanReviewRecord, PlannerConfig, RepositoryEvidence } from "./planner-types.js";
 import { canonicalHash, atomicWrite } from "./planner-store.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -97,10 +97,12 @@ export function validateReviewRecord(value: unknown): PlanReviewRecord {
       !Array.isArray(raw.context) || !Array.isArray(raw.findings) || raw.findings.length > 100 || typeof raw.summary !== "string" || Buffer.byteLength(raw.summary, "utf8") > 16 * 1024 ||
       (raw.reportHash !== null && !isHash(raw.reportHash)) || (raw.reasonCode !== null && typeof raw.reasonCode !== "string") ||
       typeof raw.createdAt !== "string" || (raw.finishedAt !== null && typeof raw.finishedAt !== "string")) throw new Error("Planner 审查记录字段无效");
+  if (raw.reviewerReportedModel !== undefined && (typeof raw.reviewerReportedModel !== "string" || !raw.reviewerReportedModel.trim() || Buffer.byteLength(raw.reviewerReportedModel, "utf8") > 256)) throw new Error("审查 Runner 实际模型字段无效");
   const context = raw.context.map(parseEvidence);
   const findings = raw.findings.map(parseFinding);
   if (new Set(findings.map(({ findingId }) => findingId)).size !== findings.length || new Set(findings.filter(({ issueId }) => issueId).map(({ issueId }) => issueId)).size !== findings.filter(({ issueId }) => issueId).length) throw new Error("审查问题身份重复");
   const resolutions = raw.resolutions === undefined ? undefined : parseStoredResolutions(raw.resolutions);
+  const reviewerConfig = raw.reviewerConfig === undefined ? undefined : parseReviewerConfig(raw.reviewerConfig);
   if (raw.previousReviewId !== undefined && (typeof raw.previousReviewId !== "string" || !UUID.test(raw.previousReviewId))) throw new Error("前一审查引用无效");
   if (raw.status === "succeeded") {
     if (Buffer.byteLength(JSON.stringify(reviewReportPayload({ summary: raw.summary, findings, ...(resolutions ? { resolutions } : {}) })), "utf8") > 64 * 1024) throw new Error("审查报告超过 64 KiB");
@@ -109,11 +111,32 @@ export function validateReviewRecord(value: unknown): PlanReviewRecord {
   return {
     schemaVersion: 1, planningId: raw.planningId as string, reviewId: raw.reviewId as string, status: raw.status as PlanReviewRecord["status"],
     draftRevision: raw.draftRevision as number, planHash: raw.planHash as string, requirementsHash: raw.requirementsHash as string,
-    reviewerConfigHash: raw.reviewerConfigHash as string, context, findings, summary: raw.summary,
+    reviewerConfigHash: raw.reviewerConfigHash as string, ...(reviewerConfig ? { reviewerConfig } : {}), ...(typeof raw.reviewerReportedModel === "string" ? { reviewerReportedModel: raw.reviewerReportedModel } : {}), context, findings, summary: raw.summary,
     reportHash: raw.reportHash as string | null, reasonCode: raw.reasonCode as string | null,
     createdAt: raw.createdAt, finishedAt: raw.finishedAt as string | null,
     ...(resolutions ? { resolutions } : {}), ...(raw.previousReviewId ? { previousReviewId: raw.previousReviewId as string } : {}),
   };
+}
+
+function parseReviewerConfig(value: unknown): PlannerConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("审查来源配置无效");
+  const raw = value as Record<string, unknown>;
+  const provider = raw.provider;
+  const model = raw.model;
+  const baseUrl = raw.baseUrl;
+  if (!(["mock", "deepseek", "chatgpt-mcp", "web-mcp", "codex-agent", "claude-agent"].includes(String(provider))) ||
+      typeof model !== "string" || !model || Buffer.byteLength(model, "utf8") > 256 || typeof baseUrl !== "string") throw new Error("审查来源配置无效");
+  const expected = provider === "mock" ? "mock://local" : provider === "chatgpt-mcp" ? "mcp://chatgpt" : provider === "web-mcp" ? "mcp://web" : provider === "codex-agent" ? "agent://codex" : provider === "claude-agent" ? "agent://claude-code" : undefined;
+  if (expected ? baseUrl !== expected : !validReviewerEndpoint(baseUrl)) throw new Error("审查来源地址无效");
+  return { provider: provider as PlannerConfig["provider"], model, baseUrl };
+}
+
+function validReviewerEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
+    return (url.protocol === "https:" || local && url.protocol === "http:") && !url.username && !url.password && !url.search && !url.hash;
+  } catch { return false; }
 }
 
 export function reviewReportPayload(record: Pick<PlanReviewRecord, "summary" | "findings" | "resolutions" | "previousReviewId">) {

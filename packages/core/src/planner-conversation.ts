@@ -14,6 +14,7 @@ import { expectExactKeys, expectNonEmptyString, expectObject, InputValidationErr
 import type { TaskRunnerFactory } from "./task-orchestrator.js";
 import { runPlan } from "./task-orchestrator.js";
 import { SessionStore } from "./session-store.js";
+import { parseExecutionSelection, type ExecutionSelection } from "./execution-selection.js";
 import { checkPlan } from "./plan-check.js";
 import { loadCurrentPlanReview } from "./plan-review.js";
 import { ReviewStore } from "./review-store.js";
@@ -25,13 +26,13 @@ import { bindPlanDecisions, plannerPlanStructure } from "./plan-decisions.js";
 import { parseWorktreeSetupProfile, worktreeSetupHash } from "./worktree-setup.js";
 import type { WorktreeSetupProfile } from "./worktree-setup.js";
 import type { RunnerProfile } from "./runner.js";
+import { plannerDeadline, plannerFailure, PlannerInvocationError, type PlannerEventObserver } from "./planner-runtime.js";
 
 const USER_MESSAGE_LIMIT = 8 * 1024;
 const REQUEST_CONTEXT_LIMIT = 256 * 1024;
 const PLAN_LIMIT = 48 * 1024;
 const API_REQUEST_LIMIT = 8;
 const TOOL_CALL_LIMIT = 20;
-const TURN_TIMEOUT_MS = 120_000;
 
 export interface PlannerStartOptions {
   workspace: string;
@@ -40,6 +41,8 @@ export interface PlannerStartOptions {
   executionDefaults: ExecutionConfig;
   planner?: Planner;
   signal?: AbortSignal;
+  onEvent?: PlannerEventObserver;
+  sourcePlanning?: PlannerConversationSnapshot["sourcePlanning"];
 }
 
 export interface PlannerOperationResult {
@@ -49,12 +52,16 @@ export interface PlannerOperationResult {
   draftChanged?: boolean;
   reply?: PlannerReply;
   error?: string;
+  reasonCode?: string;
   review?: PlanReviewRecord;
   reviewIsCurrent?: boolean;
   reviewReadError?: string;
 }
 
 export interface PlannerRunOptions {
+  executionSelection?: ExecutionSelection;
+  expectedPlanHash?: string;
+  expectedDraftRevision?: number;
   planningId: string;
   workspace: string;
   createRunner: TaskRunnerFactory;
@@ -75,13 +82,14 @@ export function createPlanner(config: PlannerConfig, options: { fetchImpl?: type
   if (config.provider === "mock") return new MockPlanner();
   if (config.provider === "deepseek") return new DeepSeekPlanner({ model: config.model, baseUrl: config.baseUrl, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
   if (["chatgpt-mcp", "web-mcp"].includes(config.provider)) throw new Error("external_planning_required：请通过网页 MCP 准备并提交规划结果");
+  if (["codex-agent", "claude-agent"].includes(config.provider)) throw new Error("local_agent_planner_requires_daemon：本机 Agent 规划需由 daemon 使用只读 Runner 适配器调用");
   throw new InputValidationError("planner.provider", "不支持的 Planner");
 }
 
 export async function startPlannerConversation(options: PlannerStartOptions): Promise<PlannerOperationResult> {
   const snapshot = await initializePlannerConversation(options);
   const store = new PlannerStore(options.workspace);
-  return mutateWithTurn(store, snapshot.planningId, options.planner ?? createPlanner(options.config), options.request, options.signal, false);
+  return mutateWithTurn(store, snapshot.planningId, options.planner ?? createPlanner(options.config), options.request, options.signal, false, undefined, options.onEvent);
 }
 
 /** Creates the domain record without invoking a model or holding a waiting lock. */
@@ -108,12 +116,18 @@ export interface ExternalPlannerPreparation {
 }
 
 /** Short read/prepare phase. The external model runs after this lock is released. */
-export async function prepareExternalPlannerInput(options: { planningId: string; workspace: string; message: string; messageId?: string; retryMessageId?: string; operation?: boolean; messages?: Array<{ messageId: string; content: string; operation?: boolean }> }): Promise<ExternalPlannerPreparation> {
+export async function prepareExternalPlannerInput(options: { planningId: string; workspace: string; message: string; messageId?: string; retryMessageId?: string; operation?: boolean; plannerConfig?: PlannerConfig; messages?: Array<{ messageId: string; content: string; operation?: boolean }> }): Promise<ExternalPlannerPreparation> {
   validateRequest(options.message);
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
-    const snapshot = await store.load(options.planningId);
+    let snapshot = await store.load(options.planningId);
+    let configChanged = false;
+    if (options.plannerConfig) {
+      validateConfig(options.plannerConfig);
+      if (snapshot.activeTurnId || snapshot.execution || !["chatgpt-mcp", "web-mcp"].includes(options.plannerConfig.provider)) throw new Error("external_planning_unavailable：当前规划不能切换为网页处理");
+      if (JSON.stringify(snapshot.config) !== JSON.stringify(options.plannerConfig)) { snapshot = { ...snapshot, config: options.plannerConfig }; configChanged = true; }
+    }
     if (!["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider) || snapshot.activeTurnId || snapshot.execution) throw new Error("external_planning_unavailable：当前规划不能接收网页结果");
     const messageId = options.retryMessageId ?? options.messageId ?? randomUUID();
     if (options.retryMessageId) assertExternalRetry(snapshot, messageId, options.message);
@@ -145,6 +159,7 @@ export async function prepareExternalPlannerInput(options: { planningId: string;
       ...(latestReview ? { reviewContext: { review: latestReview, current: currentReview?.reviewId === latestReview.reviewId } } : {}),
     };
     if (Buffer.byteLength(JSON.stringify(input), "utf8") > REQUEST_CONTEXT_LIMIT) throw new Error("context_budget_exceeded：外部规划上下文超过 256 KiB");
+    if (configChanged) { snapshot = nextSnapshot(snapshot, {}); await store.save(snapshot); }
     return { expectedRevision: snapshot.revision, messageId, message: options.message, retry: !!options.retryMessageId, operation: !!options.operation, input, ...(options.messages ? { messages: batch } : {}) };
   } finally { await release(); }
 }
@@ -185,14 +200,14 @@ export async function submitExternalPlannerReply(options: {
   } finally { await release(); }
 }
 
-export async function replyToPlanner(options: { planningId: string; workspace: string; message: string; planner?: Planner; signal?: AbortSignal }): Promise<PlannerOperationResult> {
+export async function replyToPlanner(options: { planningId: string; workspace: string; message: string; planner?: Planner; plannerConfig?: PlannerConfig; signal?: AbortSignal; onEvent?: PlannerEventObserver }): Promise<PlannerOperationResult> {
   validateRequest(options.message);
   const store = new PlannerStore(options.workspace);
   const initial = await store.load(options.planningId);
-  return mutateWithTurn(store, options.planningId, options.planner ?? createPlanner(initial.config), options.message, options.signal, false);
+  return mutateWithTurn(store, options.planningId, options.planner ?? createPlanner(options.plannerConfig ?? initial.config), options.message, options.signal, false, options.plannerConfig, options.onEvent);
 }
 
-export async function revisePlannerDraft(options: { planningId: string; workspace: string; message?: string; reviewId?: string; expectedPlanHash?: string; expectedDraftRevision?: number; classifyRevision?: boolean; planner?: Planner; signal?: AbortSignal }): Promise<PlannerOperationResult> {
+export async function revisePlannerDraft(options: { planningId: string; workspace: string; message?: string; reviewId?: string; expectedPlanHash?: string; expectedDraftRevision?: number; classifyRevision?: boolean; planner?: Planner; plannerConfig?: PlannerConfig; signal?: AbortSignal; onEvent?: PlannerEventObserver }): Promise<PlannerOperationResult> {
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
@@ -202,7 +217,9 @@ export async function revisePlannerDraft(options: { planningId: string; workspac
     if ((options.expectedPlanHash && options.expectedPlanHash !== review.planHash) || (options.expectedDraftRevision && options.expectedDraftRevision !== review.draftRevision)) throw new Error("review_actions_stale：草案或报告已变化");
     if (snapshot.activeTurnId || snapshot.execution) throw new Error("当前规划不能修订");
     const message = (options.classifyRevision ? "根据本次审查及用户逐项选择修订当前草案，保留未处理问题；不能自行豁免。" : "根据本次附带的审查报告修订当前草案，逐项落实建议；不能自行豁免。") + (options.message ? "\n用户处理说明：" + options.message : "");
-    return await executeTurn(store, snapshot, options.planner ?? createPlanner(snapshot.config), randomUUID(), message, options.signal, false, !options.classifyRevision);
+    const selected = options.plannerConfig ? { ...snapshot, config: options.plannerConfig } : snapshot;
+    validateConfig(selected.config);
+    return await executeTurn(store, selected, options.planner ?? createPlanner(selected.config), randomUUID(), message, options.signal, false, !options.classifyRevision, undefined, undefined, undefined, undefined, options.onEvent);
   } finally { await release(); }
 }
 
@@ -217,7 +234,7 @@ export async function refreshPlannerRequirements(options: { planningId: string; 
   } finally { await release(); }
 }
 
-export async function retryPlannerTurn(options: { planningId: string; workspace: string; planner?: Planner; signal?: AbortSignal }): Promise<PlannerOperationResult> {
+export async function retryPlannerTurn(options: { planningId: string; workspace: string; planner?: Planner; plannerConfig?: PlannerConfig; signal?: AbortSignal; onEvent?: PlannerEventObserver }): Promise<PlannerOperationResult> {
   const store = new PlannerStore(options.workspace);
   const release = await store.acquireLock(options.planningId);
   try {
@@ -228,7 +245,8 @@ export async function retryPlannerTurn(options: { planningId: string; workspace:
     if (!previous || !["failed", "cancelled", "timed_out", "interrupted"].includes(previous.status)) throw new Error("没有可重试的失败规划轮次");
     const message = snapshot.messages.find((entry) => entry.messageId === previous.messageId);
     if (!message || message.role !== "user") throw new Error("规划轮次缺少原始用户输入");
-    const result = await executeTurn(store, snapshot, options.planner ?? createPlanner(snapshot.config), message.messageId, message.content, options.signal, true, previous.operation ?? false);
+    if (options.plannerConfig) { validateConfig(options.plannerConfig); snapshot = { ...snapshot, config: options.plannerConfig }; }
+    const result = await executeTurn(store, snapshot, options.planner ?? createPlanner(snapshot.config), message.messageId, message.content, options.signal, true, previous.operation ?? false, undefined, undefined, undefined, undefined, options.onEvent);
     return result;
   } finally { await release(); }
 }
@@ -310,8 +328,8 @@ function applyPlanDraftEdits(base: PlanDefinition, value: unknown): unknown {
       if (!target) throw new InputValidationError(`${path}.taskId`, "只能修改当前草案中已存在的任务");
       const fields = expectObject(taskPatch.fields, `${path}.fields`);
       const allowed = target.task.schemaVersion === 1
-        ? ["title", "prompt"]
-        : ["title", "objective", "approach", "steps", "deliverables", "acceptanceCriteria", "constraints", "notes"];
+        ? ["title", "prompt", "execution"]
+        : ["title", "objective", "approach", "steps", "deliverables", "acceptanceCriteria", "constraints", "notes", "execution"];
       expectExactKeys(fields, allowed, `${path}.fields`);
       if (!Object.keys(fields).length) throw new InputValidationError(`${path}.fields`, "至少需要一个可编辑字段");
       if (target.task.schemaVersion === 2 && fields.notes === null) delete target.task.notes;
@@ -324,7 +342,7 @@ function applyPlanDraftEdits(base: PlanDefinition, value: unknown): unknown {
 }
 
 function assertPlanEditPolicy(previous: PlanDefinition, next: PlanDefinition): void {
-  const fail = (reason: string): never => { throw new PlannerOperationError("draft_edit_scope", `本地草案表单只允许修改计划标题和任务的结构化正文；${reason}。请通过规划修订调整结构或执行参数。`); };
+  const fail = (reason: string): never => { throw new PlannerOperationError("draft_edit_scope", `本地草案编辑只允许修改标题、任务正文和逐任务 Runner／模型；${reason}。结构、依赖与决策来源仍需通过规划修订调整。`); };
   if (previous.id !== next.id) fail("计划 ID 不能修改");
   // Legacy plans are upgraded with core-owned decision metadata when saved.
   // Once a plan already has that metadata, local edits must preserve it.
@@ -337,7 +355,7 @@ function assertPlanEditPolicy(previous: PlanDefinition, next: PlanDefinition): v
     if (oldEntry.task.schemaVersion !== newEntry.task.schemaVersion) fail("任务 schema 不能修改");
     if (JSON.stringify(oldEntry.dependsOn) !== JSON.stringify(newEntry.dependsOn)) fail("任务依赖不能修改");
     if (oldEntry.status !== newEntry.status) fail("任务状态不能修改");
-    if (JSON.stringify(oldEntry.task.execution) !== JSON.stringify(newEntry.task.execution)) fail("Runner 与模型配置不能修改");
+    if (oldEntry.task.execution.mode !== newEntry.task.execution.mode || JSON.stringify(oldEntry.task.execution.requiredCapabilities ?? []) !== JSON.stringify(newEntry.task.execution.requiredCapabilities ?? [])) fail(`不支持此字段：任务 ${oldEntry.task.id} 的模式与能力要求不能通过本机配置编辑修改`);
     if (previous.schemaVersion === 2 && JSON.stringify(oldEntry.decisionRefs ?? null) !== JSON.stringify(newEntry.decisionRefs ?? null)) fail("决策引用不能修改");
     if (oldEntry.task.schemaVersion === 1 && newEntry.task.schemaVersion === 1) continue;
     const oldTask = oldEntry.task, newTask = newEntry.task;
@@ -397,12 +415,14 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
   try {
     let snapshot = await store.load(options.planningId);
     let retryReservation: ExecutionReference | null = null;
+    if (options.expectedDraftRevision !== undefined && snapshot.draftRevision !== options.expectedDraftRevision || options.expectedPlanHash !== undefined && snapshot.approval?.planHash !== options.expectedPlanHash) throw new Error("planner_launch_context_changed：草案或批准版本已变化，请刷新运行参数后重新确认");
     if (snapshot.execution) {
       const execution = snapshot.execution;
         const sessionStore = new SessionStore(store.workspace);
         try {
           const record = await sessionStore.load(execution.sessionId);
           if (canonicalHash(record.plan) !== execution.planHash) throw new Error("已关联 Session 的计划哈希不匹配");
+          if (options.executionSelection && canonicalHash(parseExecutionSelection(options.executionSelection, record.plan)) !== canonicalHash(record.snapshot.executionSelection ?? {})) throw new Error("session_execution_selection_fixed：此 Session 的启动 Runner／模型已固定，请使用运行中模型配置或创建新执行");
           if (options.maxParallel !== undefined && record.snapshot.maxParallel !== options.maxParallel) throw new Error("已关联 Session 的 maxParallel 已固定，不能在 planner run 中更换");
           if (options.isolation && record.snapshot.isolation?.mode !== options.isolation) throw new Error("已关联 Session 的隔离模式与本次请求不一致；执行配置不可更换");
           if (options.verificationTaskId && (record.snapshot.isolation?.mode !== "git-worktree" || record.snapshot.isolation.verificationTaskId !== options.verificationTaskId)) {
@@ -428,6 +448,10 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
       throw new Error("planning_technology_gate_missing：旧版批准记录不能证明技术选型已确认。请补齐 technology_selection 决策并重新审查批准；历史批准记录已保留。");
     }
     const draft = await store.loadDraft(options.planningId, snapshot.draftRevision);
+    const requestedSelection = options.executionSelection ? parseExecutionSelection(options.executionSelection, draft.plan) : undefined;
+    if (retryReservation?.executionSelection && requestedSelection && canonicalHash(retryReservation.executionSelection) !== canonicalHash(requestedSelection)) throw new Error("session_execution_selection_fixed：执行 reservation 的 Runner／模型已固定");
+    if (retryReservation && !retryReservation.executionSelection && requestedSelection && canonicalHash(requestedSelection) !== canonicalHash({})) throw new Error("session_execution_selection_fixed：执行 reservation 未配置模型覆盖，不能更换");
+    const executionSelection = retryReservation ? retryReservation.executionSelection : requestedSelection;
     assertPlanningReady(snapshot.planningAssessment, draft.plan);
     if (draft.planHash !== snapshot.approval.planHash || canonicalHash(draft.plan) !== snapshot.approval.planHash) throw new Error("批准草案哈希校验失败");
     const review = await loadCurrentPlanReview(options.planningId, store.workspace);
@@ -452,7 +476,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     }
     const execution: ExecutionReference = retryReservation ? { ...retryReservation, isolation: executionIsolation } : {
       sessionId: randomUUID(), approvalId: snapshot.approval.approvalId, draftRevision: draft.draftRevision,
-      planHash: draft.planHash, state: "reserved" as const, isolation: executionIsolation,
+      planHash: draft.planHash, state: "reserved" as const, isolation: executionIsolation, ...(executionSelection ? { executionSelection } : {}),
     };
     snapshot = nextSnapshot(snapshot, { status: "approved", execution });
     await store.save(snapshot);
@@ -461,6 +485,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     try {
       const result = await runPlan({
         plan: draft.plan, workspace: store.workspace, createRunner: options.createRunner, sessionId: execution.sessionId,
+        ...(executionSelection ? { executionSelection } : {}),
         ...(executionIsolation.mode === "git-worktree" ? { isolation: "git-worktree" as const, verificationTaskId: executionIsolation.verificationTaskId } : {}),
         ...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
         ...(setupProfile ? { setupProfile } : {}),
@@ -588,7 +613,7 @@ function shorten(value: string, limit: number): string {
   return value.length > limit ? value.slice(0, limit) + "…" : value;
 }
 
-async function mutateWithTurn(store: PlannerStore, planningId: string, planner: Planner, userText: string, signal: AbortSignal | undefined, retry: boolean): Promise<PlannerOperationResult> {
+async function mutateWithTurn(store: PlannerStore, planningId: string, planner: Planner, userText: string, signal: AbortSignal | undefined, retry: boolean, config?: PlannerConfig, onEvent?: PlannerEventObserver): Promise<PlannerOperationResult> {
   const release = await store.acquireLock(planningId);
   try {
     let snapshot = await store.load(planningId);
@@ -599,12 +624,13 @@ async function mutateWithTurn(store: PlannerStore, planningId: string, planner: 
     if (snapshot.execution) throw new Error("规划已关联执行 Session，不能继续修改对话");
     if (retry) throw new Error("内部错误：不支持重复追加用户消息的 retry");
     if (snapshot.status === "execution_created") throw new Error("规划已开始执行");
+    if (config) { validateConfig(config); snapshot = { ...snapshot, config }; }
     const messageId = randomUUID();
-    return await executeTurn(store, snapshot, planner, messageId, userText, signal, false);
+    return await executeTurn(store, snapshot, planner, messageId, userText, signal, false, false, undefined, undefined, undefined, undefined, onEvent);
   } finally { await release(); }
 }
 
-async function executeTurn(store: PlannerStore, initial: PlannerConversationSnapshot, planner: Planner, messageId: string, userText: string, signal: AbortSignal | undefined, retry: boolean, operation = false, batchOperationIds?: string[], batchMessageIds?: string[], beforeCommit?: () => Promise<void>, repositoryOutputBudgetBytes = 64 * 1024): Promise<PlannerOperationResult> {
+async function executeTurn(store: PlannerStore, initial: PlannerConversationSnapshot, planner: Planner, messageId: string, userText: string, signal: AbortSignal | undefined, retry: boolean, operation = false, batchOperationIds?: string[], batchMessageIds?: string[], beforeCommit?: () => Promise<void>, repositoryOutputBudgetBytes = 64 * 1024, onEvent?: PlannerEventObserver): Promise<PlannerOperationResult> {
   const currentMessageIds = batchMessageIds ?? [messageId];
   validateRequest(userText);
   if (planner.id !== initial.config.provider) throw new Error("规划记录的 Planner provider 与当前适配器不匹配");
@@ -623,14 +649,16 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
   });
   if (previousTurn && retry && previousTurn.messageId !== messageId) throw new Error("规划重试输入身份不匹配");
   await store.save(snapshot);
-  await store.writeTurn(turn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, status: "running", input: userText, createdAt: now });
+  await store.writeTurn(turn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, config: snapshot.config, status: "running", input: userText, createdAt: now });
 
   const counters = { requests: 0, tools: 0 };
   const events: PlannerEvent[] = [];
-  const timed = timeoutSignal(signal, TURN_TIMEOUT_MS);
+  const timed = plannerDeadline(snapshot.config, signal, "plan");
   const initialEvidenceBytes = snapshot.context.reduce((sum, item) => sum + item.sizeBytes, 0);
   const reader = new RepositoryReader(store.workspace, timed.signal, initialEvidenceBytes, repositoryOutputBudgetBytes);
+  const notify = async (event: PlannerEvent) => { await onEvent?.({ ...event, planningId: snapshot.planningId, turnId }).catch(() => undefined); };
   try {
+    await notify({ type: "planner.turn.started", payload: { provider: snapshot.config.provider, model: snapshot.config.model, role: "plan" } });
     let confirmationState = snapshot.confirmationState ?? { schemaVersion: 1 as const, activeProposal: null, events: [] };
     if (!operation) {
       const parsedEvents = parseConfirmationInput(userText, messageId, confirmationState);
@@ -725,6 +753,12 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
       consumeApiRequest: () => { counters.requests += 1; if (counters.requests > API_REQUEST_LIMIT) throw new PlannerOperationError("planner_request_limit", "本轮 Planner API 请求超过 8 次"); return counters.requests; },
       consumeToolCall: () => { counters.tools += 1; if (counters.tools > TOOL_CALL_LIMIT) throw new PlannerOperationError("planner_tool_call_limit", "本轮只读工具调用超过 20 次"); },
       record: async (event: PlannerEvent) => {
+        if (event.type === "agent.output" || event.type === "agent.heartbeat") { await notify(event); return; }
+        if (event.type === "agent.response" && typeof event.payload.text === "string") {
+          await store.writeProviderCall(snapshot.planningId, turnId, event.payload.requestId as number, "response", event.payload);
+          const { text: _text, ...summary } = event.payload;
+          event = { ...event, payload: summary };
+        }
         if (event.type === "provider.request" || event.type === "provider.response") {
           const requestId = event.payload.requestId;
           if (typeof requestId !== "number") throw new PlannerOperationError("planner_record_invalid", "API 请求记录缺少 requestId");
@@ -733,10 +767,12 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
           const summary = { type: event.type, payload: { requestId, model: event.payload.model, status: event.payload.status } };
           events.push(summary);
           await store.appendEvent(snapshot.planningId, turnId, summary);
+          await notify(summary);
           return;
         }
         events.push(event);
         await store.appendEvent(snapshot.planningId, turnId, event);
+        await notify(event);
       },
     };
     let reply: PlannerReply | undefined;
@@ -759,6 +795,7 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
           ...(contextNotice ? { repositoryNotice: contextNotice } : {}),
         }, context);
         if (timed.signal.aborted) throw timed.signal.reason ?? new Error("规划轮次已取消");
+        await notify({ type: "planner.validating", payload: {} });
         reply = validateReply(output);
         updatedRequirements = syncPlanningDecisionRequirements(
           applyRequirementsUpdate(snapshot, reply.requirementsUpdate!, batchOperationIds ?? (operation ? [messageId] : []), committedEvents.map(({ sourceMessageId }) => sourceMessageId), currentMessageIds),
@@ -767,7 +804,7 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
         break;
       } catch (error) {
         validationError = error;
-        const repairable = !(error instanceof PlannerApiError) && !(error instanceof PlannerOperationError) && !timed.signal.aborted;
+        const repairable = !(error instanceof PlannerApiError) && !(error instanceof PlannerOperationError) && !(error instanceof PlannerInvocationError) && !timed.signal.aborted;
         if (!repairable || attempt === maximumRepairs) throw error;
         repairMessage = "上次回复未通过应用校验：" + (error instanceof Error ? error.message : String(error)) +
           "。复用已有调研，只修正指出的 JSON、字段、需求来源或执行配置问题；保留 requirementsUpdate，输出一个完整 JSON 对象，不要调用工具。";
@@ -804,7 +841,7 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
     await store.writeRequirements(snapshot.planningId, updatedRequirements);
     const finishedAt = new Date().toISOString();
     const doneTurn: PlannerTurnRef = { ...turn, status: "succeeded", reasonCode: null, finishedAt };
-    await store.writeTurn(doneTurn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, status: "succeeded", input: userText, reply, requirementsRevision: updatedRequirements.revision, reviewId: latestReview?.reviewId, operation, evidence, apiRequests: counters.requests, toolCalls: counters.tools, events, createdAt: now, finishedAt });
+    await store.writeTurn(doneTurn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, config: snapshot.config, status: "succeeded", input: userText, reply, requirementsRevision: updatedRequirements.revision, reviewId: latestReview?.reviewId, operation, evidence, apiRequests: counters.requests, toolCalls: counters.tools, events, createdAt: now, finishedAt });
     snapshot = nextSnapshot(snapshot, {
       status: reply.kind === "draft" ? "draft_ready" : "collecting",
       messages: [...snapshot.messages, assistant], turns: [...snapshot.turns.slice(0, -1), doneTurn],
@@ -813,14 +850,17 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
       approval: null, execution: null,
     });
     await store.save(snapshot);
+    await notify({ type: "planner.turn.finished", payload: { status: "succeeded", replyKind: reply.kind } });
     return { snapshot, ...(returnedDraft ? { draft: returnedDraft } : {}), ...(reply.kind === "draft" ? { draftChanged: newDraft !== undefined } : {}), reply };
   } catch (error) {
+    const failure = plannerFailure(error, timed, "plan");
     const code = timed.timedOut() ? "planner_timed_out"
       : timed.signal.aborted ? "planner_cancelled"
-        : error instanceof PlannerApiError || error instanceof PlannerOperationError || error instanceof PlannerReplyValidationError ? error.code
+        : error instanceof PlannerApiError || error instanceof PlannerOperationError || error instanceof PlannerReplyValidationError || error instanceof PlannerInvocationError ? error.code
           : "planner_failed";
     const failedTurn: PlannerTurnRef = { ...turn, status: timed.timedOut() ? "timed_out" : timed.signal.aborted ? "cancelled" : "failed", reasonCode: code, finishedAt: new Date().toISOString() };
-    await store.writeTurn(failedTurn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, status: failedTurn.status, input: userText, reasonCode: code, error: safeError(error), context: reader.getEvidence(), apiRequests: counters.requests, toolCalls: counters.tools, events, createdAt: now, finishedAt: failedTurn.finishedAt });
+    const message = safeError(failure.message);
+    await store.writeTurn(failedTurn, { schemaVersion: 1, planningId: snapshot.planningId, turnId, messageId, config: snapshot.config, status: failedTurn.status, input: userText, reasonCode: code, error: message, context: reader.getEvidence(), apiRequests: counters.requests, toolCalls: counters.tools, events, createdAt: now, finishedAt: failedTurn.finishedAt });
     const persisted = await store.load(snapshot.planningId);
     snapshot = nextSnapshot(persisted, {
       status: "collecting", turns: persisted.turns.map((item) => item.turnId === turnId ? failedTurn : item),
@@ -829,7 +869,8 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
       activeTurnId: null, approval: null, execution: null,
     });
     await store.save(snapshot);
-    return { snapshot, error: safeError(error) };
+    await notify({ type: "planner.turn.finished", payload: { status: failedTurn.status, reasonCode: code, message } });
+    return { snapshot, error: message, reasonCode: code };
   } finally { timed.dispose(); }
 }
 
@@ -932,6 +973,11 @@ function validateConfig(config: PlannerConfig): void {
     if (!config.model || Buffer.byteLength(config.model, "utf8") > 256 || config.baseUrl !== (config.provider === "web-mcp" ? "mcp://web" : "mcp://chatgpt")) throw new InputValidationError("planner.config", "网页 MCP 配置无效");
     return;
   }
+  if (config.provider === "codex-agent" || config.provider === "claude-agent") {
+    const endpoint = config.provider === "codex-agent" ? "agent://codex" : "agent://claude-code";
+    if (!config.model || Buffer.byteLength(config.model, "utf8") > 256 || config.baseUrl !== endpoint) throw new InputValidationError("planner.config", "本机 Agent 配置无效");
+    return;
+  }
   if (config.provider !== "deepseek" || !config.model || Buffer.byteLength(config.model, "utf8") > 256) throw new InputValidationError("planner.config", "Planner provider/model 无效");
   let url: URL;
   try { url = new URL(config.baseUrl); } catch { throw new InputValidationError("planner.config", "Planner endpoint 不是有效 URL"); }
@@ -949,18 +995,4 @@ function safeError(error: unknown): string {
 
 class PlannerOperationError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "PlannerOperationError"; }
-}
-
-function timeoutSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; timedOut: () => boolean; dispose: () => void } {
-  const controller = new AbortController();
-  let didTimeout = false;
-  const timeout = setTimeout(() => { didTimeout = true; controller.abort(new Error("Planner 规划轮次超过 120 秒")); }, timeoutMs);
-  const onAbort = () => controller.abort(parent?.reason ?? new Error("Planner 规划轮次已取消"));
-  if (parent?.aborted) onAbort();
-  else parent?.addEventListener("abort", onAbort, { once: true });
-  return {
-    signal: controller.signal,
-    timedOut: () => didTimeout,
-    dispose: () => { clearTimeout(timeout); parent?.removeEventListener("abort", onAbort); },
-  };
 }

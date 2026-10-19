@@ -2,7 +2,9 @@
 
 面向 coding agent 的多 agent 任务编排平台，目标是把用户目标转成有序计划，支持大模型规划并由 coding agent 执行。
 
-一个逐步搭建的本地任务编排工具。当前支持单任务非交互执行、Mock Runner 和 Claude Code Runner，并记录每次 Attempt 的输入、输出与结果。计划调度、并行执行和会话恢复仍属于后续阶段。
+项目已逐步扩展为包含计划管理、并行执行、worktree 隔离、会话恢复、Runner 交互与本机 Web 工作台的本地编排工具。
+
+Windows 安装式客户端的[需求与技术方案](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md)已整理，采用 Electron + Vite、共享前端和既有 daemon；目前仅为方案，桌面安装包与原生 Windows 后端适配尚未实施。下列命令仍为源码使用方式。
 
 ## 环境
 

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "id": "design",
+  "title": "接口及存储设计",
+  "objective": "明确课程与教师资源的 API 契约、内存存储模型和错误行为",
+  "approach": "在项目内撰写接口与数据存储设计文档，先定约束再实施",
+  "steps": [
+    "定义 /courses、/teachers 集合及 /:id 资源的 GET/POST/PUT/DELETE 端点与返回状态码",
+    "定义各资源至少 id、name 字段及唯一 ID 生成、字段校验、错误响应 JSON 结构",
+    "明确内存存储，进程重启清空、无持久化、无关联排课逻辑",
+    "给出 curl 或 Node 内置客户端的端到端测试矩阵",
+    "明确字段类型、PUT 全量替换语义，以及 400/404/405 响应码和示例"
+  ],
+  "deliverables": ["接口设计文档", "存储设计文档"],
+  "acceptanceCriteria": [
+    "设计文档列出两个实体各 5 个 CRUD HTTP 交互（列表/单个/创建/更新/删除）及正常和异常响应",
+    "文档明确仅内存存储、无第三方依赖且无时间冲突检测",
+    "接口契约明确字段类型、PUT 全量更新语义、ID 格式、400/404/405 状态码及错误 JSON"
+  ],
+  "constraints": [
+    "仅课程与教师 CRUD；无前端、认证或排课时间冲突检测",
+    "只用 Node.js .mjs、node:http 和内存数据；不得安装第三方依赖",
+    "须经 4177 批准后由本机 Runner 执行"
+  ],
+  "execution": { "runnerId": "codex", "mode": "managed", "modelId": "gpt-6-luna" }
+}

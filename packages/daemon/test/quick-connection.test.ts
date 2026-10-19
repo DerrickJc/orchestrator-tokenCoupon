@@ -72,13 +72,13 @@ async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: Tu
   return { root, dataDirectory, dependencies, service, workspace, remote, port, origin, proxyFetch, waitFor, probeToken: () => lastProbeToken, counters: () => ({ starts, stops }), setOffline: (value: boolean) => { offline = value; }, exit: () => exit?.() };
 }
 
-async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[]) {
-  const redirectUri = "https://chatgpt.com/connector/oauth/test";
+async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[], options: { clientName?: string; redirectUri?: string; authMethod?: "none" | "client_secret_post" | "omit" } = {}) {
+  const redirectUri = options.redirectUri || "https://chatgpt.com/connector/oauth/test";
   const register = await h.proxyFetch(`${h.origin}/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-    client_name: "integration browser", redirect_uris: [redirectUri], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
+    client_name: options.clientName || "integration browser", redirect_uris: [redirectUri], ...(options.authMethod === "omit" ? {} : { token_endpoint_auth_method: options.authMethod || "none" }), grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
   }) });
   expect(register.status).toBe(201);
-  const client = await register.json() as { client_id: string };
+  const client = await register.json() as { client_id: string; token_endpoint_auth_method: string; client_secret?: string; client_secret_expires_at?: number };
   const verifier = "v".repeat(64);
   const params = new URLSearchParams({ client_id: client.client_id, redirect_uri: redirectUri, response_type: "code", code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url"), resource: `${h.origin}/mcp`, scope: scopes.join(" "), state: randomUUID() });
   const request = await h.proxyFetch(`${h.origin}/authorize?${params}`);
@@ -88,6 +88,86 @@ async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[
 }
 
 describe("Quick Tunnel connection", () => {
+  it.each(["none", "client_secret_post", "omit"] as const)("keeps DCR authentication consistent through Claude callback, token exchange, refresh and MCP (%s)", async authMethod => {
+    const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const auth = await authorize(h, ["planning:read"], { clientName: "Claude", redirectUri: "https://claude.ai/api/mcp/auth_callback", authMethod });
+    const confidential = authMethod !== "none";
+    expect(auth.client.token_endpoint_auth_method).toBe(confidential ? "client_secret_post" : "none");
+    expect(!!auth.client.client_secret).toBe(confidential);
+    if (!confidential) expect(auth.client.client_secret_expires_at).toBeUndefined();
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, source: "claude", scopes: ["planning:read"] });
+    const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+    const params = { grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` };
+    const send = (values: Record<string, string>) => h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(values) });
+    if (confidential) {
+      for (const values of [params, { ...params, client_secret: "wrong-secret" }]) { const failed = await send(values); expect(failed.status).toBe(400); expect((await failed.json() as { error: string }).error).toBe("invalid_client"); }
+    }
+    const credentials: Record<string, string> = confidential ? { client_secret: auth.client.client_secret! } : {};
+    const exchanged = await send({ ...params, ...credentials }); expect(exchanged.status).toBe(200);
+    const tokens = await exchanged.json() as { access_token: string; refresh_token: string };
+    const replay = await send({ ...params, ...credentials }); expect(replay.status).toBeGreaterThanOrEqual(400);
+    const refreshed = await send({ grant_type: "refresh_token", client_id: auth.client.client_id, refresh_token: tokens.refresh_token, resource: `${h.origin}/mcp`, ...credentials });
+    expect(refreshed.status).toBe(200); const fresh = await refreshed.json() as { access_token: string; refresh_token: string };
+    expect(fresh.refresh_token).not.toBe(tokens.refresh_token);
+    const client = new Client({ name: "claude-dcr-regression", version: "1" }); cleanups.push(() => client.close());
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${h.origin}/mcp`), { fetch: h.proxyFetch, requestInit: { headers: { Authorization: `Bearer ${fresh.access_token}` } } }));
+    const result = await client.callTool({ name: "workspace_query", arguments: {} }); expect(result.isError).not.toBe(true);
+    await expect.poll(() => h.remote.status().remoteClientVerified).toBe(true);
+  });
+
+  it("repairs legacy public registrations with stray secrets without changing client IDs or grants", async () => {
+    let started = false;
+    const runtime = { origin: "https://example-quick.trycloudflare.com", async stop() {}, async detach() {} };
+    const tunnel: TunnelAdapter = { async start() { started = true; return runtime; }, async recover() { return started ? runtime : undefined; } };
+    const h = await fixture({ tunnel }); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const auth = await authorize(h, ["planning:read"], { clientName: "Claude", redirectUri: "https://claude.ai/api/mcp/auth_callback" });
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, source: "claude", scopes: ["planning:read"] });
+    await h.remote.shutdown();
+    const statePath = join(h.dataDirectory, "remote-mcp-oauth.json"), state = JSON.parse(await readFile(statePath, "utf8"));
+    const stored = state.clients.find((item: { client_id: string }) => item.client_id === auth.client.client_id);
+    stored.client_secret = "legacy-unexpected-secret"; stored.client_secret_expires_at = Math.floor(Date.now() / 1000) + 1000;
+    await writeFile(statePath, JSON.stringify(state));
+    const restored = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => restored.shutdown()); await restored.initialize();
+    for (let i = 0; i < 150 && restored.status().transport !== "ready"; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    expect(restored.status().transport).toBe("ready"); expect(restored.grants()[0]?.grantId).toBe(state.grants[0].grantId);
+    const response = await h.proxyFetch(`${h.origin}/authorize?${auth.params}`); expect(response.status).toBe(200);
+    const request = restored.approvals().at(-1)!; await restored.decideApproval(request.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, source: "claude", scopes: ["planning:read"] });
+    const approved = await restored.approvalStatus(request.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+    const exchanged = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` }) });
+    expect(exchanged.status).toBe(200); expect(restored.grants().every(grant => grant.clientId === auth.client.client_id)).toBe(true);
+    const persisted = JSON.parse(await readFile(statePath, "utf8")); expect(persisted.clients[0].client_secret).toBeUndefined();
+  });
+
+  it("distinguishes local Claude approval from token exchange and records only safe exchange diagnostics", async () => {
+    const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const auth = await authorize(h, ["planning:read"], { clientName: "Claude", redirectUri: "https://claude.ai/api/mcp/auth_callback" });
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, source: "claude", scopes: ["planning:read"] });
+    expect(h.remote.status().pendingTokenExchanges).toBe(1); expect(h.remote.grants()[0]?.oauthState).toBe("awaiting_token");
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+    const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+    const complete = { grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` };
+    const send = (values: Record<string, string>) => h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(values) });
+    const { resource: _resource, ...missingResource } = complete;
+    const failed = await send(missingResource); expect(failed.status).toBeGreaterThanOrEqual(400); expect(failed.headers.get("x-token-coupon-trace")).toBeTruthy();
+    await expect.poll(() => h.remote.status().recentCalls?.some(item => item.stage === "oauth" && item.code === "oauth_resource_missing")).toBe(true);
+    expect(h.remote.status().pendingTokenExchanges).toBe(1);
+    const failure = h.remote.status().recentCalls!.find(item => item.code === "oauth_resource_missing")!;
+    expect(failure.requestFields).not.toContain("resource"); expect(failure.requestFields).toContain("code_verifier");
+    const badVerifier = await send({ ...complete, code_verifier: "x".repeat(64) }); expect(badVerifier.status).toBeGreaterThanOrEqual(400);
+    await expect.poll(() => h.remote.status().recentCalls?.some(item => item.code === "oauth_pkce_invalid")).toBe(true);
+    const unknownClient = await send({ ...complete, client_id: randomUUID() }); expect(unknownClient.status).toBe(400);
+    await expect.poll(() => h.remote.status().recentCalls?.some(item => item.stage === "oauth" && item.code === "invalid_client")).toBe(true);
+    const issued = await send(complete); expect(issued.status).toBe(200); const tokens = await issued.json() as { access_token: string; refresh_token: string };
+    await expect.poll(() => h.remote.status().recentCalls?.some(item => item.stage === "oauth" && item.outcome === "success")).toBe(true);
+    expect(h.remote.status().pendingTokenExchanges).toBe(0); expect(h.remote.grants()[0]?.oauthState).toBe("token_issued");
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+    const output = JSON.stringify(h.remote.status().recentCalls);
+    for (const secret of [code, auth.verifier, tokens.access_token, tokens.refresh_token]) expect(output).not.toContain(secret);
+    await expect.poll(async () => (await readFile(join(h.dataDirectory, "remote-mcp-diagnostics.json"), "utf8")).includes("oauth_token_issued")).toBe(true);
+    const disk = await readFile(join(h.dataDirectory, "remote-mcp-diagnostics.json"), "utf8");
+    for (const secret of [code, auth.verifier, tokens.access_token, tokens.refresh_token]) expect(disk).not.toContain(secret);
+  });
+
   it("preserves a persistent tunnel while discovery is still pending during business shutdown", async () => {
     const root = await mkdtemp(join(tmpdir(), "tc-discovery-restart-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
     const executable = join(root, "cloudflared-fixture");
@@ -97,7 +177,7 @@ describe("Quick Tunnel connection", () => {
     await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId });
     const { readTunnelRecord } = await import("../src/persistent-tunnel.js");
     const directory = join(h.dataDirectory, "components", "tunnel-runtime");
-    await expect.poll(() => readTunnelRecord(directory)).toBeDefined();
+    await expect.poll(() => readTunnelRecord(directory), { timeout: 5000 }).toBeDefined();
     const pid = (await readTunnelRecord(directory))!.pid;
     await h.remote.shutdown();
     const restored = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => restored.stop());
@@ -312,13 +392,18 @@ describe("Quick Tunnel connection", () => {
     expect(h.remote.grants()).toHaveLength(1);
     const second = await authorize(h, scopes);
     await h.remote.decideApproval(second.pending.requestId, { decision: "allow", workspaceId: other.workspaceId, workspaceIds: [h.workspace.workspaceId, other.workspaceId], source: "claude", scopes });
-    const grants = h.remote.grants(); expect(grants.map(item => item.source)).toEqual(["chatgpt", "claude"]);
-    expect(grants[0]!.workspaceIds).toEqual([h.workspace.workspaceId]);
+    const grants = h.remote.grants(); expect(grants.map(item => item.source).sort()).toEqual(["chatgpt", "claude"]);
+    expect(grants.map(item => item.createdAt)).toEqual(grants.map(item => item.createdAt).sort((a, b) => b - a));
+    const firstGrant = grants.find(item => item.clientId === first.client.client_id)!;
+    expect(firstGrant.workspaceIds).toEqual([h.workspace.workspaceId]);
     expect(h.remote.status().authorizationStates?.map(item => item.status)).toEqual(["active", "active"]);
     const clock = vi.spyOn(Date, "now").mockReturnValue(Math.max(...grants.map(item => item.expiresAt)) + 1);
     try { expect(h.remote.status().authorizationStates?.map(item => item.status)).toEqual(["expired", "expired"]); }
     finally { clock.mockRestore(); }
-    await h.remote.updateGrant(grants[0]!.grantId, { workspaceIds: [h.workspace.workspaceId, other.workspaceId], source: "chatgpt", alias: "我的 ChatGPT" });
+    await h.remote.updateGrant(firstGrant.grantId, { workspaceIds: [h.workspace.workspaceId, other.workspaceId], source: "chatgpt", alias: "我的 ChatGPT" });
+    expect(h.remote.grants().find(item => item.grantId === firstGrant.grantId)?.alias).toBe("我的 ChatGPT");
+    await h.remote.updateGrant(firstGrant.grantId, { workspaceIds: [h.workspace.workspaceId, other.workspaceId], source: "chatgpt", alias: "" });
+    expect(h.remote.grants().find(item => item.grantId === firstGrant.grantId)?.alias).toBeUndefined();
     const exchange = async (auth: typeof first) => {
       const approval = await h.remote.approvalStatus(auth.pending.requestId);
       expect(approval, JSON.stringify({ approval, grants: h.remote.grants(), requestId: auth.pending.requestId })).toHaveProperty("redirectUrl");
@@ -328,15 +413,41 @@ describe("Quick Tunnel connection", () => {
     };
     const tokens = await exchange(first), principal = (await h.remote.principalForToken(tokens.access_token))!;
     expect(principal.workspaceIds).toHaveLength(2);
-    await h.remote.updateGrant(grants[0]!.grantId, { workspaceIds: [h.workspace.workspaceId], source: "chatgpt" });
+    await h.remote.updateGrant(firstGrant.grantId, { workspaceIds: [h.workspace.workspaceId], source: "chatgpt" });
     await expect(principal.assertActive!(other.workspaceId)).rejects.toThrow("mcp_workspace_forbidden");
     const claudeTokens = await exchange(second);
-    await h.remote.revokeGrant(grants[0]!.grantId);
-    expect(h.remote.status().authorizationStates?.find(item => item.grantId === grants[0]!.grantId)?.status).toBe("revoked");
+    await h.remote.revokeGrant(firstGrant.grantId);
+    expect(h.remote.status().authorizationStates?.find(item => item.grantId === firstGrant.grantId)?.status).toBe("revoked");
     expect(JSON.stringify(h.remote.status().authorizationStates)).not.toMatch(/access_token|refreshDigest|tokenHash/);
     await expect(h.remote.principalForToken(tokens.access_token)).rejects.toThrow();
     expect((await h.remote.principalForToken(claudeTokens.access_token))!.source).toBe("claude");
     expect(h.counters()).toEqual({ starts: 1, stops: 0 });
+  }, 15_000);
+
+  it("renames a connector through the local API without modifying authorization or reconnecting", async () => {
+    const h = await fixture();
+    await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const auth = await authorize(h, ["planning:read"], { clientName: "ChatGPT" });
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, scopes: ["planning:read"] });
+    const original = h.remote.grants()[0]!;
+    const port = await freePort(), origin = `http://127.0.0.1:${port}`;
+    const server = await createLocalServer(h.service, { port, host: "127.0.0.1", dataDirectory: h.dataDirectory, remoteMcp: h.remote });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
+    cleanups.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+    const cookie = (await fetch(origin)).headers.getSetCookie()[0]!.split(";", 1)[0]!;
+    const route = `${origin}/api/v1/remote-connection/grants/${original.grantId}/name`;
+    const rename = (alias: unknown, headers: Record<string, string> = { Cookie: cookie, Origin: origin }) => fetch(route, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ alias }) });
+    expect((await rename("demo1", { Origin: origin })).status).toBe(403);
+    expect((await rename("demo1", { Cookie: cookie, Origin: "https://evil.test" })).status).toBe(403);
+    expect((await rename("  demo1  ")).status).toBe(200);
+    expect(h.remote.grants()[0]).toEqual({ ...original, alias: "demo1" });
+    expect(h.remote.status().clients?.find(item => item.grantId === original.grantId)?.name).toBe("demo1");
+    for (const invalid of [42, "x".repeat(81), "name\ncontrol"]) expect((await rename(invalid)).status).toBe(400);
+    expect(h.remote.grants()[0]?.alias).toBe("demo1");
+    expect((await rename("")).status).toBe(200); expect(h.remote.grants()[0]).toEqual(original);
+    expect(h.counters()).toEqual({ starts: 1, stops: 0 }); expect(h.remote.status().mcpUrl).toBe(`${h.origin}/mcp`);
+    await h.remote.revokeGrant(original.grantId);
+    expect((await rename("revoked" )).ok).toBe(false);
   }, 15_000);
 
   it("requires a local browser session and Origin to start or approve a connection", async () => {

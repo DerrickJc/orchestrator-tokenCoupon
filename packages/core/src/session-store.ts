@@ -7,8 +7,9 @@ import type { GitIsolationJournal, SessionControlKind, SessionControlRequest, Se
 import { parsePlan } from "./validate-plan.js";
 import { parseRunnerProfile, runnerProfileHash } from "./runner-registry.js";
 
-import { createExecutionLock, inspectLock, lockDescription } from "./owner-lock.js";
+import { acquireLockCoordination, createExecutionLock, inspectLock, lockDescription } from "./owner-lock.js";
 import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
+import { parseExecutionSelection, type ExecutionSelection } from "./execution-selection.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_STATUSES = new Set(["ready", "running", "pausing", "paused", "succeeded", "failed", "cancelled", "interrupted", "blocked"]);
@@ -38,7 +39,7 @@ export class SessionStore {
     }
   }
 
-  async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string; runnerProfile?: import("./runner.js").RunnerProfile } = {}): Promise<SessionRecord> {
+  async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string; runnerProfile?: import("./runner.js").RunnerProfile; executionSelection?: ExecutionSelection } = {}): Promise<SessionRecord> {
     if (!UUID.test(sessionId)) throw new Error("sessionId 必须是 UUID");
     const maxParallel = options.maxParallel ?? 1;
     if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("maxParallel 必须是 1 到 8 之间的整数");
@@ -49,12 +50,14 @@ export class SessionStore {
     const sessionDir = join(this.root, "sessions", sessionId);
     const now = new Date().toISOString();
     const runnerProfile = options.runnerProfile ? parseRunnerProfile(options.runnerProfile) : undefined;
+    const executionSelection = options.executionSelection ? parseExecutionSelection(options.executionSelection, plan) : undefined;
     const snapshot: SessionSnapshot = {
       schemaVersion: 3, sessionId, workspace: this.workspace, revision: 1, status: "ready", isolation,
       maxParallel, planDigest: digestPlan(plan), executionId, schedulerState: "idle", waveId: null, activeAttemptIds: [],
       controlState: { requestId: null, kind: null, requestedAt: null, acknowledgedAt: null },
       planId: plan.id, planTitle: plan.title,
       ...(runnerProfile ? { runnerProfile, runnerProfileHash: runnerProfileHash(runnerProfile) } : {}),
+      ...(executionSelection ? { executionSelection, executionSelectionHash: createHash("sha256").update(JSON.stringify(executionSelection)).digest("hex") } : {}),
       tasks: plan.tasks.map(({ task }) => ({ taskId: task.id, status: "planned", activeAttemptId: null, attempts: [], result: null, reasonCode: null })),
       createdAt: now, updatedAt: now,
     };
@@ -137,37 +140,54 @@ export class SessionStore {
     await atomicWrite(join(sessionDir, "session.json"), `${JSON.stringify(snapshot, null, 2)}\n`);
   }
 
-  async requestControl(sessionId: string, kind: SessionControlKind, timeoutMs = 120_000): Promise<void> {
-    const record = await this.load(sessionId);
-    if (record.snapshot.schemaVersion !== 3 || !record.snapshot.executionId) throw new Error("session_control_unsupported：该 Session 尚不支持跨进程控制");
-    if (record.snapshot.isolation?.mode !== "git-worktree") throw new Error("session_control_requires_worktree：跨进程 pause/cancel 仅支持 Git worktree Session");
-    if (!["running", "pausing"].includes(record.snapshot.status)) throw new Error(`session_control_not_running：Session 当前状态为 ${record.snapshot.status}`);
-    if (!await this.hasLiveOwner(sessionId)) throw new Error("session_owner_missing：没有可确认控制请求的运行 owner");
+  /** Persist a control request without waiting for a potentially long active batch. */
+  async submitControl(sessionId: string, kind: SessionControlKind): Promise<SessionControlRequest> {
     const controlDir = join(this.sessionDirectory(sessionId), "control");
+    await stat(this.sessionDirectory(sessionId));
     await mkdir(controlDir, { recursive: true, mode: 0o700 });
-    const requestPath = join(controlDir, "request.json");
-    const ackPath = join(controlDir, "ack.json");
+    const requestPath = join(controlDir, "request.json"), ackPath = join(controlDir, "ack.json");
+    const release = await acquireLockCoordination([requestPath], 3);
     try {
-      const previous = JSON.parse(await readFile(requestPath, "utf8")) as Record<string, unknown>;
-      let acknowledged = false;
+      const record = await this.load(sessionId);
+      if (record.snapshot.schemaVersion !== 3 || !record.snapshot.executionId) throw new Error("session_control_unsupported：该 Session 尚不支持跨进程控制");
+      if (record.snapshot.isolation?.mode !== "git-worktree") throw new Error("session_control_requires_worktree：跨进程 pause/cancel 仅支持 Git worktree Session");
+      if (!["running", "pausing"].includes(record.snapshot.status)) throw new Error(`session_control_not_running：Session 当前状态为 ${record.snapshot.status}`);
+      if (!await this.hasLiveOwner(sessionId)) throw new Error("session_owner_missing：没有可确认控制请求的运行 owner");
       try {
-        const ack = JSON.parse(await readFile(ackPath, "utf8")) as Record<string, unknown>;
-        acknowledged = ack.requestId === previous.requestId;
-      } catch { /* no acknowledgement yet */ }
-      if (!acknowledged) throw new Error("session_control_pending：上一个控制请求尚未确认");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    const request: SessionControlRequest = {
-      sessionId, executionId: record.snapshot.executionId, requestId: randomUUID(), kind, requestedAt: new Date().toISOString(), acknowledgedAt: null,
-    };
-    await atomicWrite(requestPath, `${JSON.stringify(request, null, 2)}\n`);
+        const previous = JSON.parse(await readFile(requestPath, "utf8")) as Record<string, unknown>;
+        let acknowledged = false;
+        try {
+          const ack = JSON.parse(await readFile(ackPath, "utf8")) as Record<string, unknown>;
+          acknowledged = ack.requestId === previous.requestId && ack.sessionId === sessionId && ack.executionId === previous.executionId && ack.kind === previous.kind;
+        } catch { /* no acknowledgement yet */ }
+        if (!acknowledged && previous.executionId === record.snapshot.executionId) {
+          if (previous.kind === kind) return (await this.readControlRequest(sessionId))!;
+          if (kind !== "cancel" || previous.kind !== "pause") throw new Error("session_control_pending：上一个控制请求尚未确认");
+          // A user cancellation may replace a draining pause. The scheduler fences
+          // requests by ID; the old waiting CLI is told that its request was superseded.
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const request: SessionControlRequest = {
+        sessionId, executionId: record.snapshot.executionId, requestId: randomUUID(), kind, requestedAt: new Date().toISOString(), acknowledgedAt: null,
+      };
+      await atomicWrite(requestPath, `${JSON.stringify(request, null, 2)}\n`);
+      return request;
+    } finally { await release(); }
+  }
+
+  async requestControl(sessionId: string, kind: SessionControlKind, timeoutMs = 120_000): Promise<void> {
+    const request = await this.submitControl(sessionId, kind);
+    const ackPath = join(this.sessionDirectory(sessionId), "control", "ack.json");
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
         const ack = JSON.parse(await readFile(ackPath, "utf8")) as Record<string, unknown>;
         if (ack.sessionId === sessionId && ack.executionId === request.executionId && ack.requestId === request.requestId && ack.kind === kind && typeof ack.acknowledgedAt === "string") return;
       } catch { /* owner has not acknowledged yet */ }
+      const current = await this.readControlRequest(sessionId);
+      if (current?.requestId !== request.requestId) throw new Error("session_control_superseded：控制请求已被后续操作替代，请查看当前会话状态");
       if (!await this.hasLiveOwner(sessionId)) throw new Error("session_owner_exited：运行 owner 在确认控制请求前退出");
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -317,6 +337,8 @@ async function atomicWrite(path: string, contents: string): Promise<void> {
 function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, sessionId: string): SessionSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Session 快照必须是对象");
   const raw = value as Record<string, unknown>;
+  const selection = raw.executionSelection === undefined ? undefined : parseExecutionSelection(raw.executionSelection, plan);
+  if (selection ? createHash("sha256").update(JSON.stringify(selection)).digest("hex") !== raw.executionSelectionHash : raw.executionSelectionHash !== undefined) throw new Error("session_execution_selection_invalid：运行模型配置校验失败");
   if ((raw.schemaVersion !== 1 && raw.schemaVersion !== 2 && raw.schemaVersion !== 3) || raw.sessionId !== sessionId || raw.workspace !== workspace || raw.planId !== plan.id || raw.planTitle !== plan.title) {
     throw new Error("Session 快照版本、目录或计划身份不匹配");
   }
@@ -442,7 +464,7 @@ function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, 
     activeAttemptIds: raw.activeAttemptIds as string[],
     controlState: raw.controlState as NonNullable<SessionSnapshot["controlState"]>,
   } : {};
-  return { schemaVersion: raw.schemaVersion as SessionSnapshot["schemaVersion"], sessionId, workspace, revision: raw.revision as number, status, planId: plan.id, planTitle: plan.title, tasks, ...(isolation ? { isolation } : {}), ...phase5Fields, ...(runnerProfile && runnerProfileHashValue ? { runnerProfile, runnerProfileHash: runnerProfileHashValue } : {}), createdAt: raw.createdAt, updatedAt: raw.updatedAt };
+  return { schemaVersion: raw.schemaVersion as SessionSnapshot["schemaVersion"], sessionId, workspace, revision: raw.revision as number, status, planId: plan.id, planTitle: plan.title, tasks, ...(isolation ? { isolation } : {}), ...phase5Fields, ...(selection ? { executionSelection: selection, executionSelectionHash: raw.executionSelectionHash as string } : {}), ...(runnerProfile && runnerProfileHashValue ? { runnerProfile, runnerProfileHash: runnerProfileHashValue } : {}), createdAt: raw.createdAt, updatedAt: raw.updatedAt };
 }
 
 function digestPlan(plan: PlanDefinition): string {

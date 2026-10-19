@@ -8,11 +8,12 @@ export interface CompletionProtocol {
   prompt: string;
 }
 
-export function createCompletionProtocol(task: TaskDefinition): CompletionProtocol {
+export function createCompletionProtocol(task: TaskDefinition, executionInstructions?: string): CompletionProtocol {
   const token = randomBytes(24).toString("hex");
   const marker = `<<<TOKEN_COUPON_DONE:${token}>>>`;
   const needsInputMarker = `<<<TOKEN_COUPON_NEEDS_INPUT:${token}>>>`;
   const prompt = [
+    ...(executionInstructions ? [executionInstructions, "", "当前任务："] : []),
     task.prompt.trim(),
     "",
     "结果要求：明确区分已完成与需要用户决策。不得把缺少授权、权威依据、凭证或外部信息描述成已完成。",

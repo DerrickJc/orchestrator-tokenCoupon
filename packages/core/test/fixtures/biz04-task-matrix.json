@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "testId": "BIZ-04",
+  "maxParallel": 3,
+  "isolation": "git-worktree",
+  "verificationTaskId": "V",
+  "tasks": [
+    {
+      "id": "A",
+      "title": "契约与接口设计",
+      "dependsOn": [],
+      "deliverables": [
+        "docs/contracts.md"
+      ],
+      "execution": {
+        "runnerId": "codex",
+        "modelId": "gpt-6-luna",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "B",
+      "title": "课程领域模块",
+      "dependsOn": [
+        "A"
+      ],
+      "deliverables": [
+        "src/course.mjs"
+      ],
+      "execution": {
+        "runnerId": "codex",
+        "modelId": "gpt-6-luna",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "C",
+      "title": "教师领域模块",
+      "dependsOn": [
+        "A"
+      ],
+      "deliverables": [
+        "src/teacher.mjs"
+      ],
+      "execution": {
+        "runnerId": "claude-code",
+        "modelId": "deepseek-flash",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "D",
+      "title": "公共参数与错误处理",
+      "dependsOn": [
+        "A"
+      ],
+      "deliverables": [
+        "src/validation.mjs"
+      ],
+      "execution": {
+        "runnerId": "codex",
+        "modelId": "gpt-6-luna",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "E",
+      "title": "课程 HTTP 适配",
+      "dependsOn": [
+        "B",
+        "D"
+      ],
+      "deliverables": [
+        "src/routes/course.mjs"
+      ],
+      "execution": {
+        "runnerId": "codex",
+        "modelId": "gpt-6-luna",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "F",
+      "title": "教师 HTTP 适配",
+      "dependsOn": [
+        "C",
+        "D"
+      ],
+      "deliverables": [
+        "src/routes/teacher.mjs"
+      ],
+      "execution": {
+        "runnerId": "claude-code",
+        "modelId": "deepseek-flash",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "G",
+      "title": "服务装配与交叉接口验证",
+      "dependsOn": [
+        "E",
+        "F"
+      ],
+      "deliverables": [
+        "src/server.mjs"
+      ],
+      "execution": {
+        "runnerId": "codex",
+        "modelId": "gpt-6-luna",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "H",
+      "title": "领域文档与调用示例",
+      "dependsOn": [
+        "B",
+        "C"
+      ],
+      "deliverables": [
+        "docs/domain.md",
+        "docs/examples.md"
+      ],
+      "execution": {
+        "runnerId": "claude-code",
+        "modelId": "deepseek-flash",
+        "mode": "managed"
+      }
+    },
+    {
+      "id": "V",
+      "title": "最终端口验收与交付核对",
+      "dependsOn": [
+        "G",
+        "H"
+      ],
+      "deliverables": [],
+      "execution": {
+        "runnerId": "codex",
+        "modelId": "gpt-6-luna",
+        "mode": "managed"
+      }
+    }
+  ]
+}

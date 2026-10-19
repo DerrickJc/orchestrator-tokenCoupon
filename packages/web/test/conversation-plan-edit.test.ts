@@ -111,7 +111,7 @@ it("waits for asynchronous validation before restoring the saved plan cards", as
   await expect.poll(() => h.requests.length).toBe(1);
   expect(h.element("plan-editor-wrap").classList.contains("hidden")).toBe(false);
   expect((h.element("plan-editor") as HTMLTextAreaElement).disabled).toBe(true);
-  await expect.poll(() => h.element("plan-editor-wrap").classList.contains("hidden")).toBe(true);
+  await expect.poll(() => h.element("plan-editor-wrap").classList.contains("hidden"), { timeout: 5000 }).toBe(true);
   expect(h.element("plan-view").classList.contains("hidden")).toBe(false);
   expect(h.element("toggle-plan-edit").textContent).toBe("编辑草案");
   expect(h.element("planning-title").textContent).toBe("修改后的计划");

@@ -11,6 +11,7 @@ import type { SelectedDecision } from "./plan.js";
 import { decisionValueHash } from "./plan.js";
 import { determineVerdict } from "./verdict.js";
 import { currentAttemptOwner } from "./attempt-recovery.js";
+import { renderExecutionInstructions } from "./execution-context.js";
 
 export const IDLE_NOTICE_AFTER_MS = 60_000;
 
@@ -42,7 +43,8 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
     throw new Error("attemptId 必须是 UUID");
   }
   const task = withDecisionConstraints(options.task, options.decisionConstraints ?? []);
-  const protocol = createCompletionProtocol(task);
+  const executionInstructions = renderExecutionInstructions({ taskId: task.id, attemptId, runnerId: options.runner.id, cwd });
+  const protocol = createCompletionProtocol(task, executionInstructions);
   const now = new Date().toISOString();
   const attempt: AttemptRecord = {
     schemaVersion: 1,
@@ -80,8 +82,9 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
       promptBytes: Buffer.byteLength(protocol.prompt, "utf8"),
     });
   }
-  const detector = new CompletionMarkerDetector(protocol.marker);
-  const needsInputDetector = new CompletionMarkerDetector(protocol.needsInputMarker);
+  let detector = new CompletionMarkerDetector(protocol.marker);
+  let needsInputDetector = new CompletionMarkerDetector(protocol.needsInputMarker);
+  let nativeOutputTurn: { threadId: string; turnId: string } | undefined;
   const controller = new AbortController();
   let stopReason: "cancelled" | null = null;
   let started = false;
@@ -163,6 +166,24 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   };
 
   const recordRunnerEvent = async (event: RunnerEvent) => {
+    if (event.type === "runner.model.reported") {
+      attempt.reportedModel = event.model;
+      attempt.reportedModelSource = event.source;
+      const snapshotWrite = recorder.writeAttempt({ ...attempt });
+      enqueue(snapshotWrite);
+      await snapshotWrite;
+    }
+    if (event.type === "runner.native.started") {
+      // A host-confirmed follow-up turn supersedes the previous turn's outcome;
+      // its historical markers stay in events.jsonl. Two markers in one turn still conflict.
+      if (nativeOutputTurn && (nativeOutputTurn.threadId !== event.threadId || nativeOutputTurn.turnId !== event.turnId)) {
+        detector = new CompletionMarkerDetector(protocol.marker);
+        needsInputDetector = new CompletionMarkerDetector(protocol.needsInputMarker);
+        attempt.markerSeen = false;
+        attempt.needsInputSeen = false;
+      }
+      nativeOutputTurn = { threadId: event.threadId, turnId: event.turnId };
+    }
     const { type, ...payload } = event;
     const write = recorder.appendEvent(type, payload);
     enqueue(write);
@@ -230,7 +251,7 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   try {
     processResult = await options.runner.run({
       attemptId, cwd, task, execution: task.execution,
-      prompt: protocol.prompt, completionMarker: protocol.marker, needsInputMarker: protocol.needsInputMarker,
+      prompt: protocol.prompt, executionInstructions, completionMarker: protocol.marker, needsInputMarker: protocol.needsInputMarker,
     }, { signal: controller.signal, onStarted: markStarted, onOutput, onActivity: markActivity, recordEvent: recordRunnerEvent, ...(requestInteraction ? { requestInteraction } : {}) });
   } catch (error) {
     processResult = { started, exitCode: null, signal: null, executionError: error instanceof Error ? error.message : String(error) };
@@ -247,6 +268,7 @@ export async function executeTask(options: ExecuteTaskOptions): Promise<ExecuteT
   if (processResult.nativeOutcome) attempt.nativeOutcome = processResult.nativeOutcome;
   if (processResult.cleanupStatus) attempt.cleanupStatus = processResult.cleanupStatus;
   if (processResult.reportedModel) attempt.reportedModel = processResult.reportedModel;
+  if (processResult.reportedModelSource) attempt.reportedModelSource = processResult.reportedModelSource;
   if (processResult.nativeError) attempt.nativeError = processResult.nativeError;
   if (processResult.nativeThreadId) attempt.nativeThreadId = processResult.nativeThreadId;
   if (processResult.nativeTurnId) attempt.nativeTurnId = processResult.nativeTurnId;

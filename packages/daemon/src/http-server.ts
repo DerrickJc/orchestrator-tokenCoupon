@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationService } from "./application-service.js";
-import { RepositoryReader, type RunnerInteractionReply } from "@token-coupon/core";
+import { RepositoryReader, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
 import { createMcpHttpHandler } from "./mcp-server.js";
 import type { RemoteMcpConnection } from "./oauth-gateway.js";
 import { browseDirectories } from "./workspace-tools.js";
@@ -13,7 +13,7 @@ import { pickNativePath, nativePickerCapability, normalizePickedPaths, type Nati
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
 
-export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind) => Promise<NativePickerResult> }): Promise<Server> {
+export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") throw new Error("daemon_bind_forbidden：本阶段服务只允许监听 loopback");
   const tokenPath = join(options.dataDirectory, "browser-session-token");
   let token: string;
@@ -68,7 +68,13 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const body = await readJsonBody(request);
       if (body.kind !== "directory" && body.kind !== "files") throw new Error("native_picker_kind_invalid");
       const workspace = body.kind === "files" ? await service.getWorkspace(stringField(body.workspaceId, "workspaceId", 32)) : undefined;
-      const picked = await normalizePickedPaths(await (options.nativePicker ?? pickNativePath)(body.kind), body.kind, workspace?.path);
+      const controller = new AbortController();
+      const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+      response.once("close", disconnected);
+      let picked: NativePickerResult;
+      try { picked = await normalizePickedPaths(await (options.nativePicker ?? pickNativePath)(body.kind, controller.signal), body.kind, workspace?.path); }
+      finally { response.removeListener("close", disconnected); }
+      if (controller.signal.aborted) return;
       if (workspace && !picked.cancelled) {
         const reader = new RepositoryReader(workspace.path);
         for (const path of picked.paths) {
@@ -81,7 +87,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && url.pathname === "/api/v1/directories") {
       const offset = Number(url.searchParams.get("offset") ?? 0);
       if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("directory_offset_invalid");
-      sendJson(response, 200, await browseDirectories(url.searchParams.get("path") ?? undefined, offset)); return;
+      sendJson(response, 200, await browseDirectories(url.searchParams.get("path") ?? undefined, offset, url.searchParams.get("query") ?? "")); return;
     }
     if (parts[0] === "workspaces" && parts.length === 3 && parts[2] === "git") {
       if (request.method === "GET") { sendJson(response, 200, await service.gitStatus(parts[1]!)); return; }
@@ -105,8 +111,12 @@ export async function createLocalServer(service: ApplicationService, options: { 
         sendJson(response, 202, await service.gitIdentity(parts[1]!, requestKey(request, body), stringField(body.name, "name", 120), stringField(body.email, "email", 200))); return;
       }
     }
+    if (url.pathname === "/api/v1/settings") {
+      if (request.method === "GET") { sendJson(response, 200, await service.systemSettings()); return; }
+      if (request.method === "POST") { sendJson(response, 200, await service.saveSystemSettings(await readJsonBody(request))); return; }
+    }
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -135,12 +145,20 @@ export async function createLocalServer(service: ApplicationService, options: { 
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection/approvals") { sendJson(response, 200, options.remoteMcp?.approvals() ?? []); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection/grants") { sendJson(response, 200, options.remoteMcp?.grants() ?? []); return; }
+    if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 4 && parts[3] === "name") {
+      if (!options.remoteMcp) throw new Error("remote_connection_unavailable");
+      const body = await readJsonBody(request);
+      if (typeof body.alias !== "string") throw new Error("oauth_alias_invalid：请填写 MCP 名称");
+      await options.remoteMcp.renameGrant(parts[2]!, body.alias);
+      sendJson(response, 200, { updated: true }); return;
+    }
     if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 3) {
       if (!options.remoteMcp) throw new Error("remote_connection_unavailable");
       const body = await readJsonBody(request);
       const source = stringField(body.source, "source", 20);
       if (source !== "chatgpt" && source !== "claude" && source !== "other") throw new Error("oauth_source_invalid");
-      await options.remoteMcp.updateGrant(parts[2]!, { workspaceIds: stringArray(body.workspaceIds, "workspaceIds"), source, ...(body.alias ? { alias: stringField(body.alias, "alias", 80) } : {}) });
+      if (body.alias !== undefined && (typeof body.alias !== "string" || body.alias.length > 80)) throw new Error("oauth_alias_invalid：MCP 名称最多 80 字符");
+      await options.remoteMcp.updateGrant(parts[2]!, { workspaceIds: stringArray(body.workspaceIds, "workspaceIds"), source, ...(typeof body.alias === "string" ? { alias: body.alias } : {}) });
       sendJson(response, 200, { updated: true }); return;
     }
     if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 4 && parts[3] === "revoke") {
@@ -158,7 +176,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       await options.remoteMcp.decideApproval(parts[2]!, { decision: body.decision, ...(workspaceIds ? { workspaceIds } : {}), ...(source ? { source } : {}), ...(workspaceId ? { workspaceId } : {}), ...(scopes ? { scopes } : {}) });
       sendJson(response, 200, { accepted: true }); return;
     }
-    if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, service.providerOptions()); return; }
+    if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, await service.planningProviderOptions()); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/providers/deepseek-api/models") { sendJson(response, 200, await service.plannerModels(url.searchParams.get("refresh") === "1")); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/runners") { sendJson(response, 200, await service.runnerOptions()); return; }
     if (request.method === "GET" && parts[0] === "runners" && parts.length === 3 && parts[2] === "models") {
@@ -170,6 +188,11 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const workspace = await service.addWorkspace(stringField(body.path, "path", 4096), optionalString(body.label, "label", 80));
       sendJson(response, 201, workspace); return;
     }
+    if (request.method === "PATCH" && parts[0] === "workspaces" && parts.length === 2) {
+      const body = await readJsonBody(request);
+      const workspace = await service.renameWorkspace(parts[1]!, stringField(body.label, "label", 80));
+      sendJson(response, 200, workspace); return;
+    }
     if (request.method === "DELETE" && parts[0] === "workspaces" && parts.length === 2) {
       await service.removeWorkspace(parts[1]!); sendJson(response, 200, { removed: true }); return;
     }
@@ -179,6 +202,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       if (tool !== "repo_list" && tool !== "repo_read") throw new Error("repository_tool_invalid：只支持目录列表和只读文件预览");
       const args: Record<string, unknown> = { path: url.searchParams.get("path") ?? "." };
       for (const name of tool === "repo_list" ? ["offset"] : ["startLine"]) if (url.searchParams.has(name)) args[name] = Number(url.searchParams.get(name));
+      if (tool === "repo_list" && url.searchParams.has("query")) args.query = url.searchParams.get("query");
       const result = JSON.parse(await new RepositoryReader(workspace.path).invoke(tool, args)) as { error?: string };
       sendJson(response, result.error ? 400 : 200, result); return;
     }
@@ -253,8 +277,15 @@ export async function createLocalServer(service: ApplicationService, options: { 
         if (!target) throw new Error("handoff_target_invalid");
         job = await service.external.handoff(workspaceId!, planningId!, key, role, target, optionalString(body.reason, "reason", 1024));
       }
-      else if (action === "replies") job = await service.reply(workspaceId!, planningId!, key, stringField(body.message, "message", 8192));
-      else if (action === "review") job = await service.review(workspaceId!, planningId!, key);
+      else if (action === "replies") job = await service.reply(workspaceId!, planningId!, key, stringField(body.message, "message", 8192), operationSelection(body.planner));
+      else if (action === "web-continue") job = await service.prepareWebContinuation(workspaceId!, planningId!, key);
+      else if (action === "review") {
+        const reviewer = body.reviewer === undefined ? {} : objectField(body.reviewer, "reviewer");
+        job = await service.review(workspaceId!, planningId!, key, {
+          ...(reviewer.mode === undefined ? {} : { mode: stringField(reviewer.mode, "reviewer.mode", 40) }),
+          ...(reviewer.model === undefined ? {} : { model: stringField(reviewer.model, "reviewer.model", 120) }),
+        });
+      }
       else if (action === "planner-retry") job = await service.retryPlanning(workspaceId!, planningId!, key);
       else if (action === "approve") job = await service.approve(workspaceId!, planningId!, key, integerField(body.draftRevision, "draftRevision", 1), stringArray(body.waivedFindingIds, "waivedFindingIds"), optionalString(body.waiverReason, "waiverReason", 1024));
       else if (action === "run") job = await service.run(workspaceId!, planningId!, key, runOptions(body));
@@ -263,7 +294,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
         if (body.plan !== undefined && body.edits !== undefined) throw new Error("draft_edit_invalid：只能提交字段补丁，不能同时提交完整计划");
         job = await service.saveDraft(workspaceId!, planningId!, key, { ...(body.edits !== undefined ? { edits: body.edits } : { plan: body.plan }), expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1), expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64) });
       }
-      else if (action === "revise") job = await service.revise(workspaceId!, planningId!, key, { message: stringField(body.message, "message", 8192), reviewId: stringField(body.reviewId, "reviewId", 64), expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64), expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1) });
+      else if (action === "revise") job = await service.revise(workspaceId!, planningId!, key, { message: stringField(body.message, "message", 8192), reviewId: stringField(body.reviewId, "reviewId", 64), expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64), expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1), planner: operationSelection(body.planner) });
       else { sendJson(response, 404, { error: "operation_not_found" }); return; }
       sendJson(response, 202, job); return;
     }
@@ -328,6 +359,16 @@ function requestKey(request: IncomingMessage, body: Record<string, unknown>): st
   if (typeof value !== "string") throw new Error("idempotency_key_required：请求缺少 requestKey");
   return value;
 }
+function operationSelection(value: unknown): { mode?: string; model?: string } {
+  if (value === undefined) return {};
+  const item = objectField(value, "planner");
+  if (Object.keys(item).some(key => !["mode", "model"].includes(key))) throw new Error("planner_selection_invalid");
+  return { ...(item.mode === undefined ? {} : { mode: stringField(item.mode, "planner.mode", 40) }), ...(item.model === undefined ? {} : { model: stringField(item.model, "planner.model", 120) }) };
+}
+function objectField(value: unknown, name: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name}_invalid：必须是对象`);
+  return value as Record<string, unknown>;
+}
 function stringField(value: unknown, name: string, max: number): string { if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > max) throw new Error(`${name}_invalid：必须是 1 到 ${max} 字节的文本`); return value; }
 function optionalString(value: unknown, name: string, max: number): string | undefined { if (value === undefined) return undefined; return stringField(value, name, max); }
 function integerField(value: unknown, name: string, minimum: number): number { if (!Number.isSafeInteger(value) || (value as number) < minimum) throw new Error(`${name}_invalid：整数值无效`); return value as number; }
@@ -339,12 +380,12 @@ function executionDefaults(value: unknown): { runnerId: string; mode: "managed";
   if (!new Set(["codex", "claude-code", "dsh", "mock"]).has(runnerId)) throw new Error("runnerId_invalid：请选择已支持的 Runner");
   return { runnerId, mode: "managed", ...(item.modelId === undefined ? {} : { modelId: stringField(item.modelId, "modelId", 120) }) };
 }
-function runOptions(body: Record<string, unknown>): { isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string } {
+function runOptions(body: Record<string, unknown>): { isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string; executionSelection?: ExecutionSelection; expectedPlanHash?: string; expectedDraftRevision?: number } {
   const isolation = body.isolation === undefined ? "git-worktree" : body.isolation;
   if (isolation !== "git-worktree" && isolation !== "shared") throw new Error("isolation_invalid：隔离模式无效");
   const maxParallel = body.maxParallel === undefined ? 1 : integerField(body.maxParallel, "maxParallel", 1);
   if (maxParallel > 8) throw new Error("maxParallel_invalid：并发上限为 8");
-  return { isolation, maxParallel, ...(body.verificationTaskId === undefined ? {} : { verificationTaskId: stringField(body.verificationTaskId, "verificationTaskId", 64) }) };
+  return { isolation, maxParallel, ...(body.expectedPlanHash === undefined ? {} : { expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64) }), ...(body.expectedDraftRevision === undefined ? {} : { expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1) }), ...(body.executionSelection === undefined ? {} : { executionSelection: parseExecutionSelection(body.executionSelection) }), ...(body.verificationTaskId === undefined ? {} : { verificationTaskId: stringField(body.verificationTaskId, "verificationTaskId", 64) }) };
 }
 function interactionReply(body: Record<string, unknown>): RunnerInteractionReply {
   if (body.kind === "approval" && (body.decision === "allow-once" || body.decision === "deny")) {

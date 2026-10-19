@@ -8,6 +8,7 @@ import { validateRequirementsState } from "./requirements.js";
 import { parsePlanningAssessment, validatePlanningAssessment } from "./planning-readiness.js";
 import { validateConfirmationState } from "./confirmation.js";
 import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
+import { parseExecutionSelection } from "./execution-selection.js";
 import type { ConfirmationEvent, ConfirmationProposalSet } from "./planner-types.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -304,8 +305,8 @@ function validateSnapshot(value: unknown, workspace: string): PlannerConversatio
       (raw.draftRevision !== null && (!Number.isSafeInteger(raw.draftRevision) || (raw.draftRevision as number) < 1)) ||
       typeof raw.createdAt !== "string" || typeof raw.updatedAt !== "string") throw new Error("Planner 快照字段无效");
   const config = raw.config as Record<string, unknown>;
-  if (!["mock", "deepseek", "chatgpt-mcp", "web-mcp"].includes(String(config.provider)) || typeof config.model !== "string" || !config.model || Buffer.byteLength(config.model, "utf8") > 256 ||
-      typeof config.baseUrl !== "string" || (config.provider === "mock" ? config.baseUrl !== "mock://local" : config.provider === "chatgpt-mcp" ? config.baseUrl !== "mcp://chatgpt" : config.provider === "web-mcp" ? config.baseUrl !== "mcp://web" : !safeEndpoint(config.baseUrl))) {
+  if (!["mock", "deepseek", "chatgpt-mcp", "web-mcp", "codex-agent", "claude-agent"].includes(String(config.provider)) || typeof config.model !== "string" || !config.model || Buffer.byteLength(config.model, "utf8") > 256 ||
+      typeof config.baseUrl !== "string" || (config.provider === "mock" ? config.baseUrl !== "mock://local" : config.provider === "chatgpt-mcp" ? config.baseUrl !== "mcp://chatgpt" : config.provider === "web-mcp" ? config.baseUrl !== "mcp://web" : config.provider === "codex-agent" ? config.baseUrl !== "agent://codex" : config.provider === "claude-agent" ? config.baseUrl !== "agent://claude-code" : !safeEndpoint(config.baseUrl))) {
     throw new Error("Planner 配置快照无效");
   }
   const executionDefaults = parseExecution(raw.executionDefaults);
@@ -397,6 +398,7 @@ function parseApproval(value: unknown): NonNullable<PlannerConversationSnapshot[
 
 function parseExecutionReference(value: unknown): NonNullable<PlannerConversationSnapshot["execution"]> {
   const raw = object(value, "Planner execution");
+  if (raw.executionSelection !== undefined) raw.executionSelection = parseExecutionSelection(raw.executionSelection);
   if (!isUuid(raw.sessionId) || !isUuid(raw.approvalId) || !Number.isSafeInteger(raw.draftRevision) || typeof raw.planHash !== "string" || !HASH.test(raw.planHash) ||
       !["reserved", "created"].includes(String(raw.state))) throw new Error("Planner execution 引用无效");
   if (raw.isolation !== undefined) {

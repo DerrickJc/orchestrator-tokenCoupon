@@ -299,7 +299,7 @@ describe("CLI show commands", () => {
 
     const checked = await invokeCli("planner", "check", "--id", planningId!, "--workspace", directory);
     expect(checked.exitCode).toBe(0);
-    expect(checked.stdout).toContain("执行配置：已与规划记录核对");
+    expect(checked.stdout).toContain("执行配置：已应用规划缺省值，逐任务检查 Runner、模式和能力");
     const diff = await invokeCli("planner", "diff", "--id", planningId!, "--from", "1", "--to", "2", "--workspace", directory);
     expect(diff.exitCode).toBe(0);
     expect(diff.stdout).toContain("implement-request");

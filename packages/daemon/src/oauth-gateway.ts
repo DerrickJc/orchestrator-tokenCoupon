@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +7,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { sanitizeOutput, type ApplicationService } from "./application-service.js";
@@ -51,6 +53,7 @@ export interface RemoteConnectionStatus {
   configured: boolean; enabled: boolean; publicOrigin?: string; mcpUrl?: string; gateway: "stopped" | "running" | "error";
   gatewayAddress?: string; lastError?: string; pendingApprovals: number; validGrants: number;
   remoteClientVerified: boolean;
+  pendingTokenExchanges: number;
   mode: "quick_tunnel" | "fixed_https";
   transport: ConnectionPhase;
   busy: boolean;
@@ -65,7 +68,7 @@ export interface RemoteConnectionStatus {
   addressChanged: boolean;
   previousMcpUrl?: string;
   probeCheck?: { state: "checking" | "retrying" | "succeeded" | "failed"; attempt: number; maxAttempts: number; background: boolean; startedAt: number; retryAt?: number; lastError?: string };
-  clients?: Array<{ grantId: string; clientId: string; name: string; source: string; workspaceIds: string[]; mcpUrl: string; expiresAt: number; status: "active" | "expired" | "revoked" | "address_changed"; lastCall?: ConnectionObservation }>;
+  clients?: Array<{ grantId: string; clientId: string; name: string; source: string; workspaceIds: string[]; mcpUrl: string; createdAt: number; expiresAt: number; status: "active" | "expired" | "revoked" | "address_changed"; oauthState: "awaiting_token" | "token_issued"; lastCall?: ConnectionObservation }>;
   recentCalls?: ConnectionObservation[];
   diagnosticsUnavailable?: boolean;
   authorizationRequests?: Array<{ requestId: string; clientId: string; clientName: string; createdAt: number; expiresAt: number; status: "pending" | "approved" | "rejected" | "expired" }>;
@@ -115,6 +118,7 @@ export class RemoteMcpConnection {
   private nextProbeAt: number | undefined;
   private probeCheck: RemoteConnectionStatus["probeCheck"];
   private readonly diagnostics: ConnectionDiagnostics;
+  private readonly tokenExchangeContext = new AsyncLocalStorage<{ code?: string }>();
 
   constructor(private readonly service: ApplicationService, private readonly dataDirectory: string, private port = 4178, dependencies: ConnectionDependencies = {}) {
     this.configPath = join(dataDirectory, "remote-mcp-connection.json");
@@ -138,8 +142,8 @@ export class RemoteMcpConnection {
       skipLocalPkceValidation: true,
       authorize: (client, params, response) => owner.beginAuthorization(client, params, response),
       challengeForAuthorizationCode: (client, code) => owner.challengeForAuthorizationCode(client, code),
-      exchangeAuthorizationCode: (client, code, verifier, redirectUri, resource) => owner.exchangeAuthorizationCode(client, code, verifier, redirectUri, resource),
-      exchangeRefreshToken: (client, token, scopes, resource) => owner.exchangeRefreshToken(client, token, scopes, resource),
+      exchangeAuthorizationCode: (client, code, verifier, redirectUri, resource) => owner.diagnoseTokenExchange(() => owner.exchangeAuthorizationCode(client, code, verifier, redirectUri, resource)),
+      exchangeRefreshToken: (client, token, scopes, resource) => owner.diagnoseTokenExchange(() => owner.exchangeRefreshToken(client, token, scopes, resource)),
       verifyAccessToken: (token) => owner.verifyAccessToken(token),
       revokeToken: (client, request) => owner.revokeToken(client, request),
     };
@@ -151,6 +155,11 @@ export class RemoteMcpConnection {
       await mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
       this.state = await this.readJson<PersistedState>(this.statePath, { version: 1, clients: [], requests: [], grants: [], codes: [] });
       if (this.state.version !== 1 || !Array.isArray(this.state.clients) || !Array.isArray(this.state.requests) || !Array.isArray(this.state.grants) || !Array.isArray(this.state.codes)) throw new Error("remote_oauth_state_invalid：授权状态文件格式无效，远程访问保持关闭");
+      // Older registration responses advertised public clients but retained SDK-generated
+      // secrets. Honor that advertised method without changing IDs, grants or PKCE checks.
+      for (const client of this.state.clients) if (client.token_endpoint_auth_method === "none") {
+        delete client.client_secret; delete client.client_secret_expires_at;
+      }
       const savedConfig = await this.readJson<ConnectionConfig | undefined>(this.configPath, undefined);
       if (savedConfig) {
         this.port = validateGatewayPort(savedConfig.port ?? this.port);
@@ -181,17 +190,17 @@ export class RemoteMcpConnection {
     const grants = active.length;
     const pendingApprovals = this.state.requests.filter((request) => !request.decision && request.expiresAt > now).length;
     const busy = ["checking", "downloading", "verifying", "starting", "discovering", "probing", "reconnecting"].includes(this.phase);
-    const base: RemoteConnectionStatus = { configured: Boolean(this.config), enabled: Boolean(this.config?.enabled), gateway: this.server?.listening ? "running" : this.startupError ? "error" : "stopped", pendingApprovals, validGrants: grants, remoteClientVerified: false, mode: this.config?.mode ?? "quick_tunnel", transport: this.phase, busy, addressChanged: this.addressChanged };
-    const authorizationHistory = this.state.requests.slice(-50).map(request => {
+    const base: RemoteConnectionStatus = { configured: Boolean(this.config), enabled: Boolean(this.config?.enabled), gateway: this.server?.listening ? "running" : this.startupError ? "error" : "stopped", pendingApprovals, validGrants: grants, pendingTokenExchanges: active.filter(grant => !grant.refreshDigest && !grant.access.length).length, remoteClientVerified: false, mode: this.config?.mode ?? "quick_tunnel", transport: this.phase, busy, addressChanged: this.addressChanged };
+    const authorizationHistory = [...this.state.requests].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(request => {
       const status: NonNullable<RemoteConnectionStatus["authorizationRequests"]>[number]["status"] = request.decision ?? (request.expiresAt <= now ? "expired" : "pending");
       return { requestId: request.requestId, clientId: request.clientId, clientName: request.clientName, createdAt: request.createdAt, expiresAt: request.expiresAt, status };
     });
     base.authorizationRequests = authorizationHistory;
     base.authorizationStates = this.state.grants.slice(-100).map(grant => ({ grantId: grant.grantId, source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], status: grant.revokedAt ? "revoked" : grant.expiresAt <= now ? "expired" : "active" }));
     const calls = this.diagnostics.recent();
-    base.clients = this.state.grants.slice(-100).reverse().map(grant => {
+    base.clients = [...this.state.grants].sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(grant => {
       const lastCall = calls.filter(item => item.grantId === grant.grantId && item.endpoint === grant.resource && item.stage === "tool").at(-1);
-      return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端", source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, expiresAt: grant.expiresAt,
+      return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端", source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
         status: grant.revokedAt ? "revoked" as const : grant.expiresAt <= now ? "expired" as const : grant.resource !== `${this.config?.publicOrigin}/mcp` ? "address_changed" as const : "active" as const, ...(lastCall ? { lastCall } : {}) };
     });
     base.remoteClientVerified = base.clients.some(item => item.status === "active" && item.lastCall?.outcome === "success");
@@ -424,16 +433,28 @@ export class RemoteMcpConnection {
   }
 
   approvals(): Array<{ requestId: string; clientName: string; clientId: string; redirectHost: string; requestedScopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; workspaceId?: string }> {
-    return this.state.requests.filter((request) => !request.decision && request.expiresAt > Date.now()).map((request) => ({ requestId: request.requestId, clientName: request.clientName, clientId: request.clientId, redirectHost: new URL(request.redirectUri).origin, requestedScopes: request.requestedScopes, createdAt: request.createdAt, expiresAt: request.expiresAt, ...(this.config?.mode === "quick_tunnel" && this.config.workspaceId ? { workspaceId: this.config.workspaceId, workspaceIds: this.config.workspaceIds ?? [this.config.workspaceId] } : {}) }));
+    return this.state.requests.filter((request) => !request.decision && request.expiresAt > Date.now()).sort((a, b) => b.createdAt - a.createdAt).map((request) => ({ requestId: request.requestId, clientName: request.clientName, clientId: request.clientId, redirectHost: new URL(request.redirectUri).origin, requestedScopes: request.requestedScopes, createdAt: request.createdAt, expiresAt: request.expiresAt, ...(this.config?.mode === "quick_tunnel" && this.config.workspaceId ? { workspaceId: this.config.workspaceId, workspaceIds: this.config.workspaceIds ?? [this.config.workspaceId] } : {}) }));
   }
 
-  grants(): Array<{ workspaceIds: string[]; source?: WebSource; alias?: string; grantId: string; clientName: string; clientId: string; redirectHost: string; workspaceId: string; workspaceLabel: string; scopes: RemoteMcpScope[]; createdAt: number; expiresAt: number }> {
+  grants(): Array<{ workspaceIds: string[]; source?: WebSource; alias?: string; grantId: string; clientName: string; clientId: string; redirectHost: string; workspaceId: string; workspaceLabel: string; scopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; oauthState: "awaiting_token" | "token_issued" }> {
     const labels = new Map(this.service.listWorkspaces().map((workspace) => [workspace.workspaceId, workspace.label]));
-    return this.state.grants.filter((grant) => !grant.revokedAt && grant.expiresAt > Date.now() && grant.resource === `${this.config?.publicOrigin}/mcp`).map((grant) => ({
+    return this.state.grants.filter((grant) => !grant.revokedAt && grant.expiresAt > Date.now() && grant.resource === `${this.config?.publicOrigin}/mcp`).sort((a, b) => b.createdAt - a.createdAt).map((grant) => ({
       grantId: grant.grantId, clientName: this.state.clients.find((client) => client.client_id === grant.clientId)?.client_name || "未命名网页客户端",
       clientId: grant.clientId, redirectHost: grant.redirectHost, workspaceId: grant.workspaceId, workspaceIds: grant.workspaceIds ?? [grant.workspaceId], ...(grant.source ? { source: grant.source } : {}), ...(grant.alias ? { alias: grant.alias } : {}),
-      workspaceLabel: labels.get(grant.workspaceId) || "项目已移除", scopes: grant.scopes, createdAt: grant.createdAt, expiresAt: grant.expiresAt,
+      workspaceLabel: labels.get(grant.workspaceId) || "项目已移除", scopes: grant.scopes, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" : "awaiting_token",
     }));
+  }
+
+  /** Only called by the authenticated local console, never by a remote tool. */
+  async renameGrant(grantId: string, alias: string): Promise<void> {
+    if (typeof alias !== "string" || alias.length > 80 || /[\u0000-\u001f\u007f]/.test(alias)) throw new Error("oauth_alias_invalid：MCP 名称最多 80 字符，不能包含控制字符");
+    await this.withState(async (state) => {
+      const grant = state.grants.find(item => item.grantId === grantId && !item.revokedAt && item.expiresAt > Date.now());
+      if (!grant) throw new Error("oauth_grant_not_found：网页授权不存在或已失效");
+      if (!this.config?.enabled || grant.resource !== `${this.config.publicOrigin}/mcp`) throw new Error("oauth_resource_invalid：此授权不属于当前连接");
+      if (alias.trim()) grant.alias = alias.trim(); else delete grant.alias;
+    });
+    await this.service.publish({ type: "remote_authorization.updated", payload: { grantId } });
   }
 
   /** Only called by the authenticated local console, never by a remote tool. */
@@ -448,7 +469,7 @@ export class RemoteMcpConnection {
       if (!this.config?.enabled || grant.resource !== `${this.config.publicOrigin}/mcp`) throw new Error("oauth_resource_invalid：此授权不属于当前连接，请在网页重新授权");
       await this.includeAuthorizedWorkspaces(input.workspaceIds);
       grant.workspaceIds = [...new Set(input.workspaceIds)]; grant.workspaceId = grant.workspaceIds[0]!; grant.source = input.source;
-      if (input.alias) grant.alias = input.alias.slice(0, 80);
+      if (input.alias !== undefined) { if (input.alias.trim()) grant.alias = input.alias.trim().slice(0, 80); else delete grant.alias; }
     });
     await this.service.publish({ type: "remote_authorization.updated", payload: { grantId } });
   }
@@ -555,6 +576,29 @@ export class RemoteMcpConnection {
       if (!/^[0-9a-f-]{36}$/i.test(requestId)) { response.status(404).json({ error: "not_found" }); return; }
       response.json(await this.approvalStatus(requestId));
     });
+    // Token diagnostics persist field names and machine codes, never credential values.
+    app.use(((request: ExpressRequest, response: ExpressResponse, next: () => void) => {
+      if (request.method !== "POST" || (request.url || "").split("?", 1)[0] !== "/token") { next(); return; }
+      const traceId = randomUUID(), startedAt = Date.now(), context: { code?: string } = {};
+      response.setHeader("X-Token-Coupon-Trace", traceId);
+      const json = response.json.bind(response);
+      response.json = (value: unknown) => {
+        const error = value && typeof value === "object" ? (value as { error?: unknown }).error : undefined;
+        if (!context.code && typeof error === "string" && /^[a-z_]{1,80}$/.test(error)) context.code = error;
+        json(value);
+      };
+      response.once("finish", () => {
+        const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
+        const method = body.grant_type === "authorization_code" || body.grant_type === "refresh_token" ? body.grant_type : "token_request";
+        const clientId = typeof body.client_id === "string" && /^[a-f0-9-]{36}$/i.test(body.client_id) ? body.client_id : undefined;
+        const record = method === "authorization_code" && typeof body.code === "string" ? this.state.codes.find(code => code.digest === digest(body.code as string)) : undefined;
+        void this.diagnostics.record({ traceId, at: Date.now(), endpoint: `${origin}/mcp`, stage: "oauth", outcome: response.statusCode < 400 ? "success" : "error", method,
+          code: context.code || (response.statusCode < 400 ? "oauth_token_issued" : "oauth_token_request_failed"), httpStatus: response.statusCode, durationMs: Date.now() - startedAt,
+          ...(clientId ? { clientId } : {}), ...(record ? { grantId: record.grantId } : {}),
+          requestFields: ["client_id", "code", "code_verifier", "redirect_uri", "resource", "refresh_token"].filter(field => typeof body[field] === "string" && !!body[field]) });
+      });
+      this.tokenExchangeContext.run(context, next);
+    }) as unknown as Handler);
     app.use(mcpAuthRouter({ provider: this.provider, issuerUrl: new URL(origin), baseUrl: new URL(origin), resourceServerUrl: new URL(`${origin}/mcp`), scopesSupported: SUPPORTED_SCOPES, resourceName: "Token Coupon local project tools" }) as unknown as Handler);
     app.all("/mcp", async (request, response) => {
       const traceId = randomUUID(), startedAt = Date.now(), endpoint = `${origin}/mcp`;
@@ -643,7 +687,10 @@ export class RemoteMcpConnection {
     const redirects = input.redirect_uris;
     if (!Array.isArray(redirects) || redirects.length < 1 || redirects.length > 8 || redirects.some((uri) => !validRedirect(uri))) throw new Error("oauth_client_redirect_invalid：客户端回调必须使用 HTTPS 或 loopback 地址");
     if (input.client_name && Buffer.byteLength(input.client_name, "utf8") > 120) throw new Error("oauth_client_name_invalid：客户端名称过长");
-    const registered: OAuthClientInformationFull = { ...input, token_endpoint_auth_method: "none", client_id: randomUUID(), client_id_issued_at: Math.floor(Date.now() / 1000) };
+    const method = input.token_endpoint_auth_method ?? "client_secret_post";
+    if (!["none", "client_secret_post"].includes(method)) throw new InvalidClientMetadataError("Unsupported token_endpoint_auth_method; use none or client_secret_post");
+    const registered: OAuthClientInformationFull = { ...input, token_endpoint_auth_method: method, client_id: randomUUID(), client_id_issued_at: Math.floor(Date.now() / 1000) };
+    if (method === "none") { delete registered.client_secret; delete registered.client_secret_expires_at; }
     await this.withState(async (state) => {
       // A webpage retains its DCR client across token expiry and reauthorization.
       // Revoking a grant must not silently delete that independent registration.
@@ -685,12 +732,24 @@ export class RemoteMcpConnection {
     return record.codeChallenge;
   }
 
+  private async diagnoseTokenExchange(action: () => Promise<OAuthTokens>): Promise<OAuthTokens> {
+    try { return await action(); }
+    catch (error) {
+      const code = error instanceof Error ? /^(oauth_[a-z_]+)[：:]/.exec(error.message)?.[1] : undefined;
+      const context = this.tokenExchangeContext.getStore(); if (context && code) context.code = code;
+      throw error;
+    }
+  }
+
   private async exchangeAuthorizationCode(client: OAuthClientInformationFull, code: string, verifier?: string, redirectUri?: string, resource?: URL): Promise<OAuthTokens> {
     if (!verifier || verifier.length < 43 || verifier.length > 128 || !/^[A-Za-z0-9._~-]+$/.test(verifier)) throw new Error("oauth_pkce_invalid：PKCE verifier 无效");
     return this.withState(async (state) => {
       const record = state.codes.find((item) => item.digest === digest(code) && item.clientId === client.client_id);
       if (!record || record.usedAt || record.expiresAt <= Date.now()) throw new Error("oauth_code_invalid：授权码无效、已使用或过期");
-      if (record.redirectUri !== redirectUri || resource?.href !== record.resource) throw new Error("oauth_code_binding_invalid：回调或 resource 与授权请求不一致");
+      if (!redirectUri) throw new Error("oauth_redirect_uri_missing：换令牌请求缺少 redirect_uri");
+      if (record.redirectUri !== redirectUri) throw new Error("oauth_redirect_uri_mismatch：回调与授权请求不一致");
+      if (!resource) throw new Error("oauth_resource_missing：换令牌请求缺少 resource");
+      if (resource.href !== record.resource) throw new Error("oauth_resource_invalid：resource 与授权请求不一致");
       const actual = createHash("sha256").update(verifier).digest("base64url");
       if (!safeEqual(actual, record.codeChallenge)) throw new Error("oauth_pkce_invalid：PKCE verifier 不匹配");
       const grant = state.grants.find((item) => item.grantId === record.grantId && item.clientId === client.client_id && !item.revokedAt && item.expiresAt > Date.now());

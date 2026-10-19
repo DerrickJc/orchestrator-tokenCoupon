@@ -52,6 +52,23 @@ function candidate(context: any) {
 }
 
 describe("cross-web ownership and handoff", () => {
+  it("pins an explicitly selected web reviewer and never replaces its active owner when another source is selected", async () => {
+    const h = await harness(), prepared = await h.prepare(), owner = await h.claim(h.gpt, prepared.operation.operationId);
+    const committed = await h.gpt.call("external_submit", { ...h.args(owner), requestKey: randomUUID(), reply: candidate(owner.context) });
+    expect(committed.job.status).toBe("succeeded");
+    const planningId = owner.context.planningId;
+    const reviewJob = await h.wait(await h.service.review(h.workspace.workspaceId, planningId, randomUUID(), { mode: "web-claude" }));
+    expect(reviewJob.status, reviewJob.error).toBe("succeeded");
+    await expect(h.claim(h.gpt, reviewJob.result.operationId)).rejects.toThrow("handoff_target_forbidden");
+    const reviewer = await h.claim(h.claude, reviewJob.result.operationId);
+    const repeated = await h.wait(await h.service.review(h.workspace.workspaceId, planningId, randomUUID(), { mode: "web-claude" }));
+    expect(repeated.result.operationId).toBe(reviewJob.result.operationId);
+    const changed = await h.wait(await h.service.review(h.workspace.workspaceId, planningId, randomUUID(), { mode: "web-chatgpt" }));
+    expect(changed.status).toBe("failed"); expect(changed.error).toContain("external_review_switch_requires_cancel");
+    const reviewed = await h.claude.call("external_submit", { ...h.args(reviewer), requestKey: randomUUID(), reply: { summary: "Current owner can still submit", findings: [], resolutions: [] } });
+    expect(reviewed.job.status, reviewed.job.error).toBe("succeeded");
+  });
+
   it("returns trace IDs even when audit persistence fails and never replays a business mutation", async () => {
     const h = await harness(), traceId = randomUUID(); let observations = 0;
     const browser = await h.connect(h.gpt.principal, { traceId, record: async () => { observations++; throw new Error("audit unavailable"); } });

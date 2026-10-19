@@ -4,10 +4,11 @@ import { join } from "node:path";
 
 export interface ConnectionObservation {
   traceId: string; at: number; endpoint: string;
-  stage: "authentication" | "transport" | "tool";
+  stage: "authentication" | "transport" | "tool" | "oauth";
   outcome: "success" | "error" | "received";
   code?: string; tool?: string; method?: string; httpStatus?: number; durationMs?: number;
   grantId?: string; clientId?: string;
+  requestFields?: string[];
 }
 
 /** Bounded local audit metadata. Never accepts request arguments, headers or response bodies. */
@@ -37,13 +38,14 @@ export class ConnectionDiagnostics {
   }
   flush(): Promise<void> { return this.queue; }
   private project(value: ConnectionObservation): ConnectionObservation {
-    if (!value || !/^[a-f0-9-]{36}$/i.test(value.traceId) || !Number.isFinite(value.at) || !["authentication", "transport", "tool"].includes(value.stage) || !["success", "error", "received"].includes(value.outcome)) throw new Error("invalid_connection_observation");
+    if (!value || !/^[a-f0-9-]{36}$/i.test(value.traceId) || !Number.isFinite(value.at) || !["authentication", "transport", "tool", "oauth"].includes(value.stage) || !["success", "error", "received"].includes(value.outcome)) throw new Error("invalid_connection_observation");
     const url = new URL(value.endpoint);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/mcp") throw new Error("invalid_diagnostic_endpoint");
     const result: ConnectionObservation = { traceId: value.traceId, at: value.at, endpoint: url.href, stage: value.stage, outcome: value.outcome };
     for (const key of ["code", "tool", "method"] as const) if (value[key] && /^[a-zA-Z0-9_/.:-]{1,80}$/.test(value[key]!)) result[key] = value[key];
     for (const key of ["grantId", "clientId"] as const) if (value[key] && /^[a-f0-9-]{36}$/i.test(value[key]!)) result[key] = value[key];
     for (const key of ["httpStatus", "durationMs"] as const) if (Number.isFinite(value[key]) && value[key]! >= 0) result[key] = value[key]!;
+    if (Array.isArray(value.requestFields)) result.requestFields = [...new Set(value.requestFields.filter(field => ["client_id", "code", "code_verifier", "redirect_uri", "resource", "refresh_token"].includes(field)))];
     return result;
   }
 }

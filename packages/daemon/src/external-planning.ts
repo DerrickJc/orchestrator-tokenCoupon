@@ -4,9 +4,9 @@ import { join } from "node:path";
 import {
   DEFAULT_REPOSITORY_OUTPUT_BUDGET, PlannerStore, RepositoryReader, createHistoryReader, externalPlannerProtocol, externalReviewProtocol,
   initializePlannerConversation, prepareExternalPlannerInput, prepareExternalReviewInput,
-  reviewPlannerDraft, submitExternalPlannerReply, verifyRepositoryEvidence,
+  reviewPlannerDraft, submitExternalPlannerReply, verifyRepositoryEvidence, canonicalHash,
 } from "@token-coupon/core";
-import type { ExecutionConfig, ExternalPlannerPreparation, PlanReviewInput, RepositoryEvidence, PlannerConversationSnapshot } from "@token-coupon/core";
+import type { ExecutionConfig, ExternalPlannerPreparation, PlanReviewInput, PlannerConfig, RepositoryEvidence, PlannerConversationSnapshot } from "@token-coupon/core";
 import { WebHandoffCoordinator } from "./web-handoff.js";
 import type { ClaimProof, WebActor, WebSource } from "./web-handoff.js";
 import type { ApplicationService, JobRecord } from "./application-service.js";
@@ -14,7 +14,7 @@ import type { ApplicationService, JobRecord } from "./application-service.js";
 export interface ExternalOperation {
   operationId: string; workspaceId: string; planningId: string; role: "plan" | "review";
   state: "prepared" | "submitting" | "succeeded" | "failed" | "stale" | "cancelled" | "interrupted";
-  completedBy?: { grantId: string; clientId: string; source?: string; generation: number }; expectedRevision: number; coordinated?: boolean; inputRevision?: number; preparation?: ExternalPlannerPreparation; reviewInput?: PlanReviewInput;
+  completedBy?: { grantId: string; clientId: string; source?: string; generation: number }; expectedRevision: number; coordinated?: boolean; inputRevision?: number; preparation?: ExternalPlannerPreparation; reviewInput?: PlanReviewInput; reviewerConfig?: PlannerConfig;
   evidence: RepositoryEvidence[]; reads: Array<{ name: string; args: unknown; result: string }>;
   outputBytes: number; outputBudgetBytes?: number; budgetExtensions?: Array<{ previousBytes: number; nextBytes: number; confirmedAt: string }>;
   historyCalls?: number; attempts: number; diagnostic?: string; result?: unknown; createdAt: string; updatedAt: string;
@@ -25,9 +25,10 @@ const OUTPUT_BUDGET_INCREMENT = 256 * 1024;
 function outputBudget(op: ExternalOperation): number { return op.outputBudgetBytes ?? LEGACY_OUTPUT_BUDGET; }
 function formatBudget(value: number): string { return value >= 1024 * 1024 ? `${value / (1024 * 1024)} MiB` : `${value / 1024} KiB`; }
 export interface PrepareExternalInput {
-  role: "plan" | "review"; planningId?: string; message?: string; model?: string;
+  role: "plan" | "review"; planningId?: string; message?: string; model?: string; reviewerConfig?: PlannerConfig;
   executionDefaults?: ExecutionConfig; retry?: boolean; operation?: boolean; coordinated?: boolean; target?: WebSource; reusePending?: boolean;
   sourcePlanning?: PlannerConversationSnapshot["sourcePlanning"];
+  plannerConfig?: PlannerConfig;
 }
 
 /** Persisted bridge operations; no model call, browser scraping, or waiting domain lock. */
@@ -67,20 +68,29 @@ export class ExternalPlanningService {
       const workspace = await this.service.getWorkspace(workspaceId);
       const snapshot = await new PlannerStore(workspace.path).load(id);
       const coordinated = input.coordinated || snapshot.config.provider === "web-mcp" || !!(await this.handoffs.load(workspaceId, id, "plan")) || !!(await this.handoffs.load(workspaceId, id, "review"));
-      if (!["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider)) throw new Error("external_provider_invalid：不能把 API 规划悄悄改成网页规划");
+      if (input.plannerConfig && actor) throw new Error("external_provider_forbidden：只有本机操作可以选择规划方式");
+      if (input.role === "plan" && !input.plannerConfig && !["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider)) throw new Error("external_provider_invalid：不能把 API 规划悄悄改成网页规划");
       let preparation: ExternalPlannerPreparation | undefined;
       const previousSlot = coordinated ? await this.handoffs.load(workspaceId, id, input.role) : undefined;
       await actor?.assertActive?.();
+      // Remote callers must release/submit their claim, not replace the operation.
+      // Trusted local input can supersede the old plan and fence its generation.
+      if (input.role === "plan" && actor && previousSlot?.claim && previousSlot.claim.expiresAt > Date.now()) throw new Error("handoff_owned：已有网页领取处理中；请先提交或归还当前操作");
       // Continuing a review must never replace its owner or discard its evidence.
       // Check under the same planning lock used by claim/submit/input changes.
       if (input.role === "review" && previousSlot) {
         const previous = await this.load(previousSlot.operationId);
         const planSlot = await this.handoffs.load(workspaceId, id, "plan");
-        if (["prepared", "submitting"].includes(previous.state) && previous.expectedRevision === snapshot.revision && previous.inputRevision === (planSlot?.inputRevision ?? 0) && !planSlot?.pending.length) {
+        // An MCP actor's source identifies the caller; it is not a local request
+        // to change the chosen reviewer. Reuse is safe: claim() still checks owner/target.
+        const sameReviewSource = (!!actor || !input.target || previousSlot.target === input.target) && (!input.reviewerConfig || canonicalHash(previous.reviewerConfig ?? snapshot.config) === canonicalHash(input.reviewerConfig));
+        const sameContext = previous.expectedRevision === snapshot.revision && previous.inputRevision === (planSlot?.inputRevision ?? 0) && !planSlot?.pending.length;
+        if (["prepared", "submitting"].includes(previous.state) && sameContext && sameReviewSource) {
           return { operationId: previous.operationId, planningId: id, role: "review", reused: true, nextAction: "handoff_claim" };
         }
+        if (["prepared", "submitting"].includes(previous.state) && sameContext && !sameReviewSource) throw new Error("external_review_switch_requires_cancel：当前网页审查操作仍有效；请先在交接面板取消或完成，再更换网页来源／模型");
+        if (["prepared", "submitting"].includes(previous.state) && previousSlot.claim && previousSlot.claim.expiresAt > Date.now() && !input.reusePending) throw new Error("handoff_owned：已有网页审查领取处理中；请先在网页归还／结束该操作，再切换审查方式");
       }
-      if (actor && previousSlot?.claim && previousSlot.claim.expiresAt > Date.now()) throw new Error("handoff_owned：已有领取处理中；请归还或在本地交接，不能另建 operationId 抢占");
       const planSlot = await this.handoffs.load(workspaceId, id, "plan");
       let pending = [...(planSlot?.pending ?? [])];
       if (coordinated && !planSlot) {
@@ -101,6 +111,7 @@ export class ExternalPlanningService {
         const operationInput = input.reusePending && pending.length ? pending.at(-1)!.operation : input.operation ?? prior?.operation ?? false;
         if (coordinated && !pending.some((item) => item.messageId === messageId)) pending.push({ messageId, content: message, operation: operationInput });
         preparation = await prepareExternalPlannerInput({ planningId: id, workspace: workspace.path, message,
+          ...(input.plannerConfig ? { plannerConfig: input.plannerConfig } : {}),
           ...(prior ? { retryMessageId: prior.messageId } : { messageId }), operation: operationInput,
           ...(coordinated ? { messages: pending } : {}) });
       } else {
@@ -111,7 +122,7 @@ export class ExternalPlanningService {
       const operation: ExternalOperation = { operationId: randomUUID(), workspaceId, planningId: id, role: input.role, state: "prepared",
         expectedRevision: preparation?.expectedRevision ?? review!.expectedRevision,
         ...(coordinated ? { coordinated: true, inputRevision: (planSlot?.inputRevision ?? 0) + (input.role === "plan" ? 1 : 0) } : {}),
-        ...(preparation ? { preparation } : { reviewInput: review!.input }),
+        ...(preparation ? { preparation } : { reviewInput: review!.input, ...(input.reviewerConfig ? { reviewerConfig: input.reviewerConfig } : {}) }),
         evidence: [], reads: [], outputBytes: 0, outputBudgetBytes: DEFAULT_REPOSITORY_OUTPUT_BUDGET, attempts: 0, createdAt: now, updatedAt: now };
       await this.save(operation);
       if (coordinated) {
@@ -218,7 +229,7 @@ export class ExternalPlanningService {
           }
           result = { planningId: op.planningId, status: committed.snapshot.status, draftRevision: committed.draft?.draftRevision };
         } else {
-          const committed = await reviewPlannerDraft({ planningId: op.planningId, workspace: workspace.path, expectedRevision: op.expectedRevision, repositoryOutputBudgetBytes: outputBudget(op), beforeCommit: async () => { await actor?.assertActive?.(); },
+          const committed = await reviewPlannerDraft({ planningId: op.planningId, workspace: workspace.path, expectedRevision: op.expectedRevision, ...(op.reviewerConfig ? { reviewerConfig: op.reviewerConfig } : {}), repositoryOutputBudgetBytes: outputBudget(op), beforeCommit: async () => { await actor?.assertActive?.(); },
             reviewer: { review: async (_input, context) => {
               for (const read of op.reads) { context.consumeToolCall(); await context.repository.invoke(read.name, read.args); }
               const reread = new Map(context.repository.getEvidence().map((item) => [item.path, item.sha256]));

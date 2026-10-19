@@ -11,8 +11,8 @@ import { SessionStore } from "./session-store.js";
 import { InputValidationError } from "./validation.js";
 import { assertPlanningReady } from "./planning-readiness.js";
 import { finalizeReviewReply, validateReviewReply } from "./review-reply.js";
+import { plannerDeadline, plannerFailure, type PlannerEventObserver } from "./planner-runtime.js";
 
-const REVIEW_TIMEOUT_MS = 120_000;
 const API_REQUEST_LIMIT = 8;
 const TOOL_CALL_LIMIT = 20;
 const HISTORY_LIMIT = 256 * 1024;
@@ -27,7 +27,9 @@ export async function reviewPlannerDraft(options: {
   planningId: string;
   workspace: string;
   reviewer?: PlanReviewer;
+  reviewerConfig?: PlannerConfig;
   signal?: AbortSignal;
+  onEvent?: PlannerEventObserver;
   expectedRevision?: number;
   repositoryOutputBudgetBytes?: number;
   beforeCommit?: () => Promise<void>;
@@ -70,13 +72,15 @@ export async function reviewPlannerDraft(options: {
     const startedAt = new Date().toISOString();
     const record: PlanReviewRecord = {
       schemaVersion: 1, planningId: options.planningId, reviewId, status: "running", draftRevision: draft.draftRevision,
-      planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment),
+      planHash: draft.planHash, requirementsHash: requirementsHash(snapshot), reviewerConfigHash: reviewerConfigHash(options.reviewerConfig ?? snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment),
+      ...(options.reviewerConfig ? { reviewerConfig: options.reviewerConfig } : {}),
       context: draft.context, findings: [], summary: "审查进行中", reportHash: null, reasonCode: null, createdAt: startedAt, finishedAt: null,
       ...(previousReview ? { previousReviewId: previousReview.reviewId } : {}), resolutions: [],
     };
     await reviewStore.create(record);
 
-    const timed = makeTimeoutSignal(options.signal, REVIEW_TIMEOUT_MS);
+    const timed = plannerDeadline(options.reviewerConfig ?? snapshot.config, options.signal, "review");
+    const notify = async (event: PlannerEvent) => { await options.onEvent?.({ ...event, planningId: options.planningId, reviewId }).catch(() => undefined); };
     const reader = new RepositoryReader(plannerStore.workspace, timed.signal, draft.context.reduce((sum, evidence) => sum + evidence.sizeBytes, 0), options.repositoryOutputBudgetBytes);
     const counters = { requests: 0, tools: 0 };
     const context: PlannerContext = {
@@ -94,6 +98,12 @@ export async function reviewPlannerDraft(options: {
         if (counters.tools > TOOL_CALL_LIMIT) throw new Error("本轮审查仓库工具调用超过 20 次");
       },
       record: async (event: PlannerEvent) => {
+        if (event.type === "agent.output" || event.type === "agent.heartbeat") { await notify(event); return; }
+        if (event.type === "agent.response" && typeof event.payload.text === "string") {
+          await reviewStore.writeProviderCall(options.planningId, reviewId, event.payload.requestId as number, "response", event.payload);
+          const { text: _text, ...summary } = event.payload;
+          event = { ...event, payload: summary };
+        }
         if (event.type === "provider.request" || event.type === "provider.response") {
           const requestId = event.payload.requestId;
           if (typeof requestId !== "number") throw new Error("审查 API 日志缺少 requestId");
@@ -107,11 +117,15 @@ export async function reviewPlannerDraft(options: {
         } else {
           await reviewStore.appendEvent(options.planningId, reviewId, event.type, event.payload);
         }
+        await notify(event);
       },
     };
     try {
-      const reviewer = options.reviewer ?? createPlanReviewer(snapshot.config);
+      await notify({ type: "planner.turn.started", payload: { role: "review", provider: (options.reviewerConfig ?? snapshot.config).provider, model: (options.reviewerConfig ?? snapshot.config).model } });
+      const reviewer = options.reviewer ?? createPlanReviewer(options.reviewerConfig ?? snapshot.config);
       const raw = await reviewer.review(input, context);
+      await notify({ type: "planner.validating", payload: {} });
+      const reviewerReportedModel = (reviewer as PlanReviewer & { reportedModel?: string }).reportedModel;
       if (timed.signal.aborted) throw timed.signal.reason ?? new Error("审查已取消");
       const parsed = ensureTechnologySelectionFinding(
         parseReviewReply(raw, draft.plan.tasks.map(({ task }) => task.id), input.requirementItems!.map(({ requirementId }) => requirementId), previousReview),
@@ -123,6 +137,7 @@ export async function reviewPlannerDraft(options: {
       const finishedAt = new Date().toISOString();
       const succeeded = validateReviewRecord({
         ...record, status: "succeeded", context: evidence, ...parsed,
+        ...(reviewerReportedModel ? { reviewerReportedModel } : {}),
         reportHash: canonicalHash(reviewReportPayload({ ...record, ...parsed })), finishedAt,
       });
       await options.beforeCommit?.();
@@ -138,24 +153,27 @@ export async function reviewPlannerDraft(options: {
         approval: null,
       };
       await plannerStore.save(snapshot);
+      await notify({ type: "planner.turn.finished", payload: { status: "succeeded" } });
       timed.dispose();
       return { snapshot, draft, review: succeeded };
     } catch (error) {
-      const timedOut = timed.didTimeout();
+      const timedOut = timed.timedOut();
       const cancelled = timed.signal.aborted && !timedOut;
       const finishedAt = new Date().toISOString();
+      const failure = plannerFailure(error, timed, "review");
       const failed = validateReviewRecord({
         ...record,
         status: timedOut ? "timed_out" : cancelled ? "cancelled" : "failed",
         context: mergeEvidence(draft.context, reader.getEvidence()), findings: [],
-        summary: safeError(error), reportHash: null,
-        reasonCode: timedOut ? "review_timed_out" : cancelled ? "review_cancelled" : error instanceof Error ? error.name : "review_failed",
+        summary: safeError(failure.message), reportHash: null,
+        reasonCode: failure.code ?? (error instanceof Error ? error.name : "review_failed"),
         finishedAt,
       });
       await reviewStore.save(failed).catch(() => undefined);
       await reviewStore.appendEvent(options.planningId, reviewId, "review.failed", { status: failed.status, reasonCode: failed.reasonCode }).catch(() => undefined);
+      await notify({ type: "planner.turn.finished", payload: { status: failed.status, reasonCode: failed.reasonCode, message: failed.summary } });
       timed.dispose();
-      throw new Error(`${safeError(error)}（审查记录：${reviewId}）`);
+      throw new Error(`${failed.summary}（审查记录：${reviewId}）`);
     }
   } finally {
     await release();
@@ -165,6 +183,7 @@ export async function reviewPlannerDraft(options: {
 export function createPlanReviewer(config: PlannerConfig, options: { fetchImpl?: typeof fetch } = {}): PlanReviewer {
   if (config.provider === "mock") return new MockPlanReviewer();
   if (["chatgpt-mcp", "web-mcp"].includes(config.provider)) throw new Error("external_review_required：请在网页中通过 MCP 准备并提交审查，当前没有发出 API 请求");
+  if (["codex-agent", "claude-agent"].includes(config.provider)) throw new Error("local_agent_reviewer_requires_daemon：本机 Agent 审查需由 daemon 使用只读 Runner 适配器调用");
   return new DeepSeekPlanner({ model: config.model, baseUrl: config.baseUrl, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
 }
 
@@ -174,7 +193,7 @@ export async function prepareExternalReviewInput(planningId: string, workspace: 
   const release = await store.acquireLock(planningId);
   try {
     const snapshot = await store.load(planningId);
-    if (!["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider) || snapshot.activeTurnId || snapshot.execution || snapshot.draftRevision === null) throw new Error("external_review_unavailable：当前没有可提交网页审查的草案");
+    if (snapshot.activeTurnId || snapshot.execution || snapshot.draftRevision === null) throw new Error("external_review_unavailable：当前没有可提交网页审查的草案");
     const draft = await store.loadDraft(planningId, snapshot.draftRevision);
     assertPlanningReady(snapshot.planningAssessment, draft.plan);
     const requirements = requireReconciledRequirements(snapshot);
@@ -200,7 +219,7 @@ export async function loadCurrentPlanReview(planningId: string, workspace: strin
     new ReviewStore(workspace).load(planningId, snapshot.latestReviewId),
   ]);
   if (record.status !== "succeeded" || record.draftRevision !== draft.draftRevision || record.planHash !== draft.planHash ||
-      record.requirementsHash !== requirementsHash(snapshot) || record.reviewerConfigHash !== reviewerConfigHash(snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment)) return undefined;
+      record.requirementsHash !== requirementsHash(snapshot) || record.reviewerConfigHash !== reviewerConfigHash(record.reviewerConfig ?? snapshot.config, draft.plan.schemaVersion, !!snapshot.planningAssessment)) return undefined;
   const changed = await verifyRepositoryEvidence(workspace, record.context);
   return changed.length ? undefined : record;
 }
@@ -255,13 +274,4 @@ function safeError(error: unknown): string {
   const apiKey = process.env.TOKEN_COUPON_PLANNER_API_KEY;
   const message = error instanceof Error ? error.message : String(error);
   return (apiKey ? message.replaceAll(apiKey, "[已隐藏]") : message).slice(0, 1024);
-}
-
-function makeTimeoutSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; didTimeout: () => boolean; dispose: () => void } {
-  const controller = new AbortController();
-  let timeout = false;
-  const timer = setTimeout(() => { timeout = true; controller.abort(new Error("Planner 审查超过 120 秒")); }, timeoutMs);
-  const abort = () => controller.abort(parent?.reason ?? new Error("Planner 审查已取消"));
-  if (parent?.aborted) abort(); else parent?.addEventListener("abort", abort, { once: true });
-  return { signal: controller.signal, didTimeout: () => timeout, dispose: () => { clearTimeout(timer); parent?.removeEventListener("abort", abort); } };
 }
