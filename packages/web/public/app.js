@@ -174,6 +174,12 @@ window.addEventListener("keydown", event => {
   if ([...document.querySelectorAll("dialog[open]")].length) return;
   event.preventDefault(); openCommandPalette();
 });
+window.addEventListener("keydown", event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "s") return;
+  if (!state.editingPlan || state.savingPlan || [...document.querySelectorAll("dialog[open]")].length) return;
+  event.preventDefault();
+  if (planHasChanges()) void savePlanEditor();
+});
 
 const remoteScopeLabels = {
   "repository:read": "读取项目文件（只读调研）",
