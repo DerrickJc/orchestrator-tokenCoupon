@@ -1,4 +1,20 @@
 const $ = (selector) => document.querySelector(selector);
+function bindTextareaEnterSubmit(textarea, submit) {
+  if (!textarea || textarea.dataset.enterSubmitBound) return;
+  textarea.dataset.enterSubmitBound = "true";
+  let composing = false;
+  let recentCompositionEnd = 0;
+  textarea.addEventListener("compositionstart", () => { composing = true; });
+  textarea.addEventListener("compositionend", () => { composing = false; recentCompositionEnd = performance.now(); });
+  textarea.addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (composing || event.isComposing || event.keyCode === 229 || event.which === 229) return;
+    event.preventDefault();
+    if (event.repeat || (recentCompositionEnd && performance.now() - recentCompositionEnd < 120) || textarea.disabled || textarea.readOnly) return;
+    if (textarea.form?.querySelector('button[type="submit"]:disabled')) return;
+    submit();
+  });
+}
 const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null };
 const statuses = { collecting: "收集中", draft_ready: "草案待处理", approved: "已批准", execution_created: "执行已创建", succeeded: "已完成", failed: "失败", cancelled: "已取消", running: "运行中", paused: "已暂停", blocked: "等待处理", interrupted: "已中断", ready: "准备就绪", planned: "待执行", timed_out: "超时" };
 statuses.needs_input = "等待用户决策";
@@ -93,6 +109,71 @@ function setConnectionTab(tab) {
 function esc(value) { return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]); }
 function shortId(value) { return value ? `${value.slice(0, 8)}…` : ""; }
 function show(el, visible = true) { el.classList.toggle("hidden", !visible); }
+function commandPaletteEntries() {
+  const entries = [
+    { label: "连接中心", hint: "连接与网页授权", run: () => navigate("/connect") },
+    { label: "工作区与计划", hint: "选择或新建工作区", run: () => navigate("/workspaces") },
+    { label: "系统设置", hint: "规划、审查、修订与诊断默认方式", run: () => navigate("/settings") },
+    { label: "刷新状态", hint: "重新读取当前工作区和计划", run: () => refreshAll() },
+  ];
+  if (state.workspace) entries.push({ label: `新建计划 · ${state.workspace.label}`, hint: "打开规划设置，不会立即提交", run: () => startNewTask() });
+  if (state.workspace && state.planning) {
+    const title = state.planning.draft?.plan?.title || state.planning.title || "当前计划";
+    entries.push(
+      { label: `${title} · 概览`, hint: "查看计划状态和下一步", run: () => planTab("overview") },
+      { label: `${title} · 草案`, hint: "查看或编辑当前计划", run: () => planTab("draft") },
+      { label: `${title} · 审查与修订`, hint: "审查、修订或核对报告", run: () => planTab("review") },
+      { label: `${title} · 执行与结果`, hint: "查看任务、DAG 和执行状态", run: () => planTab("execution") },
+    );
+    if (state.planning.interactions?.length) entries.push({ label: `处理待审批与回答 · ${state.planning.interactions.length} 项`, hint: title, run: async () => { await planTab("execution"); requestAnimationFrame(() => $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" })); } });
+  }
+  return entries;
+}
+function renderCommandPalette() {
+  const query = $("#command-palette-query").value.trim().toLocaleLowerCase();
+  const entries = commandPaletteEntries().filter(entry => `${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(query));
+  state.commandPaletteEntries = entries; state.commandPaletteIndex = Math.min(state.commandPaletteIndex || 0, Math.max(0, entries.length - 1));
+  const root = $("#command-palette-results"); root.replaceChildren();
+  if (!entries.length) { $("#command-palette-query").removeAttribute("aria-activedescendant"); const empty = document.createElement("p"); empty.className = "command-palette-empty"; empty.textContent = "没有匹配的页面或操作。"; root.append(empty); return; }
+  entries.forEach((entry, index) => {
+    const button = document.createElement("button"); button.type = "button"; button.id = `command-palette-option-${index}`; button.className = "command-palette-option"; button.setAttribute("role", "option"); button.setAttribute("aria-selected", String(index === state.commandPaletteIndex));
+    const label = document.createElement("span"), hint = document.createElement("small"); label.textContent = entry.label; hint.textContent = entry.hint; button.append(label, hint);
+    button.addEventListener("click", () => runCommandPaletteEntry(entry)); root.append(button);
+  });
+  $("#command-palette-query").setAttribute("aria-activedescendant", `command-palette-option-${state.commandPaletteIndex}`);
+}
+function moveCommandPaletteSelection(delta) {
+  const entries = state.commandPaletteEntries || [];
+  if (!entries.length) return;
+  state.commandPaletteIndex = (state.commandPaletteIndex + delta + entries.length) % entries.length;
+  renderCommandPalette();
+  $(`#command-palette-option-${state.commandPaletteIndex}`)?.scrollIntoView({ block: "nearest" });
+}
+async function runCommandPaletteEntry(entry) {
+  $("#command-palette").close();
+  try { await entry.run(); } catch (error) { showToast(error.message, true); }
+}
+function openCommandPalette() {
+  const dialog = $("#command-palette");
+  if ([...document.querySelectorAll("dialog[open]")].some(open => open !== dialog)) return;
+  state.commandPaletteIndex = 0; $("#command-palette-query").value = ""; renderCommandPalette(); dialog.showModal(); $("#command-palette-query").focus();
+}
+$("#command-palette-close").addEventListener("click", () => $("#command-palette").close());
+$("#command-palette-open").addEventListener("click", openCommandPalette);
+$("#command-palette-query").addEventListener("input", () => { state.commandPaletteIndex = 0; renderCommandPalette(); });
+$("#command-palette-query").addEventListener("keydown", event => {
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); moveCommandPaletteSelection(event.key === "ArrowDown" ? 1 : -1); return; }
+  if (event.key === "Enter") {
+    const entry = state.commandPaletteEntries?.[state.commandPaletteIndex];
+    if (entry) { event.preventDefault(); void runCommandPaletteEntry(entry); }
+  }
+});
+$("#command-palette").addEventListener("click", event => { if (event.target === $("#command-palette")) $("#command-palette").close(); });
+window.addEventListener("keydown", event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "k") return;
+  if ([...document.querySelectorAll("dialog[open]")].length) return;
+  event.preventDefault(); openCommandPalette();
+});
 
 const remoteScopeLabels = {
   "repository:read": "读取项目文件（只读调研）",
@@ -2473,6 +2554,10 @@ function openRevisionPlanning() {
     dialog.innerHTML = `<div class="section-title"><h3>基于当前计划新建修订</h3><button type="button" class="text-button" id="revision-planning-close">取消</button></div><p id="revision-planning-source" class="hint"></p><p>原计划与执行记录保留。新建网页修订计划后，在 GPT／Claude 读取原计划和执行证据，补齐决策，再重新审查、批准。新计划不会直接继承完成状态或失败现场的文件。</p><label for="revision-planning-message">本次需要补充或调整什么？</label><textarea id="revision-planning-message" rows="4" maxlength="4096" placeholder="例如：授权在现有约束内补齐数据库与依赖选型；请先列出方案供我确认。"></textarea><p id="revision-planning-error" class="field-error" role="status"></p><button id="revision-planning-create" type="button" class="button button-primary">创建关联修订计划</button>`;
     document.body.append(dialog); $("#revision-planning-close").addEventListener("click", () => dialog.close());
     $("#revision-planning-create").addEventListener("click", () => void confirmRevisionPlanning());
+    const textarea = $("#revision-planning-message"), shortcut = document.createElement("p");
+    shortcut.id = "revision-planning-shortcut"; shortcut.className = "composer-shortcut-hint"; shortcut.textContent = "Enter 发送 · Shift+Enter 换行";
+    textarea.setAttribute("aria-describedby", shortcut.id); textarea.insertAdjacentElement("afterend", shortcut);
+    bindTextareaEnterSubmit(textarea, () => $("#revision-planning-create").click());
   }
   state.revisionPlanningContext = { workspaceId: state.workspace.workspaceId, planningId: plan.planningId, expectedRevision: plan.revision, expectedPlanHash: plan.draft.planHash };
   $("#revision-planning-source").textContent = `${plan.draft.plan.title} · draft-${plan.draft.draftRevision} · ${shortId(plan.planningId)}`;
@@ -2725,7 +2810,11 @@ function ensureAttemptDiagnosticUI() {
   $("#attempt-diagnosis-history-select").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) { context.selectedId = $("#attempt-diagnosis-history-select").value; renderAttemptDiagnosticHistory(context); } });
   $("#attempt-diagnosis-reply").addEventListener("input", () => { if (state.attemptDiagnosticContext) state.attemptDiagnosticContext.unsentText = $("#attempt-diagnosis-reply").value; });
   $("#attempt-diagnosis-form").addEventListener("submit", event => { event.preventDefault(); void sendAttemptDiagnosticMessage(); });
-  $("#attempt-diagnosis-reply").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void sendAttemptDiagnosticMessage(); } });
+  const diagnosisInput = $("#attempt-diagnosis-reply"), diagnosisShortcut = document.createElement("p");
+  diagnosisShortcut.className = "composer-shortcut-hint"; diagnosisShortcut.textContent = "Enter 发送 · Shift+Enter 换行";
+  diagnosisInput.setAttribute("aria-describedby", "attempt-diagnosis-status diagnosis-shortcuts"); diagnosisShortcut.id = "diagnosis-shortcuts";
+  diagnosisInput.insertAdjacentElement("afterend", diagnosisShortcut);
+  bindTextareaEnterSubmit(diagnosisInput, () => $("#attempt-diagnosis-form").requestSubmit());
   $("#diagnosis-export-copy").addEventListener("click", () => void copyExportedDiagnosticPrompt());
 }
 function attemptDiagnosticPath(context) {
@@ -3610,6 +3699,7 @@ $("#start-planning").addEventListener("click", async () => {
   const job = await startJob("开始规划", (requestKey) => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings`, { method: "POST", body: JSON.stringify({ ...payload, requestKey }) }));
   if (job && ["running", "succeeded"].includes(job.status)) $("#request-text").value = "";
 });
+bindTextareaEnterSubmit($("#request-text"), () => $("#start-planning").click());
 $("#new-task").addEventListener("click", startNewTask);
 $("#new-task-sidebar").addEventListener("click", startNewTask);
 $("#refresh-models").addEventListener("click", () => { void loadRunnerModels(true); void loadPlannerModels(true); });
@@ -3628,6 +3718,7 @@ $("#reply-form").addEventListener("submit", async (event) => {
     if (job?.status === "succeeded") $("#reply-text").value = "";
   } finally { state.replying = false; $("#reply-text").disabled = false; if (state.planning) renderRequirements(); }
 });
+bindTextareaEnterSubmit($("#reply-text"), () => $("#reply-form").requestSubmit());
 $("#review-button").addEventListener("click", async () => {
   if (!state.planning || !await confirmPlanChanges()) return;
   const mode = $("#reviewer-mode")?.value || "planning";
