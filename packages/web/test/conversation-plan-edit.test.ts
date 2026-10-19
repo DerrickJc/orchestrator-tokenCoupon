@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 const windows: JSDOM[] = [];
 afterEach(async () => { await new Promise(resolve => setImmediate(resolve)); for (const dom of windows.splice(0)) dom.window.close(); });
 async function page(options: { mcp?: boolean; failReply?: boolean; failSave?: boolean; asyncSave?: boolean; handoff?: boolean; unconnected?: boolean } = {}) {
-  const [html, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
+  const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: "http://127.0.0.1:4177/#/workspaces/workspace/plans/plan/draft", runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window;
   Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
@@ -69,7 +69,7 @@ async function page(options: { mcp?: boolean; failReply?: boolean; failSave?: bo
     if (path.endsWith("/jobs/save")) return Response.json(saveResult());
     throw new Error(`unexpected GET ${path}`);
   };
-  w.eval(script);
+  w.eval(clientScript); w.eval(script);
   const element = (id: string) => w.document.getElementById(id)!;
   const value = (id: string) => (element(id) as HTMLTextAreaElement).value;
   const input = (id: string, text: string) => { (element(id) as HTMLTextAreaElement).value = text; element(id).dispatchEvent(new w.Event("input", { bubbles: true })); };

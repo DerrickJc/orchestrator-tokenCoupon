@@ -6,8 +6,7 @@ import { afterEach, expect, it } from "vitest";
 const windows: Array<JSDOM> = [];
 afterEach(() => { for (const dom of windows.splice(0)) dom.window.close(); });
 async function page(options: { lateCodex?: boolean } = {}) {
-  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
-  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: "http://127.0.0.1:4177/#/workspaces/workspace/plans/existing-plan", runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window;
   Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
@@ -32,7 +31,7 @@ async function page(options: { lateCodex?: boolean } = {}) {
     if (path.endsWith("/plannings/existing-plan")) return Response.json(existing);
     throw new Error(`unexpected request: ${path}`);
   };
-  w.eval(script);
+  w.eval(clientScript); w.eval(script);
   const element = (id: string) => w.document.getElementById(id)!;
   const choose = (id: string, value: string) => { (element(id) as HTMLSelectElement).value = value; element(id).dispatchEvent(new w.Event("change", { bubbles: true })); };
   await expect.poll(()=>element("planning-panel").classList.contains("hidden")).toBe(false);

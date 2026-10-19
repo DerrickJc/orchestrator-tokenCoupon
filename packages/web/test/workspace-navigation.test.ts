@@ -370,7 +370,7 @@ it("updates the displayed model from native events and distinguishes SDK startup
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
 async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
-  const [html, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
+  const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
@@ -443,7 +443,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     if (path.endsWith("/repository")) return url.searchParams.get("tool") === "repo_read" ? Response.json({ path: "README.md", startLine: 1, content: "1: <img src=x onerror=alert(1)>\n2: 项目说明", sha256: "a".repeat(64), truncated: false }) : Response.json({ path: ".", entries: [{ name: "README.md", type: "file" }], nextOffset: null });
     throw new Error(`unexpected GET ${path}`);
   };
-  w.eval(script + "\nwindow.__testState = state;");
+  w.eval(clientScript); w.eval(script + "\nwindow.__testState = state;");
   const element = (id: string) => w.document.getElementById(id)!;
   const visible = (id: string) => { for (let node: Element | null = element(id); node; node = node.parentElement) if (node.classList.contains("hidden")) return false; return true; };
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");

@@ -1,4 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
+const tokenCouponClient = globalThis.tokenCouponClient;
+if (typeof tokenCouponClient?.api !== "function" || typeof tokenCouponClient?.openEventStream !== "function") throw new Error("web_client_not_loaded：请先加载本机 HTTP/SSE 客户端模块");
+const { api, openEventStream } = tokenCouponClient;
 function bindTextareaEnterSubmit(textarea, submit) {
   if (!textarea || textarea.dataset.enterSubmitBound) return;
   textarea.dataset.enterSubmitBound = "true";
@@ -54,14 +57,6 @@ function renderAuthorizationOverview() {
   if (!names) { names = document.createElement("p"); names.id = "remote-mcp-names"; names.className = "hint"; root.after(names); }
   const known = [...grants].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   names.textContent = known.length ? `MCP 名称：${known.slice(0, 3).map(grant => grantMcpName(grant) || "待设置名称").join("、")}${known.length > 3 ? ` 等 ${known.length} 条授权` : ""}。可在授权卡片上设置与网页一致的名称。` : "MCP 名称：尚无授权连接。";
-}
-async function api(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body !== undefined) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, { ...options, headers, credentials: "same-origin", cache: "no-store" });
-  const data = response.status === 204 ? null : await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
-  return data;
 }
 function key() { return crypto.randomUUID(); }
 function showToast(message, isError = false, source = "general") {
@@ -1233,21 +1228,21 @@ async function loadWorkspace(workspaceId, sequence = state.navigationSequence) {
 function connectEvents() {
   clearTimeout(state.reconnectTimer);
   state.eventSource?.close();
-  state.eventSource = new EventSource(`/api/v1/events?after=${state.lastEventId}`);
   const connected = () => { state.reconnectAttempts = 0; $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接"; if (state.initialized) { void refreshAll(); void readSelectedAttempt(); } };
-  state.eventSource.addEventListener("hello", connected);
-  state.eventSource.onopen = connected;
-  state.eventSource.onerror = () => {
+  const failed = () => {
     state.eventSource?.close(); state.eventSource = null; $("#connection-dot").classList.remove("online");
     if (state.reconnectAttempts >= 5) { $("#connection-label").textContent = "需要重新连接"; return; }
     $("#connection-label").textContent = "正在重连";
     const delay = Math.min(16000, 1000 * (2 ** state.reconnectAttempts)) + Math.floor(Math.random() * 250);
     state.reconnectAttempts += 1; state.reconnectTimer = setTimeout(connectEvents, delay);
   };
-  state.eventSource.onmessage = (event) => consumeEvent(event);
-  for (const type of ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.progress", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"]) {
-    state.eventSource.addEventListener(type, (event) => consumeEvent(event));
-  }
+  state.eventSource = openEventStream(`/api/v1/events?after=${state.lastEventId}`, {
+    onHello: connected,
+    onOpen: connected,
+    onError: failed,
+    onMessage: consumeEvent,
+    eventTypes: ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.progress", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"],
+  });
 }
 function consumeEvent(event) {
   let data; try { data = JSON.parse(event.data); } catch { return; }

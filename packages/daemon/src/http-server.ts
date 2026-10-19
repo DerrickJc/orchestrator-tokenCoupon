@@ -95,7 +95,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); response.end(html); return;
     }
     const builtAsset = webBuild?.assets.get(url.pathname);
-    const sourceAsset = ["/app.js", "/style.css"].includes(url.pathname) ? url.pathname.slice(1) : undefined;
+    const sourceAsset = ["/api-client.js", "/app.js", "/style.css"].includes(url.pathname) ? url.pathname.slice(1) : undefined;
     if (request.method === "GET" && (builtAsset || sourceAsset)) {
       const relativePath = builtAsset || sourceAsset!;
       const body = await readFile(join(builtAsset ? WEB_BUILD_DIRECTORY : PUBLIC_DIRECTORY, relativePath));

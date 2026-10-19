@@ -585,4 +585,6 @@ Node SEA/其他单文件打包方式另行验证动态依赖、资源文件、�
 
 Web 资源已接入 Vite：`npm run build` 生成带哈希的静态资源与 manifest；daemon 只按 manifest 中登记的资源路径提供构建产物，未构建时回退到现有 `public/` 入口。`npm run web:dev` 在 `127.0.0.1:5173` 启动前端开发服务器，并仅将 `/api` 代理到本机 daemon（默认 `127.0.0.1:4177`）；可用 `TOKEN_COUPON_WEB_DAEMON_ORIGIN` 指向其他 loopback daemon。
 
-本次 `npm run build` 成功，`npx vitest run packages/daemon/test/http-console.test.ts` 通过（1 项）；`git diff --check` 通过。未运行浏览器交互测试、真实模型验收或 Windows 桌面测试。React 页面迁移、Electron 壳、Windows 后台与原生能力仍待后续批次实施。
+HTTP JSON 请求和 SSE 订阅已抽到 `packages/web/public/api-client.js`；页面通过 `tokenCouponClient` 调用同一接口，业务视图不再创建 fetch/EventSource 连接。该模块是逐页迁移到共享客户端的第一步，尚未转换为 React 或 TypeScript DTO。
+
+本次 `npm run build` 成功；规划/编辑、任务模型配置和工作区导航三个 Web 回归文件通过（136 项）；`npx vitest run packages/daemon/test/http-console.test.ts` 通过（1 项）；`git diff --check` 通过。未运行浏览器交互测试、真实模型验收或 Windows 桌面测试。React 页面迁移、Electron 壳、Windows 后台与原生能力仍待后续批次实施。
