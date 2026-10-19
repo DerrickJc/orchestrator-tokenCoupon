@@ -1,6 +1,6 @@
 # Windows 客户端需求与技术方案
 
-日期：2026-10-19。状态：**需求与技术方案草案；Electron 桌面工程、Windows 后台适配和 React/Vite 迁移未实施。现有 Web 页面已试作输入快捷键与快速导航，尚未完成浏览器交互验收。**
+日期：2026-10-19。状态：**需求与技术方案草案；Electron 桌面工程、Windows 后台适配和 React 页面迁移未实施。现有 Web 页面已具备 Vite 构建/静态分发基础及输入快捷键与快速导航原型；尚未完成浏览器交互和 Windows 桌面验收。**
 
 本文整理需求讨论、开源项目检索与代码只读核查结果，并补充桌面前端设计和交互方案。代码核查是当时工作树的事实，不等同于已发布版本；实施前需重新记录代码基线和既有变更归属。
 
@@ -583,4 +583,6 @@ Node SEA/其他单文件打包方式另行验证动态依赖、资源文件、�
 
 在现有 Web 页面落地了输入快捷键和快速导航原型：规划、澄清回复、关联修订和任务诊断支持 Enter 发送、Shift+Enter 换行，并保护中文输入法候选确认；侧栏提供“快速跳转”，Ctrl/Cmd+K 可搜索页面、当前计划任务与待处理事项，支持方向键、Enter 与 Esc，选择任务会打开详情但不会执行。草案处于编辑状态时 Ctrl/Cmd+S 才会触发校验保存；其他页面保留浏览器默认行为。面板目前只提供导航和只读刷新，不包含批准、执行等写操作。
 
-本次仅完成 `node --check packages/web/public/app.js` 与 `git diff --check` 静态检查；未运行浏览器交互测试、真实模型验收或 Windows 桌面测试。React/Vite 迁移、Electron 壳、Windows 后台与原生能力仍待后续批次实施。
+Web 资源已接入 Vite：`npm run build` 生成带哈希的静态资源与 manifest；daemon 只按 manifest 中登记的资源路径提供构建产物，未构建时回退到现有 `public/` 入口。`npm run web:dev` 在 `127.0.0.1:5173` 启动前端开发服务器，并仅将 `/api` 代理到本机 daemon（默认 `127.0.0.1:4177`）；可用 `TOKEN_COUPON_WEB_DAEMON_ORIGIN` 指向其他 loopback daemon。
+
+本次 `npm run build` 成功，`npx vitest run packages/daemon/test/http-console.test.ts` 通过（1 项）；`git diff --check` 通过。未运行浏览器交互测试、真实模型验收或 Windows 桌面测试。React 页面迁移、Electron 壳、Windows 后台与原生能力仍待后续批次实施。

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationService } from "./application-service.js";
 import { RepositoryReader, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
@@ -12,6 +12,49 @@ import { pickNativePath, nativePickerCapability, normalizePickedPaths, type Nati
 
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
+const WEB_BUILD_DIRECTORY = fileURLToPath(new URL("../../web/dist/", import.meta.url));
+
+type WebBuildEntry = { file?: unknown; css?: unknown; assets?: unknown };
+type WebBuild = { html: Buffer; assets: Map<string, string> };
+
+async function loadWebBuild(): Promise<WebBuild | undefined> {
+  let rawManifest: string;
+  try { rawManifest = await readFile(join(WEB_BUILD_DIRECTORY, ".vite", "manifest.json"), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const manifest = JSON.parse(rawManifest) as Record<string, WebBuildEntry>;
+  const assets = new Map<string, string>();
+  const add = (candidate: unknown) => {
+    if (typeof candidate !== "string" || candidate.startsWith("/") || candidate.includes("\\")) return;
+    const parts = candidate.split("/");
+    if (parts.some(part => !part || part === "." || part === "..")) return;
+    assets.set(`/${candidate}`, candidate);
+  };
+  for (const entry of Object.values(manifest)) {
+    add(entry.file);
+    if (Array.isArray(entry.css)) entry.css.forEach(add);
+    if (Array.isArray(entry.assets)) entry.assets.forEach(add);
+  }
+  return { html: await readFile(join(WEB_BUILD_DIRECTORY, "index.html")), assets };
+}
+
+function webAssetContentType(path: string): string {
+  const types: Record<string, string> = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".wasm": "application/wasm",
+  };
+  return types[extname(path).toLowerCase()] || "application/octet-stream";
+}
 
 export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") throw new Error("daemon_bind_forbidden：本阶段服务只允许监听 loopback");
@@ -24,6 +67,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     await writeFile(tokenPath, token + "\n", { flag: "wx", mode: 0o600 });
   }
   const mcpHandler = await createMcpHttpHandler(service, options.dataDirectory);
+  const webBuild = await loadWebBuild();
   const expectedHost = `${options.host.includes(":") ? `[${options.host}]` : options.host}:${options.port}`;
   const expectedOrigin = `http://${expectedHost}`;
   const origins = new Set([expectedOrigin, ...(options.host === "127.0.0.1" || options.host === "localhost" ? [`http://127.0.0.1:${options.port}`, `http://localhost:${options.port}`] : [])]);
@@ -47,13 +91,16 @@ export async function createLocalServer(service: ApplicationService, options: { 
       response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:");
       response.setHeader("Referrer-Policy", "no-referrer");
       response.setHeader("X-Content-Type-Options", "nosniff");
-      const html = await readFile(join(PUBLIC_DIRECTORY, "index.html"));
+      const html = webBuild?.html || await readFile(join(PUBLIC_DIRECTORY, "index.html"));
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); response.end(html); return;
     }
-    if (request.method === "GET" && ["/app.js", "/style.css"].includes(url.pathname)) {
-      const name = url.pathname.slice(1);
-      const body = await readFile(join(PUBLIC_DIRECTORY, name));
-      response.writeHead(200, { "Content-Type": name.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8", "Cache-Control": "no-cache" }); response.end(body); return;
+    const builtAsset = webBuild?.assets.get(url.pathname);
+    const sourceAsset = ["/app.js", "/style.css"].includes(url.pathname) ? url.pathname.slice(1) : undefined;
+    if (request.method === "GET" && (builtAsset || sourceAsset)) {
+      const relativePath = builtAsset || sourceAsset!;
+      const body = await readFile(join(builtAsset ? WEB_BUILD_DIRECTORY : PUBLIC_DIRECTORY, relativePath));
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.writeHead(200, { "Content-Type": webAssetContentType(relativePath), "Cache-Control": builtAsset ? "public, max-age=31536000, immutable" : "no-cache" }); response.end(body); return;
     }
     if (!url.pathname.startsWith("/api/v1/")) { sendJson(response, 404, { error: "not_found" }); return; }
     if (cookieValue(request.headers.cookie, "tc_local") !== token) {
