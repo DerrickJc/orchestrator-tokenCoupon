@@ -125,7 +125,18 @@ function commandPaletteEntries() {
       { label: `${title} · 审查与修订`, hint: "审查、修订或核对报告", run: () => planTab("review") },
       { label: `${title} · 执行与结果`, hint: "查看任务、DAG 和执行状态", run: () => planTab("execution") },
     );
-    if (state.planning.interactions?.length) entries.push({ label: `处理待审批与回答 · ${state.planning.interactions.length} 项`, hint: title, run: async () => { await planTab("execution"); requestAnimationFrame(() => $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" })); } });
+    if (state.planning.interactions?.length) entries.push({ label: `处理待审批与回答 · ${state.planning.interactions.length} 项`, hint: title, run: async () => { await planTab("execution"); if (state.route?.tab === "execution") requestAnimationFrame(() => $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" })); } });
+    const runtimeTasks = state.planning.session?.tasks || [];
+    for (const item of state.planning.draft?.plan?.tasks || []) {
+      const task = item.task, runtime = runtimeTasks.find(candidate => candidate.taskId === task.id);
+      const execution = runtime?.currentAttempt?.execution || runtime?.execution || task.execution || {};
+      const status = statuses[runtime?.status] || runtime?.status || "待执行";
+      entries.push({
+        label: `任务 ${task.id} · ${task.title || task.id}`,
+        hint: `${status} · ${execution.runnerId || "Runner 未设置"} / ${runtime?.currentAttempt?.reportedModel || execution.modelId || "默认模型"}`,
+        run: async () => { await planTab("execution"); if (state.route?.tab === "execution") showDagTaskDetails(task.id); },
+      });
+    }
   }
   return entries;
 }
