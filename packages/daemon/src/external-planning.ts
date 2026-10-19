@@ -28,6 +28,7 @@ export interface PrepareExternalInput {
   role: "plan" | "review"; planningId?: string; message?: string; model?: string; reviewerConfig?: PlannerConfig;
   executionDefaults?: ExecutionConfig; retry?: boolean; operation?: boolean; coordinated?: boolean; target?: WebSource; reusePending?: boolean;
   sourcePlanning?: PlannerConversationSnapshot["sourcePlanning"];
+  plannerConfig?: PlannerConfig;
 }
 
 /** Persisted bridge operations; no model call, browser scraping, or waiting domain lock. */
@@ -67,7 +68,8 @@ export class ExternalPlanningService {
       const workspace = await this.service.getWorkspace(workspaceId);
       const snapshot = await new PlannerStore(workspace.path).load(id);
       const coordinated = input.coordinated || snapshot.config.provider === "web-mcp" || !!(await this.handoffs.load(workspaceId, id, "plan")) || !!(await this.handoffs.load(workspaceId, id, "review"));
-      if (input.role === "plan" && !["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider)) throw new Error("external_provider_invalid：不能把 API 规划悄悄改成网页规划");
+      if (input.plannerConfig && actor) throw new Error("external_provider_forbidden：只有本机操作可以选择规划方式");
+      if (input.role === "plan" && !input.plannerConfig && !["chatgpt-mcp", "web-mcp"].includes(snapshot.config.provider)) throw new Error("external_provider_invalid：不能把 API 规划悄悄改成网页规划");
       let preparation: ExternalPlannerPreparation | undefined;
       const previousSlot = coordinated ? await this.handoffs.load(workspaceId, id, input.role) : undefined;
       await actor?.assertActive?.();
@@ -109,6 +111,7 @@ export class ExternalPlanningService {
         const operationInput = input.reusePending && pending.length ? pending.at(-1)!.operation : input.operation ?? prior?.operation ?? false;
         if (coordinated && !pending.some((item) => item.messageId === messageId)) pending.push({ messageId, content: message, operation: operationInput });
         preparation = await prepareExternalPlannerInput({ planningId: id, workspace: workspace.path, message,
+          ...(input.plannerConfig ? { plannerConfig: input.plannerConfig } : {}),
           ...(prior ? { retryMessageId: prior.messageId } : { messageId }), operation: operationInput,
           ...(coordinated ? { messages: pending } : {}) });
       } else {

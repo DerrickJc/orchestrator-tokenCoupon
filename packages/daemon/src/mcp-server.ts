@@ -143,7 +143,7 @@ export function createMcpServer(service: ApplicationService, principal?: RemoteM
     const workspace = await service.getWorkspace(input.workspaceId);
     if (input.planningId) {
       const view = await service.planningView(workspace, input.planningId) as Record<string, unknown>;
-      const { messages: _messages, turns: _turns, session: _session, ...context } = view;
+      const { messages: _messages, turns: _turns, session: _session, localOperation: _localOperation, ...context } = view;
       return context;
     }
     const plans = await service.listPlannings(input.workspaceId) as Array<Record<string, unknown>>;
@@ -152,7 +152,8 @@ export function createMcpServer(service: ApplicationService, principal?: RemoteM
   if (canUse("planning:read")) server.registerTool("operation_query", { description: "只读查询此获准项目中已接受的后台操作。请求断线后查询原 jobId，不盲目重新执行。", inputSchema: z.object({ workspaceId, jobId: uuid }).strict(), annotations: readOnly }, (input) => guard("operation_query", async () => {
     requireAccess(input.workspaceId, "planning:read");
     await service.getWorkspace(input.workspaceId); const job = await service.getJob(input.jobId);
-    if (job.workspaceId !== input.workspaceId) throw new Error("job_not_found：操作不属于项目"); return job;
+    if (job.workspaceId !== input.workspaceId) throw new Error("job_not_found：操作不属于项目");
+    const { progress: _progress, ...receipt } = job; return receipt;
   }));
   if (canUse("session:read")) server.registerTool("session_query", {
     description: "只读观测 Session、任务状态和等待人工处理。knownRevision 相同时等待语义变化，最多 20 秒；普通日志不改变 revision。完整快照按需 includeResult=true。",

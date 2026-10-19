@@ -40,6 +40,8 @@ export type { ContinueLandingOptions, PlanRunOptions, RetryOptions, SessionClean
 export { DEFAULT_REPOSITORY_OUTPUT_BUDGET, RepositoryReader, repositoryToolDefinitions, verifyRepositoryEvidence } from "./repository-reader.js";
 export { PlannerStore, PlannerLockError, canonicalHash, validateDraft } from "./planner-store.js";
 export { ReviewStore, validateReviewRecord } from "./review-store.js";
+export { PlannerInvocationError } from "./planner-runtime.js";
+export type { PlannerEventObserver } from "./planner-runtime.js";
 export { reviewPlannerDraft, loadCurrentPlanReview, createPlanReviewer, requirementsHash, reviewerConfigHash } from "./plan-review.js";
 export { MockPlanner, MockPlanReviewer } from "./planners/mock-planner.js";
 export { DeepSeekPlanner, PlannerApiError } from "./planners/deepseek-planner.js";

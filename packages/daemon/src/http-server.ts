@@ -116,7 +116,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       if (request.method === "POST") { sendJson(response, 200, await service.saveSystemSettings(await readJsonBody(request))); return; }
     }
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -277,7 +277,8 @@ export async function createLocalServer(service: ApplicationService, options: { 
         if (!target) throw new Error("handoff_target_invalid");
         job = await service.external.handoff(workspaceId!, planningId!, key, role, target, optionalString(body.reason, "reason", 1024));
       }
-      else if (action === "replies") job = await service.reply(workspaceId!, planningId!, key, stringField(body.message, "message", 8192));
+      else if (action === "replies") job = await service.reply(workspaceId!, planningId!, key, stringField(body.message, "message", 8192), operationSelection(body.planner));
+      else if (action === "web-continue") job = await service.prepareWebContinuation(workspaceId!, planningId!, key);
       else if (action === "review") {
         const reviewer = body.reviewer === undefined ? {} : objectField(body.reviewer, "reviewer");
         job = await service.review(workspaceId!, planningId!, key, {
@@ -293,7 +294,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
         if (body.plan !== undefined && body.edits !== undefined) throw new Error("draft_edit_invalid：只能提交字段补丁，不能同时提交完整计划");
         job = await service.saveDraft(workspaceId!, planningId!, key, { ...(body.edits !== undefined ? { edits: body.edits } : { plan: body.plan }), expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1), expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64) });
       }
-      else if (action === "revise") job = await service.revise(workspaceId!, planningId!, key, { message: stringField(body.message, "message", 8192), reviewId: stringField(body.reviewId, "reviewId", 64), expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64), expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1) });
+      else if (action === "revise") job = await service.revise(workspaceId!, planningId!, key, { message: stringField(body.message, "message", 8192), reviewId: stringField(body.reviewId, "reviewId", 64), expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64), expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1), planner: operationSelection(body.planner) });
       else { sendJson(response, 404, { error: "operation_not_found" }); return; }
       sendJson(response, 202, job); return;
     }
@@ -357,6 +358,12 @@ function requestKey(request: IncomingMessage, body: Record<string, unknown>): st
   const value = request.headers["idempotency-key"] ?? body.requestKey;
   if (typeof value !== "string") throw new Error("idempotency_key_required：请求缺少 requestKey");
   return value;
+}
+function operationSelection(value: unknown): { mode?: string; model?: string } {
+  if (value === undefined) return {};
+  const item = objectField(value, "planner");
+  if (Object.keys(item).some(key => !["mode", "model"].includes(key))) throw new Error("planner_selection_invalid");
+  return { ...(item.mode === undefined ? {} : { mode: stringField(item.mode, "planner.mode", 40) }), ...(item.model === undefined ? {} : { model: stringField(item.model, "planner.model", 120) }) };
 }
 function objectField(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name}_invalid：必须是对象`);

@@ -10,6 +10,43 @@ export interface NativePickerResult { cancelled: boolean; paths: string[]; }
 const execute = promisify(execFile);
 let opening = false;
 
+const desktopAccessSource = String.raw`using System;
+using System.Text;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+namespace TokenCoupon {
+    public static class DesktopAccess {
+        [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+        [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
+        [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder text, uint length, out uint needed);
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+        static string Name(IntPtr desktop) {
+            var text = new StringBuilder(256); uint needed;
+            return GetUserObjectInformation(desktop, 2, text, 512, out needed) ? text.ToString() : "";
+        }
+        public static bool Available() {
+            if (!Environment.UserInteractive) return false;
+            var input = OpenInputDesktop(0, false, 1);
+            if (input == IntPtr.Zero) return false;
+            try {
+                string name = Name(input);
+                if (name.Length == 0 || name != Name(GetThreadDesktop(GetCurrentThreadId()))) return false;
+                uint process; GetWindowThreadProcessId(GetForegroundWindow(), out process);
+                if (process != 0) {
+                    try {
+                        string app = Process.GetProcessById((int)process).ProcessName;
+                        if (app.Equals("LockApp", StringComparison.OrdinalIgnoreCase) || app.Equals("LogonUI", StringComparison.OrdinalIgnoreCase)) return false;
+                    } catch (ArgumentException) { }
+                }
+                return true;
+            } finally { CloseDesktop(input); }
+        }
+    }
+}`;
+
 // Windows PowerShell 5 uses .NET Framework's legacy FolderBrowserDialog.
 // Call the Common Item Dialog directly so no PowerShell/.NET upgrade is required.
 // COM methods must stay in native vtable order, including the unused slots.
@@ -90,7 +127,7 @@ namespace TokenCoupon {
 
 export function nativePickerCapability() {
   const env = workspaceEnvironment();
-  return { available: env.platform === "win32" || env.isWsl, kind: "windows-native", note: "在运行后台的 Windows 桌面打开系统选择框；WSL 通过 PowerShell 调用。取消选择不会创建工作区。" };
+  return { available: env.platform === "win32" || env.isWsl, kind: "windows-native", note: "窗口只在运行后台的 Windows 已解锁桌面打开；远程终端／另一台电脑不会收到此窗口，请浏览后台目录。取消选择不会创建工作区。" };
 }
 export function nativePickerScript(kind: NativePickerKind, requestId?: string) {
   if (requestId && !/^[a-f0-9-]{36}$/.test(requestId)) throw new Error("native_picker_request_invalid");
@@ -100,6 +137,10 @@ ${requestId ? `$tokenCouponPickerId = '${requestId}'` : ""}
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 Write-Output 'TOKEN_COUPON_PICKER:starting'
+Add-Type -TypeDefinition @'
+${desktopAccessSource}
+'@
+if (![TokenCoupon.DesktopAccess]::Available()) { throw 'TOKEN_COUPON_DESKTOP_UNAVAILABLE' }
 Add-Type -AssemblyName System.Windows.Forms
 ${kind === "directory" ? `Add-Type -TypeDefinition @'
 ${folderPickerSource}
@@ -145,7 +186,7 @@ export async function pickNativePath(kind: NativePickerKind, signal?: AbortSigna
     if (typeof data.cancelled !== "boolean" || !Array.isArray(data.paths) || data.paths.length > 100 || data.paths.some(path => typeof path !== "string")) throw new Error("invalid_picker_reply");
     return data;
   } catch (error) {
-    const failure = error as { code?: string; killed?: boolean; stdout?: string };
+    const failure = error as { code?: string; killed?: boolean; stdout?: string; stderr?: string };
     if (signal?.aborted || failure.killed) {
       // Killing WSL's interop relay alone may leave a Windows GUI process alive.
       // Match only this invocation's host-generated marker; never kill other pickers.
@@ -155,6 +196,7 @@ export async function pickNativePath(kind: NativePickerKind, signal?: AbortSigna
       throw new Error("native_picker_timeout：文件夹选择等待超过 5 分钟，已请求关闭窗口。请重新选择或手动填写路径。");
     }
     if (failure.code === "ENOENT") throw new Error("native_picker_unavailable：未找到 Windows PowerShell，请确认 WSL 的 Windows 互操作可用；也可手动填写路径。");
+    if (failure.stderr?.includes("TOKEN_COUPON_DESKTOP_UNAVAILABLE")) throw new Error("native_picker_desktop_unavailable：后台主机的 Windows 桌面已锁定或不可交互。请先解锁后台主机；远程使用请浏览后台目录，原生窗口不会出现在当前电脑。");
     const phase = failure.stdout?.includes("TOKEN_COUPON_PICKER:dialog") ? "系统窗口返回失败" : failure.stdout?.includes("TOKEN_COUPON_PICKER:starting") ? "Windows 选择器初始化失败" : "Windows PowerShell 未正常启动";
     throw new Error(`native_picker_failed：${phase}。请确认后台运行在有桌面的 Windows／WSL 会话；也可手动填写路径。`);
   }

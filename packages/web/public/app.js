@@ -581,6 +581,11 @@ async function applyRoute(path, replace = false) {
   }
   const sequence = state.navigationSequence = (state.navigationSequence || 0) + 1;
   try {
+    if (state.systemSettingsSupported && ["new", "plan", "settings"].includes(route.page)) {
+      const settings = await api("/api/v1/settings");
+      if (sequence !== state.navigationSequence) return;
+      if (!state.systemSettings || settings.revision >= state.systemSettings.revision) state.systemSettings = settings;
+    }
     if (route.workspaceId && !state.workspaces.some(item => item.workspaceId === route.workspaceId)) throw new Error("该工作区未登记，请重新选择。");
     state.route = route;
     if (previous?.workspaceId !== route.workspaceId || previous?.planningId !== route.planningId) {
@@ -606,7 +611,8 @@ async function applyRoute(path, replace = false) {
     }
     renderRoute(); renderPlanningList();
     if (route.page === "settings") renderSystemSettings();
-    if (route.page === "new" && (previous?.page !== "new" || previous.workspaceId !== route.workspaceId)) applyPlanningPolicy();
+    if (route.page === "new" && (previous?.page !== "new" || previous.workspaceId !== route.workspaceId || state.resetPlanningPolicy)) { applyPlanningPolicy(); state.resetPlanningPolicy = false; }
+    if (route.page === "plan" && state.planning) { renderReviewerControls(state.planning); renderRequirements(); renderReview(); renderPlanOverview(); renderPlanWorkflowBanner(); }
     if (route.page === "plan" && previous?.page === "plan" && previous.planningId === route.planningId && previous.tab !== route.tab) $(`#${route.tab}-tab`)?.scrollIntoView({ block: "start" });
     if (route.page === "new" && previous?.page !== "new") (isWebMcp($("#planner-provider").value) ? $("#copy-web-planning") : $("#request-text")).focus();
   } catch (error) {
@@ -640,6 +646,7 @@ function renderRoute() {
   document.title = route.page === "plan" ? `${state.planning?.draft?.plan?.title || "Plan"} · Token Coupon` : `${$("#project-title").textContent} · Token Coupon`;
   closeNavigation();
   renderExecutionFloatingStatus();
+  renderPlanningProgress();
   clearInputFeedback();
   if ($("#page-error").dataset.context && !["global", `${state.workspace?.workspaceId || ""}:${state.planning?.planningId || ""}`].includes($("#page-error").dataset.context)) show($("#page-error"), false);
   if (route.page !== "plan") show($("#selection-feedback"), false);
@@ -797,12 +804,13 @@ function renderPlanOverview() {
   $("#plan-stage").className = `badge ${statusClass(session?.status || plan.status)}`;
   $("#plan-next-action").textContent = session ? waiting ? "Runner 正在等待你的批准或回答，进入执行页处理。" : "进入执行与结果页查看任务状态、恢复操作和交付证据。" : plan.status === "approved" ? "草案已批准。查看本次并发与隔离配置后，到执行页运行。" : review?.current ? "核对审查结论和必要的豁免记录，然后在审查页批准。" : plan.draft ? "查看草案；在网页继续审查，提交有效报告后再批准。" : "到已连接的网页继续需求澄清与规划。可复制下方提示，在新会话恢复同一 Plan。";
   if (plan.workflow) $("#plan-next-action").textContent = plan.workflow.detail;
+  if (!session && !plan.workflow?.role && !review?.current && !selectedOperationIsWeb("review")) $("#plan-next-action").textContent = plan.draft ? "在审查与修订页点击所选 Agent／API 的审查按钮，核对结果后再批准。" : "在本机回答澄清或补充需求，继续规划。";
   $("#plan-summary").innerHTML = `<div><strong>${plan.draft?.plan?.tasks?.length || 0}</strong><span>计划任务</span></div><div><strong>${session?.tasks?.filter(task => task.status === "succeeded").length || 0}</strong><span>执行完成</span></div><div><strong>${review?.current ? "有效" : review ? "已过期" : "待提交"}</strong><span>审查报告</span></div>`;
   const approved = plan.workflow ? plan.workflow.stage === "approved" : plan.status === "approved";
   const target = session || approved ? "execution" : review?.current || plan.workflow?.role === "review" || plan.workflow?.stage?.startsWith("review_") ? "review" : plan.draft ? "draft" : "overview";
   $("#plan-primary-action").textContent = target === "execution" ? "查看执行与结果" : target === "review" ? "核对并批准" : target === "draft" ? "查看草案" : "复制网页继续提示";
   $("#plan-primary-action").onclick = () => target === "overview" ? $("#copy-plan-resume").click() : planTab(target);
-  $("#copy-plan-resume").disabled = !isWebMcp(plan.config.provider);
+  $("#copy-plan-resume").disabled = !isWebMcp(plan.config.provider) && !(plan.handoffs || []).length;
 }
 function renderReference() {
   const root = $("#reference-summary"); if (!root) return;
@@ -825,13 +833,21 @@ async function copyResumePrompt() {
 
 function functionPolicy(name) {
   const settings = state.systemSettings;
-  return settings?.initialized ? settings.mode === "unified" ? settings.unified : settings.functions[name] : null;
+  return settings?.initialized ? settings.mode === "unified" ? settings.unified : settings.functions[name] || (name === "revision" ? settings.functions.planning : null) : null;
+}
+function policySelection(name) {
+  const policy = functionPolicy(name); if (!policy) return null;
+  return policy.priority === "web" ? { mode: `web-${policy.webSource}` } : { mode: policy.agent.runnerId === "claude-code" ? "claude-agent" : "codex-agent", model: policy.agent.modelId || "runner-default" };
+}
+function selectedOperationIsWeb(name) {
+  const selection = name === "review" ? { mode: $("#reviewer-mode")?.value || "planning" } : policySelection(name);
+  return selection && selection.mode !== "planning" ? selection.mode.startsWith("web-") : isWebMcp(state.planning?.config.provider);
 }
 function applyPlanningPolicy() {
   const policy = functionPolicy("planning"); if (!policy) return;
-  const provider = policy.priority === "web" ? policy.webSource === "claude" ? "claude-mcp" : "chatgpt-mcp" : policy.agent.runnerId === "claude-code" ? "claude-agent" : "codex-agent";
+  const provider = policy.priority === "web" ? policy.webSource === "claude" ? "claude-mcp" : [...$("#planner-provider").options].some(option => option.value === "web-mcp") ? "web-mcp" : "chatgpt-mcp" : policy.agent.runnerId === "claude-code" ? "claude-agent" : "codex-agent";
   const select = $("#planner-provider");
-  if (![...select.options].some(option => option.value === provider)) return;
+  if (![...select.options].some(option => option.value === provider)) { showToast("默认规划方式未在当前后台提供，请检查系统设置与后台版本。", true); return; }
   select.value = provider; select.dispatchEvent(new Event("change"));
   if (policy.priority === "agent") $("#planner-model").value = policy.agent.modelId || "runner-default";
 }
@@ -851,8 +867,8 @@ function renderWorkspaceSettings() {
 function renderSystemSettings() {
   const root = $("#system-settings-policies"), status = $("#system-settings-status");
   const saved = state.systemSettings;
-  if (!state.systemSettingsSupported || !saved) {
-    status.textContent = "当前后台尚未提供系统设置。请重启后台并刷新后再配置。";
+  if (!state.systemSettingsSupported || !saved || !state.operationRoutingSupported) {
+    status.textContent = "当前后台尚未加载完整的功能路由设置。请重启后台并刷新后再配置。";
     $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; root.replaceChildren(); return;
   }
   const draft = state.settingsDraft = structuredClone(saved);
@@ -866,7 +882,8 @@ function renderSystemSettings() {
 function renderSystemPolicyFields() {
   const draft = state.settingsDraft, root = $("#system-settings-policies"); root.replaceChildren();
   if (!draft) return;
-  const names = draft.mode === "unified" ? [["unified", "所有功能"]] : [["planning", "规划"], ["review", "审查"], ["diagnosis", "错误分析"]];
+  draft.functions.revision ??= structuredClone(draft.functions.planning);
+  const names = draft.mode === "unified" ? [["unified", "所有功能"]] : [["planning", "规划"], ["review", "审查"], ["revision", "修订"], ["diagnosis", "错误分析"]];
   for (const [name, title] of names) {
     const policy = name === "unified" ? draft.unified : draft.functions[name];
     const card = document.createElement("fieldset"); card.className = "policy-card"; card.dataset.function = name;
@@ -912,6 +929,8 @@ async function init() {
     state.environment = health.workspaceEnvironment;
     state.executionSelectionSupported = health.capabilities?.executionSelection === 1;
     state.systemSettingsSupported = health.capabilities?.systemSettings === 1;
+    state.operationRoutingSupported = health.capabilities?.operationRouting === 1;
+    state.plannerProgressSupported = health.capabilities?.plannerProgress === 1;
     if (state.systemSettingsSupported) state.systemSettings = await api("/api/v1/settings");
     if (health.mcp?.localReady) { $("#mcp-local-address").textContent = `本机 MCP 地址：${health.mcp.url}`; show($("#mcp-connection")); }
     const environment = state.environment;
@@ -987,7 +1006,7 @@ function renderRunners() {
 function renderModelPicker(prefix, catalog, current, defaultLabel) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`);
   select.replaceChildren(new Option(defaultLabel, ""));
-  for (const model of catalog.models || []) select.add(new Option(`${model.label}${model.label !== model.id ? ` · ${model.id}` : ""}${model.isDefault ? "（工具推荐）" : ""}`, model.id));
+  for (const model of catalog.models || []) select.add(new Option(`${model.label || model.id}${model.label && model.label !== model.id ? ` · ${model.id}` : ""}${model.isDefault ? "（工具推荐）" : ""}`, model.id));
   if (catalog.customAllowed) select.add(new Option(prefix === "planner" && isWebMcp($("#planner-provider").value) ? "记录网页模型名称…" : "自定义模型 ID…", "__custom__"));
   select.value = current && [...select.options].some(option => option.value === current) ? current : current && catalog.customAllowed ? "__custom__" : "";
   input.value = catalog.customAllowed || catalog.models?.some(model => model.id === current) ? current : "";
@@ -1049,6 +1068,32 @@ function renderWorkspaces() {
   }
 }
 
+function planningListStatus(planning) {
+  const sessionStatus = planning.session?.status;
+  const terminal = ["succeeded", "failed", "cancelled", "interrupted", "unavailable"];
+  if (sessionStatus && terminal.includes(sessionStatus)) return { label: statuses[sessionStatus], tone: statusClass(sessionStatus) };
+  const pending = planning.interactions || [];
+  if (pending.length) return { label: pending.some(item => item.request?.kind === "approval") ? "待审批" : "待回答", tone: "badge-warning" };
+  if (sessionStatus) return { label: statuses[sessionStatus] || "状态待核验", tone: statusClass(sessionStatus) };
+  if (planning.turns?.at(-1)?.status === "running") return { label: "规划中", tone: "badge-warning" };
+  if (planning.review?.status === "running") return { label: "审查中", tone: "badge-warning" };
+  const stage = planning.workflow?.stage;
+  const stages = {
+    awaiting_approval: "待批准", approved: "待执行", awaiting_review: "待审查", review_stale: "待复审",
+    review_prepared: "待网页审查", review_owned: "网页审查中", review_submitting: "审查校验中",
+    plan_prepared: "待网页规划", plan_owned: "网页规划中", plan_submitting: "规划校验中", plan_needs_continue: "待继续规划",
+  };
+  if (stages[stage]) return { label: stages[stage], tone: stage === "approved" ? "badge-success" : "badge-warning" };
+  const label = planning.status === "approved" ? "待执行" : planning.review?.current && planning.review.status === "succeeded" ? "待批准" : planning.draft ? "待审查" : "待规划";
+  return { label, tone: "badge-neutral" };
+}
+function planningCreationTime(planning) {
+  const value = planning.createdAt;
+  const date = typeof value === "string" && value.trim() ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return '<span class="planning-created">创建时间未记录</span>';
+  const text = date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  return `<time class="planning-created" datetime="${esc(date.toISOString())}" title="${esc(date.toLocaleString())}">创建 ${esc(text)}</time>`;
+}
 function renderPlanningList() {
   const root = $("#planning-list"); root.replaceChildren();
   const cards = $("#workspace-plan-cards"); cards.replaceChildren();
@@ -1056,7 +1101,9 @@ function renderPlanningList() {
   for (const planning of state.plannings) {
     const button = document.createElement("button"); button.className = `workspace-item ${state.planning?.planningId === planning.planningId ? "active" : ""}`;
     const title = planning.draft?.plan?.title || planning.messages?.[0]?.content?.slice(0, 28) || "新规划";
-    button.innerHTML = `<span class="workspace-glyph">↗</span><span>${esc(title)}<small class="muted small">${esc(planning.workflow?.label || statuses[planning.session?.status] || statuses[planning.status] || planning.status)}</small></span>`;
+    const status = planningListStatus(planning), created = planningCreationTime(planning);
+    button.title = `${title} · ${planning.workflow?.label || status.label}`;
+    button.innerHTML = `<span class="workspace-glyph" aria-hidden="true">↗</span><span class="planning-list-copy"><span class="planning-list-title">${esc(title)}</span><span class="planning-list-state badge ${status.tone}">${esc(status.label)}</span>${created}</span>`;
     button.setAttribute("aria-current", state.planning?.planningId === planning.planningId ? "page" : "false"); button.addEventListener("click", () => void selectPlanning(planning.planningId)); root.append(button);
     const tools = document.createElement("details"); tools.className = "plan-tools"; tools.dataset.planningId = planning.planningId;
     const identity = `${state.workspace.workspaceId}:${planning.planningId}`;
@@ -1069,7 +1116,7 @@ function renderPlanningList() {
     }
     tools.addEventListener("toggle", () => { if (tools.isConnected) state.planToolsExpanded.set(identity, tools.open); }); root.append(tools);
     const card = document.createElement("button"); card.className = `project-card ${state.planning?.planningId === planning.planningId ? "selected" : ""}`; card.setAttribute("aria-pressed", String(state.planning?.planningId === planning.planningId));
-    card.innerHTML = `<span class="badge ${statusClass(planning.session?.status || planning.status)}">${esc(planning.workflow?.label || statuses[planning.session?.status] || statuses[planning.status] || planning.status)}</span><strong>${esc(title)}</strong><span class="muted small">${planning.draft?.plan?.tasks?.length || 0} 个任务</span><span class="card-link">打开计划 →</span>`;
+    card.innerHTML = `<span class="badge ${status.tone}">${esc(status.label)}</span><strong>${esc(title)}</strong><span class="muted small">${planning.draft?.plan?.tasks?.length || 0} 个任务</span>${created}<span class="card-link">打开计划 →</span>`;
     card.addEventListener("click", () => void selectPlanning(planning.planningId)); cards.append(card);
   }
   if (!state.plannings.length) cards.innerHTML = '<div class="empty-state">还没有 Plan。新建规划，或在网页通过 MCP 提交，之后会出现在这里。</div>';
@@ -1083,6 +1130,7 @@ async function loadWorkspace(workspaceId, sequence = state.navigationSequence) {
   if (state.workspace?.workspaceId !== workspaceId || sequence !== state.navigationSequence) return;
   state.plannings = plannings;
   renderPlanningList();
+  void restorePlanningProgress(workspaceId, sequence);
 }
 function connectEvents() {
   clearTimeout(state.reconnectTimer);
@@ -1099,13 +1147,14 @@ function connectEvents() {
     state.reconnectAttempts += 1; state.reconnectTimer = setTimeout(connectEvents, delay);
   };
   state.eventSource.onmessage = (event) => consumeEvent(event);
-  for (const type of ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"]) {
+  for (const type of ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.progress", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"]) {
     state.eventSource.addEventListener(type, (event) => consumeEvent(event));
   }
 }
 function consumeEvent(event) {
   let data; try { data = JSON.parse(event.data); } catch { return; }
   const sequence = Number(event.lastEventId || data.sequence); if (Number.isFinite(sequence)) state.lastEventId = Math.max(state.lastEventId, sequence);
+  if (data.type === "planning.progress") { consumePlanningProgress(data); return; }
   if (data.workspaceId === state.workspace?.workspaceId && data.planningId === state.planning?.planningId) logPlanEvent(data);
   if (data.type === "task.model-switch.waiting" && data.workspaceId === state.workspace?.workspaceId && data.planningId === state.planning?.planningId) { $("#job-label").textContent = data.payload?.message || "目标任务正在收尾，等待安全重试"; show($("#job-bar")); }
   if (data.type?.startsWith("remote_")) void refreshRemoteConnection();
@@ -1170,6 +1219,10 @@ async function loadPlanning(planningId) {
   const planning = await api(`/api/v1/workspaces/${workspaceId}/plannings/${planningId}`);
   if (workspaceId !== state.workspace?.workspaceId || sequence !== state.navigationSequence || state.route?.planningId !== planningId) return;
   state.planning = planning;
+  if (state.plannerProgressSupported && planning.localOperation) {
+    const operation = planning.localOperation;
+    if (!state.activeJob || state.activeJob.jobId === operation.jobId) acceptPlanningJob(operation);
+  }
   sessionStorage.setItem(`tc-planning-${state.workspace.workspaceId}`, planningId);
   renderPlanningList();
   if (changed) { for (const details of document.querySelectorAll("#overview-tab details")) details.open = false; $("#plan-logs-details").open = false; $("#event-log").replaceChildren(); state.loggedPlanEvents = new Set(); }
@@ -1496,6 +1549,7 @@ function renderRunConfiguration() {
 }
 function startNewTask() {
   if (!state.workspace) return;
+  state.resetPlanningPolicy = true;
   return navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/new`);
 }
 async function refreshAll() {
@@ -1539,19 +1593,33 @@ function renderPlanning() {
   renderReviewerControls(plan);
   const canEdit = !!plan.draft && !plan.execution;
   $("#configure-task-agents").disabled = !canEdit;
-  $("#toggle-plan-edit").disabled = !canEdit || state.savingPlan; $("#review-button").disabled = !plan.draft || !!plan.execution;
+  $("#toggle-plan-edit").disabled = !canEdit || state.savingPlan; $("#review-button").disabled = !plan.draft || !!plan.execution || !!state.activeJob;
   $("#approve-button").disabled = !plan.draft || !plan.review?.current || plan.workflow?.role === "plan" || plan.status === "approved" || plan.status === "execution_created" || !!plan.execution;
   renderPlanOverview();
+  renderPlanWorkflowBanner();
+  show($("#waiver-label"), !!plan.review?.current && plan.review.findings?.some(item => item.severity === "error") && !plan.approval);
+}
+function renderPlanWorkflowBanner() {
+  const plan = state.planning; if (!plan) return;
   const banner = $("#plan-workflow-banner"); banner.replaceChildren();
   const heading = document.createElement("strong"); heading.textContent = plan.workflow?.label || $("#planning-status").textContent;
-  const detail = document.createElement("p"); detail.textContent = plan.workflow?.detail || $("#plan-next-action").textContent;
+  const detail = document.createElement("p"); detail.textContent = plan.workflow?.role ? plan.workflow.detail : $("#plan-next-action").textContent;
   banner.append(heading, detail);
+  const lastTurn = plan.turns?.at(-1);
+  if (["codex-agent", "claude-agent"].includes(plan.config.provider) && !plan.execution && !plan.localOperation?.progress && ["failed", "timed_out", "cancelled", "interrupted"].includes(lastTurn?.status) && !(plan.externalOperations || []).some(item => ["prepared", "submitting"].includes(item.state))) {
+    const note = document.createElement("p"); note.textContent = `上次规划轮次${statuses[lastTurn.status] || lastTurn.status}（${lastTurn.reasonCode || "原因见轮次日志"}）。可保留 Planning 和原始输入重试，无需新建规划。`;
+    const retry = document.createElement("button"); retry.id = "retry-planning-turn"; retry.type = "button"; retry.className = "button button-primary"; retry.textContent = "重试原规划";
+    retry.disabled = state.submittingJob || state.activeJob?.status === "running";
+    const workspaceId = state.workspace.workspaceId, planningId = plan.planningId;
+    retry.onclick = () => { if (state.workspace?.workspaceId === workspaceId && state.planning?.planningId === planningId) void startJob("重试规划", requestKey => api(`/api/v1/workspaces/${workspaceId}/plannings/${planningId}/planner-retry`, { method: "POST", body: JSON.stringify({ requestKey }) })); };
+    banner.append(note, retry);
+  }
   if (plan.approval && plan.approval.planHash === plan.draft?.planHash) {
     const approval = document.createElement("p"); approval.textContent = `已批准 draft-${plan.approval.draftRevision} · ${new Date(plan.approval.approvedAt).toLocaleString()} · 审查 ${shortId(plan.approval.reviewId)}`; banner.append(approval);
     if (!plan.execution && plan.review?.current && plan.workflow?.role !== "plan") { const run = document.createElement("button"); run.className = "button button-primary"; run.textContent = "查看配置并运行计划"; run.onclick = () => planTab("execution"); banner.append(run); }
   }
   if (plan.workflow?.approvalNotice) { const notice = document.createElement("p"); notice.textContent = plan.workflow.approvalNotice; banner.append(notice); }
-  if (state.route?.tab === "draft" && isWebMcp(plan.config.provider) && !plan.execution && (!plan.approval || !plan.review?.current || plan.workflow?.role === "plan") && (!plan.review?.current || plan.workflow?.role === "plan")) {
+  if (state.route?.tab === "draft" && (plan.workflow?.role === "plan" || selectedOperationIsWeb("review")) && !plan.execution && (!plan.approval || !plan.review?.current || plan.workflow?.role === "plan") && (!plan.review?.current || plan.workflow?.role === "plan")) {
     const resume = document.createElement("button"); resume.className = "button button-primary"; resume.textContent = "复制继续当前计划并复审提示"; resume.onclick = copyResumePrompt; banner.append(resume);
   }
   banner.classList.toggle("notice-success", !!plan.approval && !!plan.review?.current && !plan.execution && plan.workflow?.role !== "plan");
@@ -1583,7 +1651,7 @@ function renderReviewerControls(plan) {
     $("#reviewer-model-choice").addEventListener("change", () => applyModelChoice("reviewer"));
   }
   const reviewKey = `${plan.planningId}:${state.systemSettings?.revision || 0}`;
-  if (state.reviewerPolicyKey !== reviewKey && functionPolicy("review") && plan.workflow?.role !== "review") {
+  if (state.reviewerPolicyKey !== reviewKey && functionPolicy("review")) {
     const policy = functionPolicy("review");
     select.value = policy.priority === "web" ? `web-${policy.webSource}` : policy.agent.runnerId === "claude-code" ? "claude-agent" : "codex-agent";
     $("#reviewer-model").value = policy.priority === "agent" ? policy.agent.modelId || "" : "";
@@ -1595,7 +1663,7 @@ function renderReviewerControls(plan) {
   const web = mode === "web-chatgpt" || mode === "web-claude" || mode === "planning" && isWebMcp(plan.config.provider);
   const model = ["codex-agent", "claude-agent", "deepseek-api", "web-chatgpt", "web-claude"].includes(mode);
   show($("#reviewer-model-wrap"), model);
-  $("#review-button").textContent = web ? plan.workflow?.role === "review" ? "继续当前审查" : plan.review?.current ? "重新准备网页审查" : "准备网页审查" : "运行审查";
+  $("#review-button").textContent = web ? plan.workflow?.role === "review" ? "继续当前审查" : plan.review?.current ? "重新准备网页审查" : "准备网页审查" : mode === "codex-agent" ? "使用 Codex 审查" : mode === "claude-agent" ? "使用 Claude Code 审查" : "运行审查";
   const hints = {
     planning: isWebMcp(plan.config.provider) ? "沿用当前网页规划方式；点击后在网页领取审查操作。" : isLocalPlanner(plan.config.provider) ? "沿用本机 Agent，调用可能使用已登录账号额度；只读审查，不写文件、不审批、不执行任务。" : "沿用当前 API／离线规划方式；提交后立即调用所选模型。",
     "codex-agent": "调用可能使用本机 Codex 登录账号的额度；使用 read-only sandbox 审查，不修改计划或运行项目任务。",
@@ -1609,6 +1677,8 @@ function renderReviewerControls(plan) {
     state.reviewerModelMode = mode;
     void runReviewModelCatalog(mode);
   }
+  renderReviewContinuation();
+  if (state.planning) { renderPlanOverview(); renderPlanWorkflowBanner(); }
 }
 
 async function runReviewModelCatalog(mode) {
@@ -1649,8 +1719,9 @@ async function runReviewModelCatalog(mode) {
 function isLocalPlanner(provider) { return provider === "codex-agent" || provider === "claude-agent"; }
 function renderHandoffs() {
   const root = $("#handoff-panel"); if (!root) return;
-  root.replaceChildren(); show(root, isWebMcp(state.planning.config.provider));
-  if (!isWebMcp(state.planning.config.provider)) return;
+  const web = isWebMcp(state.planning.config.provider) || (state.planning.handoffs || []).length > 0;
+  root.replaceChildren(); show(root, web);
+  if (!web) return;
   const heading = document.createElement("h3"); heading.textContent = "网页规划与审查交接"; root.append(heading);
   for (const slot of state.planning.handoffs || []) {
     const card = document.createElement("article"); card.className = "handoff-card";
@@ -1725,7 +1796,19 @@ async function confirmBudgetExtension() {
 function renderRequirements() {
   const pending = (state.planning.requirements?.items || []).filter((item) => item.status === "pending");
   $("#reply-text").placeholder = pending.length ? `还有 ${pending.length} 项需求待澄清，请回答 Planner 的问题` : "回答澄清问题，或补充需求";
-  const mcp = isWebMcp(state.planning.config.provider);
+  const mcp = selectedOperationIsWeb("planning");
+  let prepare = $("#prepare-web-planning");
+  if (!prepare) {
+    prepare = document.createElement("button"); prepare.id = "prepare-web-planning"; prepare.type = "button"; prepare.className = "button button-primary"; prepare.textContent = "准备网页继续当前规划";
+    prepare.addEventListener("click", async () => {
+      if (!state.operationRoutingSupported) { showToast("请重启后台并刷新页面，以切换网页规划方式。", true); return; }
+      const workspaceId = state.workspace.workspaceId, planningId = state.planning.planningId;
+      await startJob("准备网页继续规划", requestKey => api(`/api/v1/workspaces/${workspaceId}/plannings/${planningId}/web-continue`, { method: "POST", body: JSON.stringify({ requestKey }) }));
+    });
+    $("#supplement-input").before(prepare);
+  }
+  show(prepare, mcp && !isWebMcp(state.planning.config.provider) && !state.planning.execution);
+  prepare.disabled = !!state.activeJob;
   show($("#supplement-input"), !mcp);
   $("#supplement-input summary").textContent = mcp ? "登记补充需求（需要在网页继续）" : "回答澄清／补充需求";
   if (!mcp) $("#supplement-input").open = true;
@@ -1954,7 +2037,8 @@ function previewPlanDiff() {
 }
 function renderReview() {
   const plan = state.planning, review = plan.review, box = $("#review-view");
-  const signature = JSON.stringify([state.workspace.workspaceId, plan.planningId, plan.draft?.planHash, review, plan.workflow, plan.approval, plan.execution, plan.reviewHistory, plan.approvalHistory, plan.reviewReadError]);
+  renderReviewContinuation();
+  const signature = JSON.stringify([state.workspace.workspaceId, plan.planningId, plan.draft?.planHash, review, plan.workflow, plan.approval, plan.execution, plan.reviewHistory, plan.approvalHistory, plan.reviewReadError, state.systemSettings?.revision, state.activeJob?.jobId]);
   // A poll with no review change must not close an open select or move a typing cursor.
   if (state.renderedReviewSignature === signature) return;
   state.renderedReviewSignature = signature; box.replaceChildren();
@@ -1968,7 +2052,7 @@ function renderReview() {
   const summaryTitle = document.createElement("strong"); summaryTitle.textContent = review ? `${review.current ? "有效审查" : "审查已过期"} · draft-${review.draftRevision}` : plan.workflow?.label || "当前草案尚无有效审查";
   const reviewConfig = review?.reviewerConfig || plan.config;
   const reviewSource = review ? `审查来源：${({ deepseek: "DeepSeek API", mock: "离线模拟", "codex-agent": "Codex 本机 Agent", "claude-agent": "Claude Code 本机 Agent", "chatgpt-mcp": "ChatGPT 网页 MCP", "web-mcp": "Claude／网页 MCP" })[reviewConfig.provider] || reviewConfig.provider} · ${review.reviewerReportedModel ? `实际报告 ${review.reviewerReportedModel}` : `配置 ${reviewConfig.model}${["codex-agent", "claude-agent"].includes(reviewConfig.provider) ? "（Runner 未报告实际模型）" : ""}`}` : "";
-  const summaryText = document.createElement("p"); summaryText.textContent = review ? `${review.reviewId ? `Review ${shortId(review.reviewId)} · ` : ""}${review.summary || "无总结"}${reviewSource ? `\n${reviewSource}` : ""}` : plan.workflow?.detail || "先准备审查，再到网页领取并提交报告。";
+  const summaryText = document.createElement("p"); summaryText.textContent = review ? `${review.reviewId ? `Review ${shortId(review.reviewId)} · ` : ""}${review.summary || "无总结"}${reviewSource ? `\n${reviewSource}` : ""}` : !selectedOperationIsWeb("review") ? "点击上方审查按钮，调用所选本机 Agent／API 审查当前草案。有待处理网页审查时，先确认接管。" : plan.workflow?.detail || "先准备审查，再到网页领取并提交报告。";
   summary.append(summaryTitle, summaryText);
   box.append(summary);
   if (plan.reviewReadError) { const error = document.createElement("p"); error.className = "notice notice-warn"; error.textContent = `审查记录读取失败：${plan.reviewReadError}`; box.append(error); }
@@ -1994,7 +2078,11 @@ function renderReview() {
     box.append(history);
   }
   renderReviewActions(review);
-  const web = isWebMcp(plan.config.provider) && !plan.execution && (!plan.approval || !review?.current || plan.workflow?.role === "plan") && (!review?.current || plan.workflow?.role === "plan");
+}
+function renderReviewContinuation() {
+  const plan = state.planning; if (!plan) return;
+  const role = plan.workflow?.role === "plan" ? "revision" : "review";
+  const web = (plan.workflow?.role === "plan" || selectedOperationIsWeb(role)) && !plan.execution && (!plan.review?.current || plan.workflow?.role === "plan");
   show($("#web-continue"), web);
   $("#web-continue-status").textContent = "在已授权网页发送一次继续提示，接着完成修订与复审；本地页面会同步结果。";
 }
@@ -2013,10 +2101,14 @@ function renderReviewActions(review) {
   const root = $("#review-actions"); root.replaceChildren();
   if (!review?.current || !review.findings?.length || state.planning.execution || state.planning.approval || state.planning.workflow?.role === "plan") { show(root, false); return; }
   show(root);
-  const title = document.createElement("p"); title.className = "hint"; title.textContent = "选择对应建议后，一次提交全部修订；暂不处理不代表解决或豁免。"; root.append(title);
-  const button = document.createElement("button"); button.className = "button button-primary"; button.textContent = "合并提交修订建议"; button.addEventListener("click", () => submitReviewRevision(review)); root.append(button);
+  const title = document.createElement("p"); title.className = "hint"; title.textContent = state.activeJob ? "当前操作正在收尾，完成后可提交修订。" : "选择对应建议后，一次提交全部修订；暂不处理不代表解决或豁免。"; root.append(title);
+  const selection = policySelection("revision");
+  const method = document.createElement("p"); method.className = "hint"; method.textContent = selection ? `本次修订：${selection.mode === "codex-agent" ? "Codex Agent" : selection.mode === "claude-agent" ? "Claude Code Agent" : selection.mode === "web-claude" ? "Claude 网页" : "ChatGPT 网页"}${selection.model ? ` / ${selection.model}` : ""}。可在系统设置中修改修订默认方式。` : "本次修订沿用规划方式。";
+  const button = document.createElement("button"); button.className = "button button-primary"; button.textContent = selectedOperationIsWeb("revision") ? "提交修订建议，交给网页" : "调用 Agent 修订草案"; button.addEventListener("click", () => submitReviewRevision(review)); root.append(method, button);
+  button.disabled = !!state.activeJob;
 }
 async function submitReviewRevision(review) {
+  if (functionPolicy("revision") && !state.operationRoutingSupported) { showToast("后台尚未支持按设置切换修订方式，请重启后台并刷新页面。", true); return; }
   const actions = [...$("#review-view").querySelectorAll(".finding-choice")].map((row) => ({ findingId: row.dataset.findingId, choice: row.querySelector("select").value, custom: row.querySelector("textarea").value.trim() }));
   if (actions.some((item) => item.choice === "custom" && !item.custom)) {
     for (const row of $("#review-view").querySelectorAll(".finding-choice")) { const invalid = row.querySelector("select").value === "custom" && !row.querySelector("textarea").value.trim(); row.querySelector(".field-error").textContent = "请填写自定义修订说明"; show(row.querySelector(".field-error"), invalid); }
@@ -2030,7 +2122,8 @@ async function submitReviewRevision(review) {
     if (item.choice === "custom") return `${item.findingId}：自定义修订——${item.custom}`;
     return `${item.findingId}：暂不处理，保留问题并在新草案中说明；不得将其标记为已解决或豁免。`;
   }).join("\n");
-  await startJob("按审查意见修订草案", (requestKey) => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/revise`, { method: "POST", body: JSON.stringify({ requestKey, message, reviewId: review.reviewId, expectedPlanHash: state.planning.draft.planHash, expectedDraftRevision: state.planning.draft.draftRevision }) }));
+  const planner = policySelection("revision");
+  await startJob("按审查意见修订草案", (requestKey) => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/revise`, { method: "POST", body: JSON.stringify({ requestKey, message, reviewId: review.reviewId, expectedPlanHash: state.planning.draft.planHash, expectedDraftRevision: state.planning.draft.draftRevision, ...(planner ? { planner } : {}) }) }));
 }
 function executionConclusion(status, reasonCode) {
   return status === "succeeded" ? "完成结论：任务已成功完成" : status === "blocked" && reasonCode === "user_input_required" ? "等待决策：任务已按要求停止，等待补充信息或处理技术阻塞" : status === "interrupted" ? "中止结论：执行已中断，需核验后恢复" : status === "cancelled" ? "中止结论：任务已取消" : ["failed", "timed_out"].includes(status) ? `错误结论：${status === "timed_out" ? "执行超时" : "任务失败"}` : status === "unavailable" ? "执行状态待核验" : "";
@@ -2374,6 +2467,7 @@ function renderSession() {
 function openRevisionPlanning() {
   const plan = state.planning;
   if (!plan?.draft || !state.workspace) return;
+  if (functionPolicy("revision") && !state.operationRoutingSupported) { showToast("请重启后台并刷新页面，以使用指定的关联修订方式。", true); return; }
   if (!$("#revision-planning-dialog")) {
     const dialog = document.createElement("dialog"); dialog.id = "revision-planning-dialog"; dialog.className = "reference-dialog";
     dialog.innerHTML = `<div class="section-title"><h3>基于当前计划新建修订</h3><button type="button" class="text-button" id="revision-planning-close">取消</button></div><p id="revision-planning-source" class="hint"></p><p>原计划与执行记录保留。新建网页修订计划后，在 GPT／Claude 读取原计划和执行证据，补齐决策，再重新审查、批准。新计划不会直接继承完成状态或失败现场的文件。</p><label for="revision-planning-message">本次需要补充或调整什么？</label><textarea id="revision-planning-message" rows="4" maxlength="4096" placeholder="例如：授权在现有约束内补齐数据库与依赖选型；请先列出方案供我确认。"></textarea><p id="revision-planning-error" class="field-error" role="status"></p><button id="revision-planning-create" type="button" class="button button-primary">创建关联修订计划</button>`;
@@ -2382,6 +2476,7 @@ function openRevisionPlanning() {
   }
   state.revisionPlanningContext = { workspaceId: state.workspace.workspaceId, planningId: plan.planningId, expectedRevision: plan.revision, expectedPlanHash: plan.draft.planHash };
   $("#revision-planning-source").textContent = `${plan.draft.plan.title} · draft-${plan.draft.draftRevision} · ${shortId(plan.planningId)}`;
+  $("#revision-planning-source").nextElementSibling.textContent = selectedOperationIsWeb("revision") ? "原计划与执行记录保留。新建网页修订计划后，在所选网页继续规划与审查；新计划不会继承原批准或完成状态。" : "按修订设置调用本机 Agent，附带原计划与有效需求作为参考，生成关联新计划。原记录保留；新计划仍须重新审查、批准，不继承失败现场文件。";
   $("#revision-planning-error").textContent = ""; $("#revision-planning-message").value = "";
   $("#revision-planning-dialog").showModal();
 }
@@ -2394,7 +2489,7 @@ async function confirmRevisionPlanning() {
     if (job?.status !== "succeeded") { $("#revision-planning-error").textContent = job?.error || "尚未创建成功，请查看操作提示后重试。"; return; }
     $("#revision-planning-dialog").close();
     await loadPlanningListAndSelect(job.result.planningId);
-    showActionFeedback("已创建关联修订计划", "点击“复制网页继续提示”，在 GPT／Claude 补齐规划并审查；原 Session 保留，可从关联入口查看。");
+    showActionFeedback("已创建关联修订计划", selectedOperationIsWeb("revision") ? "复制网页继续提示，在所选网页补齐规划并审查；原 Session 保留。" : "本机 Agent 已返回关联修订结果。核对草案或澄清问题后继续；原 Session 保留。");
   } finally { button.disabled = false; }
 }
 function sessionContinueAction(session) {
@@ -2702,8 +2797,9 @@ async function openLocalAttemptDiagnosis(context) {
     if (!diagnosticContextIsCurrent(context)) return;
     const saved = selectedAttemptDiagnostic(context);
     const policy = functionPolicy("diagnosis");
-    $("#attempt-diagnosis-runner").value = saved?.runnerId || (policy?.priority === "agent" ? policy.agent.runnerId : ["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex");
-    await loadAttemptDiagnosticModels(context, saved ? saved.modelId || "" : policy?.priority === "agent" ? policy.agent.modelId || "" : (context.runnerId === $("#attempt-diagnosis-runner").value ? context.modelId : "") || "");
+    const usePolicy = policy?.priority === "agent" && saved?.status !== "running";
+    $("#attempt-diagnosis-runner").value = usePolicy ? policy.agent.runnerId : saved?.runnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex");
+    await loadAttemptDiagnosticModels(context, usePolicy ? policy.agent.modelId || "" : saved ? saved.modelId || "" : (context.runnerId === $("#attempt-diagnosis-runner").value ? context.modelId : "") || "");
     if (diagnosticContextIsCurrent(context)) { $("#attempt-diagnosis-status").textContent = saved ? "可继续讨论，或在下方切换模型后发送。" : "输入问题并发送后开始分析。"; $("#attempt-diagnosis-reply").value = context.unsentText || ""; }
   } catch (error) { if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = `暂时无法读取：${error.message}`; }
 }
@@ -3178,6 +3274,90 @@ function notifyPendingApprovals(items) {
 }
 function statusClass(status) { if (["succeeded", "approved"].includes(status)) return "badge-success"; if (["failed", "timed_out", "cancelled", "interrupted"].includes(status)) return "badge-error"; if (["running", "pausing", "blocked", "paused", "unavailable"].includes(status)) return "badge-warning"; return "badge-neutral"; }
 
+const planningStages = { preparing: "准备调用", starting: "启动 Agent", initializing: "初始化连接", waiting_model: "等待模型回复", receiving: "正在接收回复", validating: "校验回复", repairing: "自动修正回复", completed: "校验完成，正在保存", failed: "调用已结束，正在保存", cancelled: "取消收尾中" };
+function planningJobLabel(job) { return job.kind === "planning.review" ? "审查草案" : job.kind === "planning.retry" ? "重试规划" : job.kind === "planning.draft.revise" ? "修订草案" : "开始规划"; }
+function isPlanningJob(job) { return !!job?.progress && job.kind?.startsWith("planning.") && !["planning.run", "planning.approve", "planning.draft.save"].includes(job.kind); }
+function acceptPlanningJob(job) {
+  if (!isPlanningJob(job)) return;
+  const previous = state.planningProgressJob;
+  if (previous?.jobId === job.jobId && (previous.status !== "running" && job.status === "running" || Date.parse(previous.updatedAt) > Date.parse(job.updatedAt))) return;
+  state.planningProgressJob = job;
+  try { sessionStorage.setItem(`tc-planning-job-${job.workspaceId}`, job.jobId); } catch { /* Status remains available through the Plan view. */ }
+  const context = state.jobContexts?.get(job.jobId) || (state.jobContext?.jobId === job.jobId ? state.jobContext : null);
+  if (context && job.planningId) { context.planningId = job.planningId; renderJobPlanLink(context); }
+  renderPlanningProgress();
+}
+function renderPlanningProgress() {
+  let root = $("#planning-progress");
+  if (!root) {
+    root = document.createElement("section"); root.id = "planning-progress"; root.className = "card planning-progress hidden";
+    root.innerHTML = '<div class="section-title"><h3 id="planning-progress-title">本机规划进度</h3><span id="planning-progress-stage" class="badge badge-neutral" role="status" aria-live="polite"></span></div><div id="planning-progress-metrics" class="planning-progress-metrics"></div><p id="planning-progress-detail" class="hint"></p><p id="planning-progress-idle" class="notice notice-warn hidden" role="status"></p><div id="planning-progress-reply" class="hidden"><strong>最新模型回复 · 尚未通过校验</strong><p id="planning-progress-preview"></p></div><details id="planning-progress-raw" class="hidden"><summary>查看回复原文片段</summary><pre></pre></details><div class="button-row"><a id="planning-progress-open" class="button button-quiet">查看规划记录</a><button id="planning-progress-cancel" type="button" class="button button-quiet">取消本次调用</button><button id="planning-progress-retry" type="button" class="button button-primary hidden">在原规划重试</button></div>';
+    $("#operation-status-stack").after(root);
+    $("#planning-progress-cancel").onclick = async () => {
+      const job = state.planningProgressJob; if (!job || job.status !== "running") return;
+      $("#planning-progress-cancel").disabled = true;
+      try { await api(`/api/v1/jobs/${job.jobId}/cancel`, { method: "POST", body: JSON.stringify({ workspaceId: job.workspaceId }) }); $("#planning-progress-detail").textContent = "已请求取消，等待本次 Agent 收尾。"; state.planningCancelRequested = job.jobId; }
+      catch (error) { $("#planning-progress-cancel").disabled = false; showToast(error.message, true); }
+    };
+    $("#planning-progress-retry").onclick = async () => {
+      const job = state.planningProgressJob;
+      if (!job?.planningId || job.workspaceId !== state.workspace?.workspaceId || state.activeJob?.status === "running") return;
+      await startJob("重试规划", requestKey => api(`/api/v1/workspaces/${job.workspaceId}/plannings/${job.planningId}/planner-retry`, { method: "POST", body: JSON.stringify({ requestKey }) }));
+    };
+  }
+  const job = state.planningProgressJob, p = job?.progress;
+  const visible = !!job && job.workspaceId === state.workspace?.workspaceId && ["new", "plan", "workspaces"].includes(state.route?.page) && (state.route.page !== "plan" || state.route.planningId === job.planningId);
+  show(root, visible); if (!visible) return;
+  const running = job.status === "running";
+  const setText = (selector, text) => { const element = $(selector); if (element.textContent !== text) element.textContent = text; };
+  const stage = running ? planningStages[p?.stage || "preparing"] || "正在处理" : statuses[job.status] || job.status;
+  $("#planning-progress-title").textContent = `${planningJobLabel(job)} · ${state.plannings.find(item => item.planningId === job.planningId)?.title || "本机 Agent"}`;
+  setText("#planning-progress-stage", stage);
+  $("#planning-progress-stage").className = `badge ${statusClass(running ? "running" : job.status)}`;
+  const elapsed = Math.max(0, Math.floor(((running ? Date.now() : Date.parse(job.updatedAt)) - Date.parse(p?.startedAt || job.createdAt)) / 1000));
+  const timestamp = value => value ? new Date(value).toLocaleTimeString("zh-CN", { hour12: false }) : "尚无";
+  const metrics = [labels[p?.runnerId] || "本机 Agent", p?.reportedModel ? `${p.reportedModel}（实际报告）` : `${p?.configuredModel || "Runner 默认模型"}（配置值）`, `第 ${p?.requestId || 1} 次调用`, `已用 ${Number.isFinite(elapsed) ? elapsed : 0} 秒`, `最近模型输出：${timestamp(p?.lastOutputAt)}`, `后台状态更新：${timestamp(p?.updatedAt || job.updatedAt)}`];
+  $("#planning-progress-metrics").replaceChildren(...metrics.map(text => { const node = document.createElement("span"); node.textContent = text; return node; }));
+  $("#planning-progress-detail").textContent = state.planningCancelRequested === job.jobId && running ? "已请求取消，等待本次 Agent 收尾。" : job.error || p?.detail || (running ? `第 ${p?.requestId || 1} 次调用 · 本机 Agent 无固定总时限，仍可取消。` : job.status === "succeeded" ? "本轮处理已完成；澄清或草案以规划记录为准，批准和执行仍需单独操作。" : "执行记录已保留；查看原规划后决定是否重试。");
+  const silent = running && Date.now() - Date.parse(p?.lastOutputAt || p?.startedAt || job.createdAt) >= 60_000;
+  const disconnected = running && Date.now() - Date.parse(p?.updatedAt || job.updatedAt) >= 35_000;
+  show($("#planning-progress-idle"), silent || disconnected);
+  $("#planning-progress-idle").textContent = disconnected ? "后台进度暂未更新，尚不能确认调用状态。正在重新查询；不要重复启动规划。" : "已超过 60 秒没有新回复，后台仍持有本次调用；这不代表上游网络或模型健康。可以继续等待，或取消本次调用。";
+  const preview = p?.replyPreview || "";
+  show($("#planning-progress-reply"), !!preview); setText("#planning-progress-preview", preview);
+  $("#planning-progress-reply strong").textContent = job.status === "succeeded" ? "最新模型回复 · 详见规划记录" : "最新模型回复 · 尚未通过校验";
+  show($("#planning-progress-raw"), !!p?.rawPreview); setText("#planning-progress-raw pre", p?.rawPreview || "");
+  const link = $("#planning-progress-open"); show(link, !!job.planningId); link.href = `#/workspaces/${encodeURIComponent(job.workspaceId)}/plans/${encodeURIComponent(job.planningId || "")}`;
+  show($("#planning-progress-cancel"), running); $("#planning-progress-cancel").disabled = state.planningCancelRequested === job.jobId;
+  show($("#planning-progress-retry"), !!job.planningId && p?.role !== "review" && ["failed", "cancelled", "interrupted"].includes(job.status));
+  $("#planning-progress-retry").disabled = state.activeJob?.status === "running";
+}
+function consumePlanningProgress(data) {
+  const { jobId, kind, progress } = data.payload || {};
+  if (!jobId || !progress || data.workspaceId !== state.workspace?.workspaceId || progress.planningId !== data.planningId) return;
+  if (state.activeJob && state.activeJob.jobId !== jobId) return;
+  if (state.planningProgressJob?.jobId === jobId && Date.parse(state.planningProgressJob.progress?.updatedAt) > Date.parse(progress.updatedAt)) return;
+  if (state.planningProgressJob?.jobId === jobId && state.planningProgressJob.status !== "running") return;
+  const job = { ...(state.activeJob || state.planningProgressJob?.jobId === jobId && state.planningProgressJob || {}), jobId, kind, workspaceId: data.workspaceId, planningId: data.planningId, progress, status: "running", createdAt: progress.startedAt, updatedAt: progress.updatedAt };
+  if (state.activeJob?.jobId === jobId) state.activeJob = job;
+  acceptPlanningJob(job);
+}
+async function restorePlanningProgress(workspaceId, sequence = state.navigationSequence) {
+  if (!state.plannerProgressSupported) return;
+  const selected = state.route?.page === "plan" ? state.plannings.find(plan => plan.planningId === state.route.planningId)?.localOperation : null;
+  let job = selected || state.plannings.map(plan => plan.localOperation).find(item => item?.status === "running" && (state.route?.page !== "plan" || item.planningId === state.route.planningId));
+  const remembered = sessionStorage.getItem(`tc-planning-job-${workspaceId}`);
+  if (!job && remembered) { try { job = await api(`/api/v1/jobs/${remembered}`); } catch { return; } }
+  if (state.workspace?.workspaceId !== workspaceId || state.navigationSequence !== sequence || job?.workspaceId !== workspaceId || !isPlanningJob(job)) return;
+  if (state.activeJob && state.activeJob.jobId !== job.jobId) return;
+  acceptPlanningJob(job);
+  if (job.status === "running" && !state.activeJob) {
+    state.activeJob = job; state.jobContexts ??= new Map();
+    state.jobContexts.set(job.jobId, { workspaceId, planningId: job.planningId, label: planningJobLabel(job), submittedAt: Date.parse(job.createdAt), jobId: job.jobId });
+    void pollJob(job.jobId, planningJobLabel(job));
+  }
+}
+
 async function startJob(label, submit, waitForCompletion = false, allowDuringExecution = false) {
   if (!state.workspace) return;
   if (state.submittingJob || state.activeJob?.status === "running" && !allowDuringExecution) { showToast("当前已有操作正在运行，完成后再提交下一步。", true); return; }
@@ -3185,7 +3365,7 @@ async function startJob(label, submit, waitForCompletion = false, allowDuringExe
   state.jobContext = context; show($("#job-bar")); $("#job-bar").dataset.state = "running"; $("#job-label").textContent = `${label} · 正在提交…`; show($("#job-bar .spinner")); show($("#job-view-result"), false); show($("#cancel-job"), false);
   renderJobPlanLink(context);
   try {
-    const job = await submit(key()); context.jobId = job.jobId; state.activeJob = job; state.jobContexts ??= new Map(); state.jobContexts.set(job.jobId, context); rememberExecutionJob(job, context); state.submittingJob = false; show($("#cancel-job"), job.status === "running"); show($("#job-bar")); $("#job-label").textContent = `${label} · ${job.status === "running" ? "处理中" : statuses[job.status] || job.status}`; renderJobPlanLink(context);
+    const job = await submit(key()); context.jobId = job.jobId; state.activeJob = job; state.jobContexts ??= new Map(); state.jobContexts.set(job.jobId, context); rememberExecutionJob(job, context); acceptPlanningJob(job); state.submittingJob = false; show($("#cancel-job"), job.status === "running"); show($("#job-bar")); $("#job-label").textContent = `${label} · ${job.status === "running" ? "处理中" : statuses[job.status] || job.status}`; renderJobPlanLink(context);
     if (job.status === "running") {
       acknowledgeResumedSession();
       const completion = pollJob(job.jobId, label);
@@ -3244,10 +3424,12 @@ async function pollJob(jobId, label) {
     let job; try { job = await api(`/api/v1/jobs/${jobId}`); } catch (error) { $("#job-label").textContent = `连接中断，操作记录仍保留 · ${shortId(jobId)}`; continue; }
     if (state.activeJob?.jobId !== jobId) return;
     state.activeJob = job; rememberExecutionJob(job, state.jobContexts?.get(jobId));
+    acceptPlanningJob(job);
     if (job.status !== "running") { await completeJob(job, label); return job; }
   }
 }
 async function completeJob(job, label) {
+  acceptPlanningJob(job);
   const context = state.jobContexts?.get(job.jobId) || state.jobContext; state.jobContexts?.delete(job.jobId);
   rememberExecutionJob(job, context);
   const domainStatus = job.result?.status;
@@ -3268,13 +3450,12 @@ async function completeJob(job, label) {
     if (planningId && job.workspaceId === state.workspace?.workspaceId && state.route?.page === "new") await loadPlanningListAndSelect(planningId);
     await refreshAll();
     if (job.kind === "planning.approve" && state.planning?.planningId === job.result?.planningId && state.planning?.status === "approved") await planTab("execution");
-    if (state.planning && isWebMcp(state.planning.config.provider) && (job.kind === "planning.draft.save" || ["external_context", "handoff_claim"].includes(job.result?.nextAction))) {
-      show($("#web-continue")); $("#web-continue-status").textContent = "本地已保存或登记修订，等待网页处理。复制提示到获准网页发送一次，继续当前计划并复审。";
-    }
-  } else showToast(job.error || `操作状态：${statuses[job.status] || job.status}`, job.status !== "interrupted", "execution");
+    if (state.planning) renderReviewContinuation();
+  } else { showToast(job.error || `操作状态：${statuses[job.status] || job.status}`, job.status !== "interrupted", job.progress ? "planning" : "execution"); if (job.planningId) await refreshAll(); }
 }
 async function openOperationResult(context, job) {
   if (!context?.workspaceId || !context?.planningId) { showToast("该操作未关联计划，请从工作区选择规划记录。", true); return; }
+  if (isPlanningJob(job)) { await navigate(`/workspaces/${encodeURIComponent(context.workspaceId)}/plans/${encodeURIComponent(context.planningId)}`); return; }
   try {
     await navigate(`/workspaces/${encodeURIComponent(context.workspaceId)}/plans/${encodeURIComponent(context.planningId)}/execution`);
     if (state.workspace?.workspaceId !== context.workspaceId || state.planning?.planningId !== context.planningId || state.route?.tab !== "execution") return;
@@ -3309,6 +3490,7 @@ function renderWorkspaceFormMode() {
   if (state.creatingWorkspace && authorization && !target) { cancelDirectoryPicker(); state.creatingWorkspace = false; state.folderSelectionGeneration = (state.folderSelectionGeneration || 0) + 1; }
   const host = target || $("#workspace-form-host"); if ($("#workspace-form").parentElement !== host) host.append($("#workspace-form"));
   const creating = !!state.creatingWorkspace; show($("#workspace-form"), creating);
+  if (!creating && $("#directory-dialog")?.open) $("#directory-dialog").close();
   for (const id of ["workspace-selection-tools", "workspace-cards"]) show($("#" + id), !creating || authorization);
   show($("#workspace-selection-heading"));
   for (const [id, active] of [["workspace-existing", !creating], ["add-workspace-main", creating]]) { $("#" + id).classList.toggle("active", active); $("#" + id).setAttribute("aria-pressed", String(active)); }
@@ -3326,12 +3508,13 @@ function closeWorkspaceForm() {
   state.creatingWorkspace = false; state.folderSelectionGeneration = (state.folderSelectionGeneration || 0) + 1;
   state.workspaceFormContext = null;
   $("#workspace-picker-status").textContent = "";
+  $("#workspace-native-choice").open = false;
   for (const id of ["workspace-path", "workspace-label"]) $("#" + id).value = "";
   $("#workspace-selected-path").textContent = "尚未选择文件夹"; $("#workspace-manual-path").open = false;
   show($("#workspace-path-error"), false); $("#workspace-path").removeAttribute("aria-invalid");
   renderWorkspaceFormMode(); show($("#action-feedback"), false);
 }
-async function openWorkspaceForm(requestId, openNative = true) {
+async function openWorkspaceForm(requestId, openNative = false) {
   const authorization = typeof requestId === "string";
   if (authorization) {
     if (state.route?.page !== "connect" || !authorizationFormHost(requestId)) return;
@@ -3343,7 +3526,7 @@ async function openWorkspaceForm(requestId, openNative = true) {
   $("#workspace-path").value = ""; $("#workspace-label").value = ""; $("#workspace-selected-path").textContent = "尚未选择文件夹";
   show($("#workspace-path-error"), false); renderWorkspaceFormMode();
   if (openNative) await openDirectoryPicker();
-  else { $("#workspace-manual-path").open = true; await openDirectoryBrowser(); }
+  else await openDirectoryBrowser();
 }
 $("#workspace-path-browse").addEventListener("click", () => void openWorkspaceForm(undefined, false));
 $("#workspace-form-back").addEventListener("click", closeWorkspaceForm);
@@ -3435,19 +3618,33 @@ $("#reply-form").addEventListener("submit", async (event) => {
   const message = $("#reply-text").value.trim();
   if (!message) { showToast("请先填写回复。", true); return; }
   if (!state.planning) { showToast("请先选择一个规划。", true); return; }
+  if (functionPolicy("planning") && !state.operationRoutingSupported) { showToast("请重启后台并刷新页面，以按设置继续规划。", true); return; }
   if (!await confirmPlanChanges()) return;
   const path = `/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/replies`;
   state.replying = true; $("#reply-text").disabled = true; renderRequirements();
   try {
-    const job = await startJob("提交回复", (requestKey) => api(path, { method: "POST", body: JSON.stringify({ requestKey, message }) }), true);
+    const planner = policySelection("planning");
+    const job = await startJob("提交回复", (requestKey) => api(path, { method: "POST", body: JSON.stringify({ requestKey, message, ...(planner ? { planner } : {}) }) }), true);
     if (job?.status === "succeeded") $("#reply-text").value = "";
   } finally { state.replying = false; $("#reply-text").disabled = false; if (state.planning) renderRequirements(); }
 });
 $("#review-button").addEventListener("click", async () => {
   if (!state.planning || !await confirmPlanChanges()) return;
   const mode = $("#reviewer-mode")?.value || "planning";
-  if (state.planning.workflow?.role === "review" && mode !== "planning") { showToast("当前网页审查交接仍在处理中。请先在交接面板完成或取消该操作，再切换审查方式。", true); return; }
-  if (mode === "planning" && isWebMcp(state.planning.config.provider) && state.planning.workflow?.role === "review") { await copyResumePrompt(); return; }
+  const current = state.planning, workspaceId = state.workspace.workspaceId;
+  const local = !selectedOperationIsWeb("review");
+  if (local) {
+    const pending = (current.externalOperations || []).filter(operation => operation.role === "review" && operation.isCurrent !== false && ["prepared", "submitting"].includes(externalOperationState(operation)));
+    if (pending.some(operation => externalOperationState(operation) === "submitting")) { showToast("网页审查正在提交校验，请等待结果后再切换。", true); return; }
+    if (pending.length) {
+      if (!await askConfirm("改用本机审查", "这会取消当前网页审查等待，并使已领取网页的旧提交失效。当前草案和历史报告保留，随后调用所选 Agent／API 审查。", "确认接管并审查")) return;
+      if (state.workspace?.workspaceId !== workspaceId || state.planning?.planningId !== current.planningId || state.planning.draft?.planHash !== current.draft?.planHash) { showToast("计划或草案已变化，请重新确认审查。", true); return; }
+      try { for (const operation of pending) await api(`/api/v1/workspaces/${workspaceId}/external/${operation.operationId}/cancel`, { method: "POST", body: "{}" }); }
+      catch (error) { showToast(`接管未完成：${error.message}`, true); return; }
+      if (state.workspace?.workspaceId !== workspaceId || state.planning?.planningId !== current.planningId || state.planning.draft?.planHash !== current.draft?.planHash) { showToast("旧网页审查已取消，当前页面或草案已变化；请在目标计划重新发起审查。", true); return; }
+    }
+  }
+  if (mode === "planning" && isWebMcp(current.config.provider) && current.workflow?.role === "review") { await copyResumePrompt(); return; }
   const model = $("#reviewer-model")?.value.trim() || "";
   const reviewer = mode === "planning" ? undefined : { mode, ...(model ? { model } : {}) };
   await startJob("审查草案", (requestKey) => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/review`, { method: "POST", body: JSON.stringify({ requestKey, ...(reviewer ? { reviewer } : {}) }) }));
@@ -3640,7 +3837,7 @@ async function openDirectoryBrowser() {
   let dialog = $("#directory-dialog");
   if (!dialog) {
     dialog = document.createElement("dialog"); dialog.id = "directory-dialog";
-    dialog.innerHTML = `<div class="section-title"><h3>按路径浏览文件夹</h3><button id="directory-close" type="button" class="button button-quiet">关闭</button></div><p class="hint">本机路径可直接定位；名称搜索只查当前目录，不递归扫描磁盘。原生“选择文件夹”入口仍可使用。</p><label for="directory-path">目录路径</label><div class="reference-path-row"><input id="directory-path" autocomplete="off" placeholder="/home/… 或 D:\\项目"><button id="directory-go" type="button" class="button button-quiet">定位路径</button></div><label for="directory-query">搜索当前目录名称</label><input id="directory-query" type="search" autocomplete="off" placeholder="输入文件夹名称"><p id="directory-status" class="hint" role="status"></p><p id="directory-error" class="field-error" role="status"></p><button id="directory-parent" type="button" class="button button-quiet">上一级</button><div id="directory-list" class="file-list"></div><button id="directory-more" type="button" class="button button-quiet hidden">加载更多</button><button id="directory-use" type="button" class="button button-primary">选择当前文件夹</button>`;
+    dialog.innerHTML = `<div class="section-title"><h3>选择后台工作区文件夹</h3><button id="directory-close" type="button" class="button button-quiet">关闭</button></div><p class="hint">这里读取运行后台的主机目录，远程电脑也可使用。支持 Windows／WSL 路径；名称搜索只查当前目录，不递归扫描磁盘。</p><label for="directory-path">后台目录路径</label><div class="reference-path-row"><input id="directory-path" autocomplete="off" placeholder="/home/… 或 D:\\项目"><button id="directory-go" type="button" class="button button-quiet">定位路径</button></div><label for="directory-query">搜索当前目录名称</label><input id="directory-query" type="search" autocomplete="off" placeholder="输入文件夹名称"><p id="directory-status" class="hint" role="status"></p><p id="directory-error" class="field-error" role="status"></p><button id="directory-parent" type="button" class="button button-quiet">上一级</button><div id="directory-list" class="file-list"></div><button id="directory-more" type="button" class="button button-quiet hidden">加载更多</button><button id="directory-use" type="button" class="button button-primary">选择当前文件夹</button>`;
     document.body.append(dialog);
     $("#directory-close").onclick = () => dialog.close();
     dialog.addEventListener("close", () => { state.directoryRequest = (state.directoryRequest || 0) + 1; clearTimeout(state.directorySearchTimer); });
@@ -3840,17 +4037,20 @@ function renderFileSelection() {
 function cancelDirectoryPicker(message = "") {
   const controller = state.directoryPickerController; if (!controller) return;
   state.directoryPickerController = null; controller.abort(); state.nativePicking = false;
-  const button = $("#choose-workspace-directory"); button.disabled = false; button.textContent = "选择文件夹"; button.removeAttribute("aria-busy");
+  const button = $("#choose-workspace-native"); button.disabled = false; button.textContent = "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy");
   show($("#cancel-directory-picker"), false);
   if (message) { $("#workspace-picker-status").textContent = message; $("#workspace-manual-path").open = true; }
 }
 const pickerStatus = document.createElement("p"); pickerStatus.id = "workspace-picker-status"; pickerStatus.className = "hint"; pickerStatus.setAttribute("role", "status"); pickerStatus.setAttribute("aria-live", "polite");
-const cancelPicker = document.createElement("button"); cancelPicker.id = "cancel-directory-picker"; cancelPicker.type = "button"; cancelPicker.className = "button button-quiet hidden"; cancelPicker.textContent = "取消选择，手动填写";
-$("#choose-workspace-directory").after(cancelPicker, pickerStatus);
-cancelPicker.addEventListener("click", () => cancelDirectoryPicker("已取消本次选择；可手动填写路径或重新打开系统窗口。"));
+const cancelPicker = document.createElement("button"); cancelPicker.id = "cancel-directory-picker"; cancelPicker.type = "button"; cancelPicker.className = "button button-quiet hidden"; cancelPicker.textContent = "取消 Windows 选择";
+const nativeChoice = document.createElement("details"); nativeChoice.id = "workspace-native-choice"; nativeChoice.className = "foldout";
+nativeChoice.innerHTML = '<summary>同机使用：Windows 原生窗口</summary><p class="hint">仅在运行后台的 Windows 已解锁桌面打开，另一台电脑看不到此窗口。远程使用请点“浏览后台目录”。</p><button id="choose-workspace-native" type="button" class="button button-quiet">在后台 Windows 打开选择窗口</button>';
+$("#choose-workspace-directory").textContent = "浏览后台目录";
+$("#choose-workspace-directory").after(nativeChoice); nativeChoice.append(cancelPicker, pickerStatus);
+cancelPicker.addEventListener("click", () => cancelDirectoryPicker("已取消 Windows 选择；可浏览后台目录或手动填写路径。"));
 async function openDirectoryPicker() {
   if (state.nativePicking) { showActionFeedback("系统选择窗口仍在等待", "请在运行后台的 Windows 桌面选择或取消；也可返回选择已有工作区。"); return; }
-  const generation = state.folderSelectionGeneration, button = $("#choose-workspace-directory"), controller = new AbortController();
+  const generation = state.folderSelectionGeneration, button = $("#choose-workspace-native"), controller = new AbortController();
   state.directoryPickerController = controller;
   state.nativePicking = true; button.disabled = true; button.textContent = "正在选择文件夹…"; button.setAttribute("aria-busy", "true");
   show(cancelPicker); pickerStatus.textContent = "正在请求 Windows 文件夹窗口；未看到窗口时，可取消并手动填写。";
@@ -3869,9 +4069,10 @@ async function openDirectoryPicker() {
     pickerStatus.textContent = "系统选择未完成，可重新选择或手动填写。";
     $("#workspace-path-error").textContent = error.message; show($("#workspace-path-error")); $("#workspace-manual-path").open = true; showActionFeedback("系统选择器未打开", `${error.message}。可手动填写路径或返回已有工作区。`, "validation");
   }
-  finally { clearTimeout(reminder); clearTimeout(deadline); if (state.directoryPickerController === controller) { state.directoryPickerController = null; state.nativePicking = false; button.disabled = false; button.textContent = "选择文件夹"; button.removeAttribute("aria-busy"); show(cancelPicker, false); } }
+  finally { clearTimeout(reminder); clearTimeout(deadline); if (state.directoryPickerController === controller) { state.directoryPickerController = null; state.nativePicking = false; button.disabled = false; button.textContent = "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy"); show(cancelPicker, false); } }
 }
-$("#choose-workspace-directory").addEventListener("click", openDirectoryPicker);
+$("#choose-workspace-directory").addEventListener("click", () => { cancelDirectoryPicker(); void openDirectoryBrowser(); });
+$("#choose-workspace-native").addEventListener("click", openDirectoryPicker);
 $("#open-runtime-model").addEventListener("click", async () => { await planTab("models"); if (state.route?.tab === "models") $("#runtime-model-task").focus({ preventScroll: true }); });
 $("#runtime-model-task").addEventListener("change", () => { void loadRuntimeModelChoices(); if (state.planning?.session) renderRuntimeModelPanel(state.planning.session.tasks); });
 $("#runtime-model-choice").addEventListener("change", () => show($("#runtime-model-custom").parentElement, $("#runtime-model-choice").value === "__custom__"));
@@ -3895,3 +4096,5 @@ for (const kind of ["tools", "raw"]) for (const [direction, delta] of [["prev", 
 if (!state.remotePoll) state.remotePoll = setInterval(() => void refreshRemoteConnection(), 3000);
 setInterval(() => { if (state.workspace && (!state.activeJob || ["planning.run", "session.resume", "session.retry"].includes(state.activeJob.kind))) { void refreshAll(); if (state.planning?.session?.status === "running") void readSelectedAttempt(); } }, 5000);
 void init();
+
+setInterval(() => { if (state.planningProgressJob?.status === "running") renderPlanningProgress(); }, 1000);

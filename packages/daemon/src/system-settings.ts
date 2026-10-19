@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-export type FunctionName = "planning" | "review" | "diagnosis";
+export type FunctionName = "planning" | "review" | "revision" | "diagnosis";
 export interface FunctionPolicy {
   priority: "agent" | "web";
   agent: { runnerId: "codex" | "claude-code"; modelId?: string };
@@ -18,7 +18,7 @@ export interface SystemSettings {
 }
 export function defaultSystemSettings(): SystemSettings {
   const policy = (): FunctionPolicy => ({ priority: "web", agent: { runnerId: "codex" }, webSource: "chatgpt" });
-  return { schemaVersion: 1, revision: 0, initialized: false, mode: "unified", unified: policy(), functions: { planning: policy(), review: policy(), diagnosis: policy() } };
+  return { schemaVersion: 1, revision: 0, initialized: false, mode: "unified", unified: policy(), functions: { planning: policy(), review: policy(), revision: policy(), diagnosis: policy() } };
 }
 function object(value: unknown, allowed: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !allowed.includes(key))) throw new Error("settings_invalid：设置包含不支持的字段");
@@ -33,8 +33,8 @@ function policy(value: unknown): FunctionPolicy {
 export function parseSystemSettings(value: unknown): SystemSettings {
   const input = object(value, ["schemaVersion", "revision", "initialized", "mode", "unified", "functions"]);
   if (input.schemaVersion !== 1 || !Number.isSafeInteger(input.revision) || (input.revision as number) < 0 || typeof input.initialized !== "boolean" || !["unified", "per-function"].includes(String(input.mode))) throw new Error("settings_invalid：设置版本或模式无效");
-  const functions = object(input.functions, ["planning", "review", "diagnosis"]);
-  return { schemaVersion: 1, revision: input.revision as number, initialized: input.initialized, mode: input.mode as SystemSettings["mode"], unified: policy(input.unified), functions: { planning: policy(functions.planning), review: policy(functions.review), diagnosis: policy(functions.diagnosis) } };
+  const functions = object(input.functions, ["planning", "review", "revision", "diagnosis"]);
+  return { schemaVersion: 1, revision: input.revision as number, initialized: input.initialized, mode: input.mode as SystemSettings["mode"], unified: policy(input.unified), functions: { planning: policy(functions.planning), review: policy(functions.review), revision: policy(functions.revision ?? functions.planning), diagnosis: policy(functions.diagnosis) } };
 }
 export class SystemSettingsStore {
   private mutation: Promise<unknown> = Promise.resolve();
