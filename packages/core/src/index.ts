@@ -28,6 +28,8 @@ export { DeepSeekHarnessRunner } from "./runners/dsh-runner.js";
 export type { GitIsolationAttempt, GitIsolationJournal, SessionIsolation, SessionSchedulerEvent, SessionSnapshot, SessionStatus, SessionTaskStatus, SessionTaskState, TaskResult } from "./session-types.js";
 export { PlanStore } from "./plan-store.js";
 export { SessionStore, SessionLockError } from "./session-store.js";
+export { parseExecutionSelection, taskWithExecutionSelection } from "./execution-selection.js";
+export type { AgentSelection, ExecutionSelection } from "./execution-selection.js";
 export { createSessionDelivery, formatSessionDelivery } from "./delivery.js";
 export type { SessionDeliveryReport } from "./delivery.js";
 export type { WorktreeCleanupResult } from "./worktree-isolation.js";

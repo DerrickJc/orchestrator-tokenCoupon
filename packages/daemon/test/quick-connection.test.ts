@@ -424,6 +424,32 @@ describe("Quick Tunnel connection", () => {
     expect(h.counters()).toEqual({ starts: 1, stops: 0 });
   }, 15_000);
 
+  it("renames a connector through the local API without modifying authorization or reconnecting", async () => {
+    const h = await fixture();
+    await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const auth = await authorize(h, ["planning:read"], { clientName: "ChatGPT" });
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, scopes: ["planning:read"] });
+    const original = h.remote.grants()[0]!;
+    const port = await freePort(), origin = `http://127.0.0.1:${port}`;
+    const server = await createLocalServer(h.service, { port, host: "127.0.0.1", dataDirectory: h.dataDirectory, remoteMcp: h.remote });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
+    cleanups.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+    const cookie = (await fetch(origin)).headers.getSetCookie()[0]!.split(";", 1)[0]!;
+    const route = `${origin}/api/v1/remote-connection/grants/${original.grantId}/name`;
+    const rename = (alias: unknown, headers: Record<string, string> = { Cookie: cookie, Origin: origin }) => fetch(route, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ alias }) });
+    expect((await rename("demo1", { Origin: origin })).status).toBe(403);
+    expect((await rename("demo1", { Cookie: cookie, Origin: "https://evil.test" })).status).toBe(403);
+    expect((await rename("  demo1  ")).status).toBe(200);
+    expect(h.remote.grants()[0]).toEqual({ ...original, alias: "demo1" });
+    expect(h.remote.status().clients?.find(item => item.grantId === original.grantId)?.name).toBe("demo1");
+    for (const invalid of [42, "x".repeat(81), "name\ncontrol"]) expect((await rename(invalid)).status).toBe(400);
+    expect(h.remote.grants()[0]?.alias).toBe("demo1");
+    expect((await rename("")).status).toBe(200); expect(h.remote.grants()[0]).toEqual(original);
+    expect(h.counters()).toEqual({ starts: 1, stops: 0 }); expect(h.remote.status().mcpUrl).toBe(`${h.origin}/mcp`);
+    await h.remote.revokeGrant(original.grantId);
+    expect((await rename("revoked" )).ok).toBe(false);
+  }, 15_000);
+
   it("requires a local browser session and Origin to start or approve a connection", async () => {
     const h = await fixture(); const port = await freePort();
     const server = await createLocalServer(h.service, { port, host: "127.0.0.1", dataDirectory: h.dataDirectory, remoteMcp: h.remote });

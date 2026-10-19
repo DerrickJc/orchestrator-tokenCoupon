@@ -105,6 +105,9 @@ export interface SessionTaskState {
 }
 
 export interface SessionSnapshot {
+  /** Launch choices are independent of the approved, immutable plan. */
+  executionSelection?: import("./execution-selection.js").ExecutionSelection;
+  executionSelectionHash?: string;
   schemaVersion: 1 | 2 | 3;
   sessionId: string;
   workspace: string;

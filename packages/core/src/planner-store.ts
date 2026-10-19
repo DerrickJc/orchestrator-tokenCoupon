@@ -8,6 +8,7 @@ import { validateRequirementsState } from "./requirements.js";
 import { parsePlanningAssessment, validatePlanningAssessment } from "./planning-readiness.js";
 import { validateConfirmationState } from "./confirmation.js";
 import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
+import { parseExecutionSelection } from "./execution-selection.js";
 import type { ConfirmationEvent, ConfirmationProposalSet } from "./planner-types.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -397,6 +398,7 @@ function parseApproval(value: unknown): NonNullable<PlannerConversationSnapshot[
 
 function parseExecutionReference(value: unknown): NonNullable<PlannerConversationSnapshot["execution"]> {
   const raw = object(value, "Planner execution");
+  if (raw.executionSelection !== undefined) raw.executionSelection = parseExecutionSelection(raw.executionSelection);
   if (!isUuid(raw.sessionId) || !isUuid(raw.approvalId) || !Number.isSafeInteger(raw.draftRevision) || typeof raw.planHash !== "string" || !HASH.test(raw.planHash) ||
       !["reserved", "created"].includes(String(raw.state))) throw new Error("Planner execution 引用无效");
   if (raw.isolation !== undefined) {

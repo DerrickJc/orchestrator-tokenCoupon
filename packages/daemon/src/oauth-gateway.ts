@@ -446,6 +446,18 @@ export class RemoteMcpConnection {
   }
 
   /** Only called by the authenticated local console, never by a remote tool. */
+  async renameGrant(grantId: string, alias: string): Promise<void> {
+    if (typeof alias !== "string" || alias.length > 80 || /[\u0000-\u001f\u007f]/.test(alias)) throw new Error("oauth_alias_invalid：MCP 名称最多 80 字符，不能包含控制字符");
+    await this.withState(async (state) => {
+      const grant = state.grants.find(item => item.grantId === grantId && !item.revokedAt && item.expiresAt > Date.now());
+      if (!grant) throw new Error("oauth_grant_not_found：网页授权不存在或已失效");
+      if (!this.config?.enabled || grant.resource !== `${this.config.publicOrigin}/mcp`) throw new Error("oauth_resource_invalid：此授权不属于当前连接");
+      if (alias.trim()) grant.alias = alias.trim(); else delete grant.alias;
+    });
+    await this.service.publish({ type: "remote_authorization.updated", payload: { grantId } });
+  }
+
+  /** Only called by the authenticated local console, never by a remote tool. */
   async updateGrant(grantId: string, input: { workspaceIds: string[]; source: WebSource; alias?: string }): Promise<void> {
     if (!["chatgpt", "claude", "other"].includes(input.source) || !input.workspaceIds.length) throw new Error("oauth_grant_update_invalid");
     for (const id of input.workspaceIds) {

@@ -9,6 +9,7 @@ import { parseRunnerProfile, runnerProfileHash } from "./runner-registry.js";
 
 import { acquireLockCoordination, createExecutionLock, inspectLock, lockDescription } from "./owner-lock.js";
 import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
+import { parseExecutionSelection, type ExecutionSelection } from "./execution-selection.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_STATUSES = new Set(["ready", "running", "pausing", "paused", "succeeded", "failed", "cancelled", "interrupted", "blocked"]);
@@ -38,7 +39,7 @@ export class SessionStore {
     }
   }
 
-  async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string; runnerProfile?: import("./runner.js").RunnerProfile } = {}): Promise<SessionRecord> {
+  async create(plan: PlanDefinition, sessionId: string = randomUUID(), isolation: SessionIsolation = { mode: "shared" }, options: { maxParallel?: number; executionId?: string; runnerProfile?: import("./runner.js").RunnerProfile; executionSelection?: ExecutionSelection } = {}): Promise<SessionRecord> {
     if (!UUID.test(sessionId)) throw new Error("sessionId 必须是 UUID");
     const maxParallel = options.maxParallel ?? 1;
     if (!Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 8) throw new Error("maxParallel 必须是 1 到 8 之间的整数");
@@ -49,12 +50,14 @@ export class SessionStore {
     const sessionDir = join(this.root, "sessions", sessionId);
     const now = new Date().toISOString();
     const runnerProfile = options.runnerProfile ? parseRunnerProfile(options.runnerProfile) : undefined;
+    const executionSelection = options.executionSelection ? parseExecutionSelection(options.executionSelection, plan) : undefined;
     const snapshot: SessionSnapshot = {
       schemaVersion: 3, sessionId, workspace: this.workspace, revision: 1, status: "ready", isolation,
       maxParallel, planDigest: digestPlan(plan), executionId, schedulerState: "idle", waveId: null, activeAttemptIds: [],
       controlState: { requestId: null, kind: null, requestedAt: null, acknowledgedAt: null },
       planId: plan.id, planTitle: plan.title,
       ...(runnerProfile ? { runnerProfile, runnerProfileHash: runnerProfileHash(runnerProfile) } : {}),
+      ...(executionSelection ? { executionSelection, executionSelectionHash: createHash("sha256").update(JSON.stringify(executionSelection)).digest("hex") } : {}),
       tasks: plan.tasks.map(({ task }) => ({ taskId: task.id, status: "planned", activeAttemptId: null, attempts: [], result: null, reasonCode: null })),
       createdAt: now, updatedAt: now,
     };
@@ -334,6 +337,8 @@ async function atomicWrite(path: string, contents: string): Promise<void> {
 function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, sessionId: string): SessionSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Session 快照必须是对象");
   const raw = value as Record<string, unknown>;
+  const selection = raw.executionSelection === undefined ? undefined : parseExecutionSelection(raw.executionSelection, plan);
+  if (selection ? createHash("sha256").update(JSON.stringify(selection)).digest("hex") !== raw.executionSelectionHash : raw.executionSelectionHash !== undefined) throw new Error("session_execution_selection_invalid：运行模型配置校验失败");
   if ((raw.schemaVersion !== 1 && raw.schemaVersion !== 2 && raw.schemaVersion !== 3) || raw.sessionId !== sessionId || raw.workspace !== workspace || raw.planId !== plan.id || raw.planTitle !== plan.title) {
     throw new Error("Session 快照版本、目录或计划身份不匹配");
   }
@@ -459,7 +464,7 @@ function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, 
     activeAttemptIds: raw.activeAttemptIds as string[],
     controlState: raw.controlState as NonNullable<SessionSnapshot["controlState"]>,
   } : {};
-  return { schemaVersion: raw.schemaVersion as SessionSnapshot["schemaVersion"], sessionId, workspace, revision: raw.revision as number, status, planId: plan.id, planTitle: plan.title, tasks, ...(isolation ? { isolation } : {}), ...phase5Fields, ...(runnerProfile && runnerProfileHashValue ? { runnerProfile, runnerProfileHash: runnerProfileHashValue } : {}), createdAt: raw.createdAt, updatedAt: raw.updatedAt };
+  return { schemaVersion: raw.schemaVersion as SessionSnapshot["schemaVersion"], sessionId, workspace, revision: raw.revision as number, status, planId: plan.id, planTitle: plan.title, tasks, ...(isolation ? { isolation } : {}), ...phase5Fields, ...(selection ? { executionSelection: selection, executionSelectionHash: raw.executionSelectionHash as string } : {}), ...(runnerProfile && runnerProfileHashValue ? { runnerProfile, runnerProfileHash: runnerProfileHashValue } : {}), createdAt: raw.createdAt, updatedAt: raw.updatedAt };
 }
 
 function digestPlan(plan: PlanDefinition): string {

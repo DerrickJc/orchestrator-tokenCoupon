@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { realpath, stat } from "node:fs/promises";
 import { relative, isAbsolute, sep } from "node:path";
@@ -91,10 +92,14 @@ export function nativePickerCapability() {
   const env = workspaceEnvironment();
   return { available: env.platform === "win32" || env.isWsl, kind: "windows-native", note: "在运行后台的 Windows 桌面打开系统选择框；WSL 通过 PowerShell 调用。取消选择不会创建工作区。" };
 }
-export function nativePickerScript(kind: NativePickerKind) {
+export function nativePickerScript(kind: NativePickerKind, requestId?: string) {
+  if (requestId && !/^[a-f0-9-]{36}$/.test(requestId)) throw new Error("native_picker_request_invalid");
   // No path or other client text is interpolated into PowerShell source.
   return `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+${requestId ? `$tokenCouponPickerId = '${requestId}'` : ""}
+$ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
+Write-Output 'TOKEN_COUPON_PICKER:starting'
 Add-Type -AssemblyName System.Windows.Forms
 ${kind === "directory" ? `Add-Type -TypeDefinition @'
 ${folderPickerSource}
@@ -102,12 +107,14 @@ ${folderPickerSource}
 [System.Windows.Forms.Application]::EnableVisualStyles()
 $owner = New-Object System.Windows.Forms.Form
 $owner.TopMost = $true
-$owner.ShowInTaskbar = $false
+$owner.Text = 'Token Coupon - select folder or files'
+$owner.ShowInTaskbar = $true
 $owner.Opacity = 0
 $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $owner.Show()
 $owner.Activate()
 $owner.BringToFront()
+Write-Output 'TOKEN_COUPON_PICKER:dialog'
 try {
 ${kind === "directory" ? `$path = [TokenCoupon.FolderPicker]::Pick($owner.Handle)
 $cancelled = ($null -eq $path)
@@ -125,21 +132,31 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $paths = @($dialog.Fi
 } finally { $dialog.Dispose() }`}
 } finally { $owner.Close(); $owner.Dispose() }`;
 }
-export async function pickNativePath(kind: NativePickerKind): Promise<NativePickerResult> {
+export async function pickNativePath(kind: NativePickerKind, signal?: AbortSignal): Promise<NativePickerResult> {
+  if (signal?.aborted) return { cancelled: true, paths: [] };
   if (!nativePickerCapability().available) throw new Error("native_picker_unavailable：当前后台没有 Windows 桌面选择器，请使用手动路径；不会改用自定义目录窗口。");
   if (opening) throw new Error("native_picker_busy：系统选择窗口已打开，请在 Windows 桌面完成选择或取消。");
   opening = true;
+  const requestId = randomUUID();
+  const command = workspaceEnvironment().platform === "win32" ? "powershell.exe" : "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
   try {
-    const command = workspaceEnvironment().platform === "win32" ? "powershell.exe" : "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
-    const { stdout } = await execute(command, ["-NoProfile", "-STA", "-EncodedCommand", Buffer.from(nativePickerScript(kind), "utf16le").toString("base64")], { timeout: 300_000, maxBuffer: 512 * 1024, windowsHide: true });
-    const data = JSON.parse(stdout.trim().replace(/^\uFEFF/, "")) as NativePickerResult;
+    const { stdout } = await execute(command, ["-NoProfile", "-STA", "-EncodedCommand", Buffer.from(nativePickerScript(kind, requestId), "utf16le").toString("base64")], { signal, timeout: 300_000, maxBuffer: 512 * 1024, windowsHide: true });
+    const data = JSON.parse(stdout.trim().split(/\r?\n/).at(-1)!.replace(/^\uFEFF/, "")) as NativePickerResult;
     if (typeof data.cancelled !== "boolean" || !Array.isArray(data.paths) || data.paths.length > 100 || data.paths.some(path => typeof path !== "string")) throw new Error("invalid_picker_reply");
     return data;
   } catch (error) {
-    const failure = error as { code?: string; killed?: boolean };
-    if (failure.killed) throw new Error("native_picker_timeout：系统选择窗口等待超过 5 分钟，已关闭；请重新选择文件夹，或手动填写路径。");
+    const failure = error as { code?: string; killed?: boolean; stdout?: string };
+    if (signal?.aborted || failure.killed) {
+      // Killing WSL's interop relay alone may leave a Windows GUI process alive.
+      // Match only this invocation's host-generated marker; never kill other pickers.
+      const cleanup = `$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter "name='powershell.exe'" | ForEach-Object { if ($_.ProcessId -ne $PID -and $_.CommandLine -match '(?i)-EncodedCommand\\s+([A-Za-z0-9+/=]+)') { try { $source = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1])); if ($source.Contains("$" + "tokenCouponPickerId = '${requestId}'")) { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } catch {} } }`;
+      await execute(command, ["-NoProfile", "-EncodedCommand", Buffer.from(cleanup, "utf16le").toString("base64")], { timeout: 8000, windowsHide: true }).catch(() => {});
+      if (signal?.aborted) return { cancelled: true, paths: [] };
+      throw new Error("native_picker_timeout：文件夹选择等待超过 5 分钟，已请求关闭窗口。请重新选择或手动填写路径。");
+    }
     if (failure.code === "ENOENT") throw new Error("native_picker_unavailable：未找到 Windows PowerShell，请确认 WSL 的 Windows 互操作可用；也可手动填写路径。");
-    throw new Error("native_picker_failed：无法打开 Windows 系统选择框。请确认后台运行在有桌面的 Windows／WSL 会话，且 PowerShell 可运行；也可手动填写路径。");
+    const phase = failure.stdout?.includes("TOKEN_COUPON_PICKER:dialog") ? "系统窗口返回失败" : failure.stdout?.includes("TOKEN_COUPON_PICKER:starting") ? "Windows 选择器初始化失败" : "Windows PowerShell 未正常启动";
+    throw new Error(`native_picker_failed：${phase}。请确认后台运行在有桌面的 Windows／WSL 会话；也可手动填写路径。`);
   }
   finally { opening = false; }
 }

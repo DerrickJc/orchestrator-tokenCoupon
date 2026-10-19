@@ -181,6 +181,7 @@ export interface PlanReviewRecord {
 }
 
 export interface ExecutionReference {
+  executionSelection?: import("./execution-selection.js").ExecutionSelection;
   sessionId: string;
   approvalId: string;
   draftRevision: number;

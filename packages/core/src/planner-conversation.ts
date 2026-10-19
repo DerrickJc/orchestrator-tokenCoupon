@@ -14,6 +14,7 @@ import { expectExactKeys, expectNonEmptyString, expectObject, InputValidationErr
 import type { TaskRunnerFactory } from "./task-orchestrator.js";
 import { runPlan } from "./task-orchestrator.js";
 import { SessionStore } from "./session-store.js";
+import { parseExecutionSelection, type ExecutionSelection } from "./execution-selection.js";
 import { checkPlan } from "./plan-check.js";
 import { loadCurrentPlanReview } from "./plan-review.js";
 import { ReviewStore } from "./review-store.js";
@@ -55,6 +56,9 @@ export interface PlannerOperationResult {
 }
 
 export interface PlannerRunOptions {
+  executionSelection?: ExecutionSelection;
+  expectedPlanHash?: string;
+  expectedDraftRevision?: number;
   planningId: string;
   workspace: string;
   createRunner: TaskRunnerFactory;
@@ -398,12 +402,14 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
   try {
     let snapshot = await store.load(options.planningId);
     let retryReservation: ExecutionReference | null = null;
+    if (options.expectedDraftRevision !== undefined && snapshot.draftRevision !== options.expectedDraftRevision || options.expectedPlanHash !== undefined && snapshot.approval?.planHash !== options.expectedPlanHash) throw new Error("planner_launch_context_changed：草案或批准版本已变化，请刷新运行参数后重新确认");
     if (snapshot.execution) {
       const execution = snapshot.execution;
         const sessionStore = new SessionStore(store.workspace);
         try {
           const record = await sessionStore.load(execution.sessionId);
           if (canonicalHash(record.plan) !== execution.planHash) throw new Error("已关联 Session 的计划哈希不匹配");
+          if (options.executionSelection && canonicalHash(parseExecutionSelection(options.executionSelection, record.plan)) !== canonicalHash(record.snapshot.executionSelection ?? {})) throw new Error("session_execution_selection_fixed：此 Session 的启动 Runner／模型已固定，请使用运行中模型配置或创建新执行");
           if (options.maxParallel !== undefined && record.snapshot.maxParallel !== options.maxParallel) throw new Error("已关联 Session 的 maxParallel 已固定，不能在 planner run 中更换");
           if (options.isolation && record.snapshot.isolation?.mode !== options.isolation) throw new Error("已关联 Session 的隔离模式与本次请求不一致；执行配置不可更换");
           if (options.verificationTaskId && (record.snapshot.isolation?.mode !== "git-worktree" || record.snapshot.isolation.verificationTaskId !== options.verificationTaskId)) {
@@ -429,6 +435,10 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
       throw new Error("planning_technology_gate_missing：旧版批准记录不能证明技术选型已确认。请补齐 technology_selection 决策并重新审查批准；历史批准记录已保留。");
     }
     const draft = await store.loadDraft(options.planningId, snapshot.draftRevision);
+    const requestedSelection = options.executionSelection ? parseExecutionSelection(options.executionSelection, draft.plan) : undefined;
+    if (retryReservation?.executionSelection && requestedSelection && canonicalHash(retryReservation.executionSelection) !== canonicalHash(requestedSelection)) throw new Error("session_execution_selection_fixed：执行 reservation 的 Runner／模型已固定");
+    if (retryReservation && !retryReservation.executionSelection && requestedSelection && canonicalHash(requestedSelection) !== canonicalHash({})) throw new Error("session_execution_selection_fixed：执行 reservation 未配置模型覆盖，不能更换");
+    const executionSelection = retryReservation ? retryReservation.executionSelection : requestedSelection;
     assertPlanningReady(snapshot.planningAssessment, draft.plan);
     if (draft.planHash !== snapshot.approval.planHash || canonicalHash(draft.plan) !== snapshot.approval.planHash) throw new Error("批准草案哈希校验失败");
     const review = await loadCurrentPlanReview(options.planningId, store.workspace);
@@ -453,7 +463,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     }
     const execution: ExecutionReference = retryReservation ? { ...retryReservation, isolation: executionIsolation } : {
       sessionId: randomUUID(), approvalId: snapshot.approval.approvalId, draftRevision: draft.draftRevision,
-      planHash: draft.planHash, state: "reserved" as const, isolation: executionIsolation,
+      planHash: draft.planHash, state: "reserved" as const, isolation: executionIsolation, ...(executionSelection ? { executionSelection } : {}),
     };
     snapshot = nextSnapshot(snapshot, { status: "approved", execution });
     await store.save(snapshot);
@@ -462,6 +472,7 @@ export async function runApprovedPlanner(options: PlannerRunOptions): Promise<Pl
     try {
       const result = await runPlan({
         plan: draft.plan, workspace: store.workspace, createRunner: options.createRunner, sessionId: execution.sessionId,
+        ...(executionSelection ? { executionSelection } : {}),
         ...(executionIsolation.mode === "git-worktree" ? { isolation: "git-worktree" as const, verificationTaskId: executionIsolation.verificationTaskId } : {}),
         ...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
         ...(setupProfile ? { setupProfile } : {}),

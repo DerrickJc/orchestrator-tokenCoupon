@@ -14,12 +14,14 @@ import { ExternalPlanningService } from "./external-planning.js";
 import { ModelCatalog, discoverPlannerModels, type ModelCatalogResult } from "./model-catalog.js";
 import { planningWorkflow } from "./planning-workflow.js";
 import { LocalAgentPlanner } from "./local-agent-planner.js";
+import { SystemSettingsStore } from "./system-settings.js";
 import {
   PlannerStore, SessionStore, ReviewStore, approvePlannerDraft, createDefaultRunnerRegistry, createPlanReviewer, validateVerificationTask, ensureRuntimeMetadataIgnored,
   loadPlannerConversation, replyToPlanner, reviewPlannerDraft, runApprovedPlanner, startPlannerConversation, replacePlannerDraft, revisePlannerDraft,
   retryPlannerTurn, resumeSession, retrySession, diagnoseSession, recoverSession, readSessionModels, updateSessionModel, createSessionDelivery, formatSessionDelivery,
   validateRunnerInteractionReply,
   renderTaskPrompt,
+  taskWithExecutionSelection,
 } from "@token-coupon/core";
 import type {
   ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
@@ -61,6 +63,7 @@ export class ApplicationService {
   private workspaces = new Map<string, WorkspaceEntry>();
   private eventSequence = 0;
   private readonly modelCatalog = new ModelCatalog();
+  private readonly settingsStore: SystemSettingsStore;
   private plannerModelsCache: { expires: number; result: Promise<ModelCatalogResult> } | undefined;
 
   constructor(options: ServiceOptions = {}) {
@@ -69,7 +72,14 @@ export class ApplicationService {
     this.workspacesPath = join(this.dataDirectory, "workspaces.json");
     this.jobsDirectory = join(this.dataDirectory, "jobs");
     this.eventsPath = join(this.dataDirectory, "events.jsonl");
+    this.settingsStore = new SystemSettingsStore(join(this.dataDirectory, "system-settings.json"));
     this.external = new ExternalPlanningService(this, this.dataDirectory);
+  }
+
+  systemSettings() { return this.settingsStore.read(); }
+  async saveSystemSettings(value: unknown) {
+    const saved = await this.settingsStore.update(value);
+    await this.publish({ type: "settings.updated", payload: { revision: saved.revision } }); return saved;
   }
 
   async initialize(): Promise<void> {
@@ -479,7 +489,7 @@ export class ApplicationService {
           const currentAttempt = latestId ? await readAttemptInfo(workspace.path, latestId).catch(() => null) : null;
           const definition = record.plan.tasks.find(entry => entry.task.id === task.taskId);
           const status = observation.tasks.get(task.taskId) ?? task.status;
-          return { ...task, savedStatus: task.status, status, title: definition?.task.title, dependsOn: definition?.dependsOn, execution: definition?.task.execution,
+          return { ...task, savedStatus: task.status, status, title: definition?.task.title, dependsOn: definition?.dependsOn, execution: definition ? taskWithExecutionSelection(definition.task, record.snapshot.executionSelection).execution : undefined,
             currentAttempt: currentAttempt && status !== task.status && ["created", "running"].includes(currentAttempt.status) ? { ...currentAttempt, savedStatus: currentAttempt.status, status, reason: observation.health.message } : currentAttempt };
         })) };
         session = JSON.parse(sanitizeOutput(JSON.stringify(session)));
@@ -662,12 +672,15 @@ export class ApplicationService {
     });
   }
 
-  async run(workspaceId: string, planningId: string, requestKey: string, input: { isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string }): Promise<JobRecord> {
+  async run(workspaceId: string, planningId: string, requestKey: string, input: { isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string; executionSelection?: import("@token-coupon/core").ExecutionSelection; expectedPlanHash?: string; expectedDraftRevision?: number }): Promise<JobRecord> {
     const workspace = await this.getWorkspace(workspaceId);
     return this.submit(workspaceId, "planning.run", requestKey, { planningId, ...input }, async (signal) => {
       await this.assertNoPendingPlanning(workspaceId, planningId);
     const result = await runApprovedPlanner({
         planningId, workspace: workspace.path, createRunner: this.runnerFactory, signal,
+        ...(input.executionSelection ? { executionSelection: input.executionSelection } : {}),
+        ...(input.expectedPlanHash ? { expectedPlanHash: input.expectedPlanHash } : {}),
+        ...(input.expectedDraftRevision !== undefined ? { expectedDraftRevision: input.expectedDraftRevision } : {}),
         taskSignal: (_taskId, attemptId) => this.ownedTaskSignal(attemptId, signal),
         ...(input.isolation === "git-worktree" ? { isolation: "git-worktree" as const, verificationTaskId: input.verificationTaskId } : {}),
         maxParallel: input.maxParallel,
@@ -750,7 +763,8 @@ export class ApplicationService {
       if (!entry || !state) throw new Error("session_model_task_invalid");
       if (state.status === "succeeded") throw new Error("session_model_task_completed：已完成任务保持不变");
       if (input.modelId !== null) {
-        const requested = { ...entry.task, execution: { ...entry.task.execution, modelId: input.modelId } };
+        const selected = taskWithExecutionSelection(entry.task, record.snapshot.executionSelection);
+        const requested = { ...selected, execution: { ...selected.execution, modelId: input.modelId } };
         if (!this.runnerFactory(requested, { ...(record.snapshot.runnerProfile ? { runnerProfile: record.snapshot.runnerProfile } : {}) }).supportsModel) throw new Error("session_model_unsupported：此 Runner 不支持选择模型");
       }
       const active = state.activeAttemptId ? this.taskControllers.get(state.activeAttemptId) : undefined;

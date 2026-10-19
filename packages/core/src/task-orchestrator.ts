@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { PlanDefinition, PlannedTask } from "./plan.js";
 import { PlanStore, sessionStatusFor } from "./plan-store.js";
 import { taskWithSessionModel } from "./session-models.js";
+import { parseExecutionSelection, taskWithExecutionSelection, type ExecutionSelection } from "./execution-selection.js";
 import { executeTask } from "./execute-task.js";
 import type { Runner, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerOutput } from "./runner.js";
 import type { RunnerProfile } from "./runner.js";
@@ -34,6 +35,7 @@ export interface TaskRunnerFactoryOptions {
 export type TaskRunnerFactory = (task: TaskDefinition, options: TaskRunnerFactoryOptions) => Runner;
 
 export interface PlanRunOptions {
+  executionSelection?: ExecutionSelection;
   plan: PlanDefinition;
   workspace: string;
   createRunner: TaskRunnerFactory;
@@ -111,8 +113,9 @@ export function validateVerificationTask(plan: PlanDefinition, taskId: string): 
 
 export async function runPlan(options: PlanRunOptions): Promise<SessionOperationResult> {
   if (options.plan.tasks.length === 0) throw new Error("空计划不能执行");
+  const executionSelection = options.executionSelection ? parseExecutionSelection(options.executionSelection, options.plan) : undefined;
   validateMockTaskScenarios(options.plan, options.mockTaskScenarios ?? new Map());
-  await checkRunners(options.plan.tasks, options);
+  await checkRunners(options.plan.tasks.map(entry => ({ ...entry, task: taskWithExecutionSelection(entry.task, executionSelection) })), options);
   const store = new SessionStore(options.workspace);
   const sessionId = options.sessionId ?? randomUUID();
   const mode = options.isolation ?? "shared";
@@ -147,7 +150,7 @@ export async function runPlan(options: PlanRunOptions): Promise<SessionOperation
       verificationTaskId: options.verificationTaskId!,
       setupHash: setupProfile ? worktreeSetupHash(setupProfile) : null,
     } : { mode: "shared" as const };
-    let record = await store.create(options.plan, sessionId, isolation, { maxParallel, ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
+    let record = await store.create(options.plan, sessionId, isolation, { maxParallel, ...(executionSelection ? { executionSelection } : {}), ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
     let worktrees: WorktreeIsolation | undefined;
     if (record.snapshot.isolation?.mode === "git-worktree") {
       worktrees = new WorktreeIsolation(record, store);
@@ -181,7 +184,7 @@ export async function resumeSession(options: SessionOperationOptions): Promise<S
     if (worktrees) current = await landReadyAttempts(current, store, worktrees);
     const unresolved = current.snapshot.tasks.filter((state) => state.status === "interrupted" || state.status === "blocked");
     if (unresolved.length > 0) throw new Error(`Session 尚有未解决的任务，先用 session retry 指定目标：${unresolved.map((state) => `${state.taskId}(${state.status})`).join(", ")}`);
-    await checkRunners(pendingTasks(current), executionOptions);
+    await checkRunners(await Promise.all(pendingTasks(current).map(async entry => ({ ...entry, task: await taskWithSessionModel(entry.task, store.workspace, options.sessionId) }))), executionOptions);
     current = await store.beginExecution(current);
     return await schedule(current, store, executionOptions, undefined, worktrees);
   } finally {
@@ -247,7 +250,7 @@ export async function retrySession(options: RetryOptions): Promise<SessionOperat
     if (!["failed", "timed_out", "cancelled", "interrupted"].includes(state.status)) throw new Error(`任务 ${options.taskId} 当前状态 ${state.status} 不允许重试`);
     const stateById = new Map(current.snapshot.tasks.map((item) => [item.taskId, item]));
     if (!entry.dependsOn.every((id) => stateById.get(id)?.status === "succeeded")) throw new Error(`任务 ${options.taskId} 的前置依赖尚未成功`);
-    await checkRunners([entry], executionOptions);
+    await checkRunners([{ ...entry, task: await taskWithSessionModel(entry.task, store.workspace, options.sessionId) }], executionOptions);
     current = await store.beginExecution(current);
     return await schedule(current, store, executionOptions, { taskId: options.taskId, allowRetry: true, taskStore: new PlanStore(current.plan, current.snapshot) }, worktrees);
   } finally {
@@ -907,8 +910,8 @@ async function checkRunners(entries: PlannedTask[], options: Pick<ExecutionOptio
     const scenario = options.mockTaskScenarios?.get(entry.task.id);
     const runner = options.createRunner(entry.task, { ...(options.acceptEdits ? { acceptEdits: true } : {}), ...(scenario ? { mockScenario: scenario } : {}), ...(options.runnerProfile ? { runnerProfile: options.runnerProfile } : {}) });
     const key = `${runner.id}:${options.acceptEdits}:${entry.task.execution.mode}`;
-    if (checked.has(key)) continue;
     if (entry.task.execution.modelId && !runner.supportsModel) throw new Error(`${runner.id} 不支持 modelId`);
+    if (checked.has(key)) continue;
     await runner.checkAvailable();
     checked.add(key);
   }

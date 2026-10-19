@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationService } from "./application-service.js";
-import { RepositoryReader, type RunnerInteractionReply } from "@token-coupon/core";
+import { RepositoryReader, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
 import { createMcpHttpHandler } from "./mcp-server.js";
 import type { RemoteMcpConnection } from "./oauth-gateway.js";
 import { browseDirectories } from "./workspace-tools.js";
@@ -13,7 +13,7 @@ import { pickNativePath, nativePickerCapability, normalizePickedPaths, type Nati
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
 
-export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind) => Promise<NativePickerResult> }): Promise<Server> {
+export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") throw new Error("daemon_bind_forbidden：本阶段服务只允许监听 loopback");
   const tokenPath = join(options.dataDirectory, "browser-session-token");
   let token: string;
@@ -68,7 +68,13 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const body = await readJsonBody(request);
       if (body.kind !== "directory" && body.kind !== "files") throw new Error("native_picker_kind_invalid");
       const workspace = body.kind === "files" ? await service.getWorkspace(stringField(body.workspaceId, "workspaceId", 32)) : undefined;
-      const picked = await normalizePickedPaths(await (options.nativePicker ?? pickNativePath)(body.kind), body.kind, workspace?.path);
+      const controller = new AbortController();
+      const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+      response.once("close", disconnected);
+      let picked: NativePickerResult;
+      try { picked = await normalizePickedPaths(await (options.nativePicker ?? pickNativePath)(body.kind, controller.signal), body.kind, workspace?.path); }
+      finally { response.removeListener("close", disconnected); }
+      if (controller.signal.aborted) return;
       if (workspace && !picked.cancelled) {
         const reader = new RepositoryReader(workspace.path);
         for (const path of picked.paths) {
@@ -105,8 +111,12 @@ export async function createLocalServer(service: ApplicationService, options: { 
         sendJson(response, 202, await service.gitIdentity(parts[1]!, requestKey(request, body), stringField(body.name, "name", 120), stringField(body.email, "email", 200))); return;
       }
     }
+    if (url.pathname === "/api/v1/settings") {
+      if (request.method === "GET") { sendJson(response, 200, await service.systemSettings()); return; }
+      if (request.method === "POST") { sendJson(response, 200, await service.saveSystemSettings(await readJsonBody(request))); return; }
+    }
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -135,6 +145,13 @@ export async function createLocalServer(service: ApplicationService, options: { 
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection/approvals") { sendJson(response, 200, options.remoteMcp?.approvals() ?? []); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection/grants") { sendJson(response, 200, options.remoteMcp?.grants() ?? []); return; }
+    if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 4 && parts[3] === "name") {
+      if (!options.remoteMcp) throw new Error("remote_connection_unavailable");
+      const body = await readJsonBody(request);
+      if (typeof body.alias !== "string") throw new Error("oauth_alias_invalid：请填写 MCP 名称");
+      await options.remoteMcp.renameGrant(parts[2]!, body.alias);
+      sendJson(response, 200, { updated: true }); return;
+    }
     if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 3) {
       if (!options.remoteMcp) throw new Error("remote_connection_unavailable");
       const body = await readJsonBody(request);
@@ -356,12 +373,12 @@ function executionDefaults(value: unknown): { runnerId: string; mode: "managed";
   if (!new Set(["codex", "claude-code", "dsh", "mock"]).has(runnerId)) throw new Error("runnerId_invalid：请选择已支持的 Runner");
   return { runnerId, mode: "managed", ...(item.modelId === undefined ? {} : { modelId: stringField(item.modelId, "modelId", 120) }) };
 }
-function runOptions(body: Record<string, unknown>): { isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string } {
+function runOptions(body: Record<string, unknown>): { isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string; executionSelection?: ExecutionSelection; expectedPlanHash?: string; expectedDraftRevision?: number } {
   const isolation = body.isolation === undefined ? "git-worktree" : body.isolation;
   if (isolation !== "git-worktree" && isolation !== "shared") throw new Error("isolation_invalid：隔离模式无效");
   const maxParallel = body.maxParallel === undefined ? 1 : integerField(body.maxParallel, "maxParallel", 1);
   if (maxParallel > 8) throw new Error("maxParallel_invalid：并发上限为 8");
-  return { isolation, maxParallel, ...(body.verificationTaskId === undefined ? {} : { verificationTaskId: stringField(body.verificationTaskId, "verificationTaskId", 64) }) };
+  return { isolation, maxParallel, ...(body.expectedPlanHash === undefined ? {} : { expectedPlanHash: stringField(body.expectedPlanHash, "expectedPlanHash", 64) }), ...(body.expectedDraftRevision === undefined ? {} : { expectedDraftRevision: integerField(body.expectedDraftRevision, "expectedDraftRevision", 1) }), ...(body.executionSelection === undefined ? {} : { executionSelection: parseExecutionSelection(body.executionSelection) }), ...(body.verificationTaskId === undefined ? {} : { verificationTaskId: stringField(body.verificationTaskId, "verificationTaskId", 64) }) };
 }
 function interactionReply(body: Record<string, unknown>): RunnerInteractionReply {
   if (body.kind === "approval" && (body.decision === "allow-once" || body.decision === "deny")) {

@@ -2,8 +2,108 @@ import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
 import { afterEach, expect, it } from "vitest";
+import { defaultSystemSettings } from "../../daemon/src/system-settings.js";
 
 const windows: JSDOM[] = [];
+it("initializes unified preferences, persists a selected Agent and keeps per-function settings editable", async () => {
+  const h = await page({ empty: true, settings: defaultSystemSettings() });
+  await expect.poll(() => h.w.location.hash).toBe("#/settings");
+  expect(h.visible("system-settings-page")).toBe(true);
+  const policy = h.element("system-settings-policies").querySelector<HTMLElement>('[data-function="unified"]')!;
+  const priority = policy.querySelector<HTMLSelectElement>('[data-field="priority"]')!;
+  priority.value = "agent"; priority.dispatchEvent(new h.w.Event("change"));
+  const runner = policy.querySelector<HTMLSelectElement>('[data-field="runner"]')!;
+  runner.value = "claude-code"; runner.dispatchEvent(new h.w.Event("change"));
+  await expect.poll(() => policy.querySelector<HTMLSelectElement>('[data-field="model-choice"]')!.options.length).toBeGreaterThan(1);
+  const model = policy.querySelector<HTMLInputElement>('[data-field="model"]')!;
+  model.value = "deepseek-flash"; model.dispatchEvent(new h.w.Event("input"));
+  h.element("system-settings-form").dispatchEvent(new h.w.Event("submit", { cancelable: true }));
+  await expect.poll(() => h.element("system-settings-status").textContent).toContain("设置已保存");
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/settings", body: { mode: "unified", unified: { priority: "agent", agent: { runnerId: "claude-code", modelId: "deepseek-flash" } } } });
+  expect(h.visible("system-settings-continue")).toBe(true);
+  const mode = h.element("system-settings-mode") as HTMLSelectElement;
+  mode.value = "per-function"; mode.dispatchEvent(new h.w.Event("change"));
+  expect(h.element("system-settings-policies").querySelectorAll("fieldset")).toHaveLength(3);
+  expect(h.posts).toHaveLength(1);
+});
+
+it("uses per-function defaults for new planning and review while preserving an explicit review choice", async () => {
+  const settings = defaultSystemSettings(); settings.initialized = true; settings.mode = "per-function";
+  settings.functions.planning = { priority: "agent", agent: { runnerId: "claude-code", modelId: "deepseek-flash" }, webSource: "chatgpt" };
+  settings.functions.review = { priority: "web", agent: { runnerId: "codex" }, webSource: "claude" };
+  const h = await page({ hash: "#/workspaces/project/new", settings });
+  await expect.poll(() => (h.element("planner-provider") as HTMLSelectElement).value).toBe("claude-agent");
+  await expect.poll(() => (h.element("planner-model") as HTMLInputElement).value).toBe("deepseek-flash");
+  h.w.eval('void navigate("/workspaces/project/plans/first/review")');
+  await expect.poll(() => (h.element("reviewer-mode") as HTMLSelectElement).value).toBe("web-claude");
+  const select = h.element("reviewer-mode") as HTMLSelectElement;
+  select.value = "codex-agent"; select.dispatchEvent(new h.w.Event("change"));
+  h.w.eval('renderReviewerControls(__testState.planning)'); expect(select.value).toBe("codex-agent");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(h.posts).toHaveLength(0);
+});
+
+it("keeps workspace settings separate, retains the selected project through system settings and reuses authorization management", async () => {
+  const h = await page({ hash: "#/workspaces/project", ready: true });
+  await expect.poll(() => (h.element("workspace-settings-nav") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.visible("workspace-rename-open")).toBe(false);
+  h.element("workspace-settings-nav").click();
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/settings");
+  expect(h.visible("workspace-rename-open")).toBe(true); expect(h.element("workspace-settings-path").textContent).toContain("/projects/排课后端");
+  h.w.eval('void navigate("/settings")'); await expect.poll(() => h.w.location.hash).toBe("#/settings");
+  expect(h.w.eval('__testState.workspace.workspaceId')).toBe("project");
+  h.element("workspace-settings-nav").click(); await expect.poll(() => h.visible("workspace-settings-page")).toBe(true);
+  h.element("workspace-manage-access").click(); await expect.poll(() => h.w.location.hash).toBe("#/connect");
+  expect(h.visible("authorization-panel")).toBe(true); expect(h.posts).toHaveLength(0);
+});
+
+it("opens the configured diagnostic Agent without calling a model and lets the user switch analysis routes", async () => {
+  const settings = defaultSystemSettings(); settings.initialized = true; settings.unified.priority = "agent"; settings.unified.agent = { runnerId: "claude-code", modelId: "deepseek-flash" };
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", settings });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  const original = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => raw.endsWith("/diagnostics") ? Response.json({ diagnostics: [] }) : original(raw, init)) as any;
+  h.w.eval('__testState.attemptView = {workspaceId:"project",planningId:"first",attemptId:"diagnostic-attempt",attempt:{runnerId:"codex"}}; void openAttemptDiagnosis()');
+  await expect.poll(() => h.element("attempt-diagnosis-dialog").hasAttribute("open")).toBe(true);
+  await expect.poll(() => (h.element("attempt-diagnosis-runner") as HTMLSelectElement).value).toBe("claude-code");
+  await expect.poll(() => (h.element("attempt-diagnosis-model") as HTMLSelectElement).value).toBe("deepseek-flash");
+  expect(h.posts).toHaveLength(0);
+  const switchMode = [...h.element("attempt-diagnosis-dialog").querySelectorAll("button")].find(button => button.textContent === "切换分析方式")!;
+  switchMode.click(); expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(true);
+});
+
+it("retains unsaved settings after a failed save and reloads saved preferences explicitly", async () => {
+  const settings = defaultSystemSettings(); settings.initialized = true;
+  const h = await page({ hash: "#/settings", settings });
+  await expect.poll(() => h.element("system-settings-policies").children.length).toBe(1);
+  const priority = h.element("system-settings-policies").querySelector<HTMLSelectElement>('[data-field="priority"]')!;
+  priority.value = "agent"; priority.dispatchEvent(new h.w.Event("change"));
+  const original = h.w.fetch;
+  h.w.fetch = ((raw: string, init?: any) => raw.endsWith("/settings") && init?.method === "POST" ? Promise.resolve(Response.json({ error: "settings_revision_conflict" }, { status: 400 })) : original(raw, init)) as any;
+  h.element("system-settings-form").dispatchEvent(new h.w.Event("submit", { cancelable: true }));
+  await expect.poll(() => h.element("system-settings-status").textContent).toContain("保存未完成");
+  expect(priority.value).toBe("agent"); expect(h.w.eval('__testState.systemSettings.unified.priority')).toBe("web");
+  h.element("system-settings-reload").click();
+  await expect.poll(() => h.element("system-settings-policies").querySelector<HTMLSelectElement>('[data-field="priority"]')!.value).toBe("web");
+});
+
+it("cancels folder selection immediately and prevents a late cancelled response from unlocking a newer picker", async () => {
+  const h = await page({ hash: "#/workspaces", ready: true }), original = h.w.fetch;
+  const pending: Array<{ signal: AbortSignal; finish(result: Response): void }> = [];
+  h.w.fetch = ((raw: string, init?: any) => raw.endsWith("/native-picker") ? new Promise<Response>(finish => pending.push({ signal: init.signal, finish })) : original(raw, init)) as any;
+  h.element("add-workspace-main").click(); await expect.poll(() => pending.length).toBe(1);
+  h.element("cancel-directory-picker").click(); expect(pending[0]!.signal.aborted).toBe(true);
+  expect((h.element("workspace-manual-path") as HTMLDetailsElement).open).toBe(true);
+  expect((h.element("choose-workspace-directory") as HTMLButtonElement).disabled).toBe(false);
+  h.element("choose-workspace-directory").click(); await expect.poll(() => pending.length).toBe(2);
+  pending[0]!.finish(Response.json({ cancelled: false, paths: ["/stale"] })); await new Promise(resolve => setTimeout(resolve, 20));
+  expect((h.element("choose-workspace-directory") as HTMLButtonElement).disabled).toBe(true);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("");
+  h.element("workspace-form-back").click(); expect(pending[1]!.signal.aborted).toBe(true);
+  pending[1]!.finish(Response.json({ cancelled: false, paths: ["/late"] }));
+  expect(h.visible("workspace-form")).toBe(false); expect(h.posts).toHaveLength(0);
+});
+
 it("loads the full task model menu, isolates Runner choices and ignores a late catalog", async () => {
   const h = await page({ hash: "#/workspaces/project/plans/first/draft", ready: true });
   await expect.poll(() => h.w.eval("__testState.planning?.planningId")).toBe("first");
@@ -82,6 +182,40 @@ it("shows MCP names outside details and sorts authorization records by their cre
   expect(h.element("remote-approval-history-list").textContent!.indexOf("new-requ")).toBeLessThan(h.element("remote-approval-history-list").textContent!.indexOf("old-requ"));
 });
 
+it("distinguishes a generic web source from its MCP name and saves a name without changing authorization", async () => {
+  const h = await page({ ready: true });
+  h.setGrants([{ grantId: "named", clientName: "ChatGPT", source: "chatgpt", workspaceIds: ["project"], expiresAt: Date.now() + 60000 }, { grantId: "other", alias: "demo-other", source: "claude", workspaceIds: ["project"], expiresAt: Date.now() + 60000 }]);
+  h.element("refresh").click(); await expect.poll(() => h.element("remote-grants").children.length).toBe(2);
+  const card = () => h.element("remote-grants").querySelector<HTMLElement>('[data-grant-id="named"]')!;
+  expect(card().querySelector(".grant-mcp-title")!.textContent).toContain("MCP：待设置名称");
+  card().querySelector<HTMLButtonElement>(".grant-rename")!.click();
+  const input = card().querySelector<HTMLInputElement>(".grant-name-input")!; input.value = "demo1";
+  card().querySelector<HTMLFormElement>(".grant-name-form")!.dispatchEvent(new h.w.Event("submit", { bubbles: true, cancelable: true }));
+  await expect.poll(() => card().querySelector(".grant-mcp-title")!.textContent).toContain("MCP：demo1");
+  expect(h.posts.filter(item => item.path.includes("/grants/"))).toEqual([{ path: "/api/v1/remote-connection/grants/named/name", body: { alias: "demo1" } }]);
+  expect(h.element("remote-mcp-names").textContent).toContain("demo1");
+  h.element("refresh").click(); await expect.poll(() => card().textContent).toContain("demo1");
+  expect(h.element("remote-grants").querySelector('[data-grant-id="other"]')!.textContent).toContain("demo-other");
+  expect(h.w.eval('grantMcpName({clientName:"web-demo",source:"claude"})')).toBe("web-demo");
+  expect(h.w.eval('grantMcpName({clientName:"web-demo",alias:"my-demo"})')).toBe("my-demo");
+});
+
+it("keeps an unsuccessful name edit and allows cancellation without changing the saved name", async () => {
+  const h = await page({ ready: true });
+  h.setGrants([{ grantId: "named", alias: "demo1", source: "chatgpt", workspaceIds: ["project"], expiresAt: Date.now() + 60000 }]);
+  h.element("refresh").click(); await expect.poll(() => h.element("remote-grants").children.length).toBe(1);
+  const card = h.element("remote-grants").firstElementChild!;
+  card.querySelector<HTMLButtonElement>(".grant-rename")!.click();
+  const input = card.querySelector<HTMLInputElement>(".grant-name-input")!; input.value = "new-name";
+  const original = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => raw.endsWith("/name") ? Response.json({ error: "save unavailable" }, { status: 503 }) : original(raw, init)) as any;
+  card.querySelector<HTMLFormElement>(".grant-name-form")!.dispatchEvent(new h.w.Event("submit", { cancelable: true }));
+  await expect.poll(() => card.querySelector(".grant-name-feedback")!.textContent).toContain("save unavailable");
+  expect(input.value).toBe("new-name"); expect(card.querySelector(".grant-mcp-title")!.textContent).toContain("demo1");
+  card.querySelector<HTMLButtonElement>('.grant-name-form button[type="button"]')!.click();
+  expect(card.querySelector(".grant-name-form")!.classList.contains("hidden")).toBe(true); expect(input.value).toBe("demo1");
+});
+
 it("supports optional directory path navigation and server-side name search without opening a native picker", async () => {
   const h = await page({ hash: "#/workspaces", ready: true, empty: true });
   await expect.poll(() => h.visible("workspace-selection")).toBe(true);
@@ -113,11 +247,11 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
-  Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
+  Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined; w.confirm = () => true;
@@ -125,6 +259,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   const workspaces = options.empty ? [] : [{ workspaceId: "project", label: "排课后端", path: "/projects/排课后端" }];
   if (options.multiple) workspaces.push({ workspaceId: "other", label: "其他项目", path: "/projects/other" });
   const nativeCalls: any[] = [], nativeResults: any = { directory: { cancelled: false, paths: ["/projects/新项目"] }, files: { cancelled: false, paths: ["README.md"] } };
+  let settings = options.settings;
   let pendingInteractions: any[] = [];
   let gitStatus: any = { state: options.gitState || "ready", message: options.gitState === "not_repository" ? "此文件夹还不是 Git 仓库" : "Git 已就绪", commands: ["git init"] };
   const tasks = [
@@ -142,10 +277,11 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       const body = JSON.parse(String(init.body));
       if (path === "/api/v1/native-picker") { nativeCalls.push(body); return Response.json(nativeResults[body.kind]); }
       posts.push({ path, body });
+      if (path === "/api/v1/settings") { settings = { ...body, revision: body.revision + 1, initialized: true }; return Response.json(settings); }
       if (path.includes("/interactions/")) { pendingInteractions = []; return Response.json({ ok: true }); }
       if (path === "/api/v1/workspaces") { const added = { workspaceId: "folder-project", path: body.path, label: body.label || "新项目" }; workspaces.push(added); return Response.json(added); }
       if (path.endsWith("/git")) { gitStatus = { state: body.action === "initialize" ? "no_commit" : "ready", message: body.action === "initialize" ? "Git 已初始化，但还没有首次提交" : "Git 已就绪", commands: [] }; return Response.json({ kind: "workspace.git.prepare", status: "succeeded", result: gitStatus }); }
-      if (path.includes("/remote-connection/grants/")) { grants = grants.map(grant => grant.grantId === path.split("/").at(-1) ? { ...grant, ...body } : grant); return Response.json({ updated: true }); }
+      if (path.includes("/remote-connection/grants/")) { const grantId = path.endsWith("/name") ? path.split("/").at(-2) : path.split("/").at(-1); grants = grants.map(grant => grant.grantId === grantId ? { ...grant, ...body } : grant); return Response.json({ updated: true }); }
       if (path.endsWith("/remote-connection/test")) return Response.json(remote);
       if (path.endsWith("/approve")) {
         const plan = plans.find(item => path.includes(item.planningId))!;
@@ -167,12 +303,13 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       }
       throw new Error(`unexpected POST ${path}`);
     }
-    if (path.endsWith("/health")) return Response.json({ epoch: "test", workspaceEnvironment: { currentDirectory: "/projects" }, mcp: { localReady: true, url: "http://127.0.0.1:4177/mcp" } });
+    if (path.endsWith("/health")) return Response.json({ epoch: "test", ...(options.legacyDaemon ? {} : { capabilities: { executionSelection: 1, ...(settings ? { systemSettings: 1 } : {}) } }), workspaceEnvironment: { currentDirectory: "/projects" }, mcp: { localReady: true, url: "http://127.0.0.1:4177/mcp" } });
+    if (path === "/api/v1/settings") return Response.json(settings);
     if (path === "/api/v1/workspaces") return Response.json(workspaces);
     if (path.endsWith("/git")) return Response.json(gitStatus);
     if (path === "/api/v1/directories") { const path = url.searchParams.get("path") || "/projects"; return Response.json({ path, parent: "/", shortcuts: [{ label: "主目录", path: "/projects" }], entries: path === "/projects" ? [{ name: "新项目", path: "/projects/新项目" }] : [], nextOffset: null }); }
-    if (path.endsWith("/providers")) return Response.json([{ id: "web-mcp", label: "网页 MCP", available: true }]);
-    if (path.endsWith("/runners")) return Response.json([{ id: "mock", label: "Mock", available: true }]);
+    if (path.endsWith("/providers")) return Response.json([{ id: "web-mcp", label: "网页 MCP", available: true }, ...(settings ? ["codex-agent", "claude-agent", "chatgpt-mcp", "claude-mcp"].map(id => ({ id, label: id, available: true })) : [])]);
+    if (path.endsWith("/runners")) return Response.json([{ id: "mock", label: "Mock", available: true }, ...(settings ? ["codex", "claude-code"].map(id => ({ id, label: id, available: true })) : [])]);
     if (path.endsWith("/models")) return Response.json({ models: [], customAllowed: true });
     if (path.endsWith("/remote-connection")) return Response.json(remote);
     if (path.endsWith("/grants")) return Response.json(grants);
@@ -193,7 +330,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
 }
 
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
-  const h = await page({ hash: "#/workspaces/project", ready: true });
+  const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();
   await expect.poll(() => h.element("workspace-enable-access").textContent).toContain("已授权 1");
   expect(h.visible("workspace-enable-access")).toBe(true);
@@ -495,6 +632,59 @@ it("restores the exact plan from a deep link and copies a continuation prompt fo
   await expect.poll(() => h.visible("review-tab")).toBe(true);
 });
 
+it("requires an updated backend before enabling launch model overrides", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, legacyDaemon: true });
+  await expect.poll(() => h.visible("run-configuration")).toBe(true);
+  const mode = h.element("run-agent-mode") as HTMLSelectElement;
+  expect([...mode.options].filter(item => item.value !== "plan").every(item => item.disabled)).toBe(true);
+  expect(h.element("run-agent-support-note").textContent).toContain("重启后台");
+  // A stored preference from a newer daemon must not be silently ignored by an older one.
+  h.w.eval('__testState.runConfiguration.agentMode="unified";renderRunConfiguration()');
+  expect((h.element("run-button") as HTMLButtonElement).disabled).toBe(true); expect(h.element("run-configuration-error").textContent).toContain("不支持"); expect(h.posts).toHaveLength(0);
+});
+
+it("launches one unified model with a task-specific exception without modifying the approved draft", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  await expect.poll(() => h.visible("run-configuration")).toBe(true);
+  const original = JSON.stringify(h.plans[0]);
+  h.w.eval('__testState.runners=[{id:"codex",available:true},{id:"claude-code",available:true},{id:"mock",available:true}]');
+  const fetch = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => raw.includes("/models?") ? Response.json({ models: raw.includes("/codex/") ? [{ id: "gpt-6-luna" }] : [{ id: "deepseek-flash" }], customAllowed: true }) : fetch(raw, init)) as any;
+  const mode = h.element("run-agent-mode") as HTMLSelectElement; mode.value = "unified"; mode.dispatchEvent(new h.w.Event("change"));
+  const defaults = h.element("run-agent-defaults"), runner = defaults.querySelector<HTMLSelectElement>('[data-field="runner"]')!;
+  runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change"));
+  const model = defaults.querySelector<HTMLSelectElement>('[data-field="model-choice"]')!;
+  await expect.poll(() => [...model.options].map(item => item.value)).toContain("gpt-6-luna"); model.value = "gpt-6-luna"; model.dispatchEvent(new h.w.Event("change"));
+  const row = h.element("run-agent-task-list").querySelector<HTMLDetailsElement>('[data-task-id="verify"]')!; row.open = true; row.dispatchEvent(new h.w.Event("toggle"));
+  const override = row.querySelector<HTMLInputElement>('[data-task-override]')!; override.checked = true; override.dispatchEvent(new h.w.Event("change"));
+  const taskRunner = row.querySelector<HTMLSelectElement>('[data-field="runner"]')!; taskRunner.value = "claude-code"; taskRunner.dispatchEvent(new h.w.Event("change"));
+  const taskModel = row.querySelector<HTMLSelectElement>('[data-field="model-choice"]')!;
+  await expect.poll(() => [...taskModel.options].map(item => item.value)).toContain("deepseek-flash"); taskModel.value = "deepseek-flash"; taskModel.dispatchEvent(new h.w.Event("change"));
+  h.element("refresh").click(); await expect.poll(() => h.element("run-configuration-summary").textContent).toContain("deepseek-flash");
+  expect(JSON.stringify(h.plans[0])).toBe(original); expect(h.posts).toHaveLength(0);
+  await expect.poll(() => (h.element("run-button") as HTMLButtonElement).disabled).toBe(false); h.element("run-button").click();
+  await expect.poll(() => h.posts.some(item => item.path.endsWith("/run"))).toBe(true);
+  expect(h.posts.find(item => item.path.endsWith("/run"))!.body).toMatchObject({ expectedPlanHash: "first", expectedDraftRevision: 1, executionSelection: { defaults: { runnerId: "codex", modelId: "gpt-6-luna" }, tasks: [{ taskId: "verify", runnerId: "claude-code", modelId: "deepseek-flash" }] } });
+});
+
+it("remembers per-task launch choices for their own plan and keeps other tasks on their original defaults", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  await expect.poll(() => h.visible("run-configuration")).toBe(true);
+  h.w.eval('__testState.runners=[{id:"codex",available:true},{id:"mock",available:true}]');
+  const mode = h.element("run-agent-mode") as HTMLSelectElement; mode.value = "per-task"; mode.dispatchEvent(new h.w.Event("change"));
+  const row = h.element("run-agent-task-list").querySelector<HTMLDetailsElement>('[data-task-id="spec"]')!; row.open = true; row.dispatchEvent(new h.w.Event("toggle"));
+  const runner = row.querySelector<HTMLSelectElement>('[data-field="runner"]')!; runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change"));
+  const model = row.querySelector<HTMLInputElement>('[data-field="model"]')!; model.value = "my-fast-model"; model.dispatchEvent(new h.w.Event("input"));
+  h.w.eval('void navigate("/workspaces/project/plans/second/execution")'); h.element("local-state-keep").click();
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("second"); expect((h.element("run-agent-mode") as HTMLSelectElement).value).toBe("plan");
+  h.w.eval('void navigate("/workspaces/project/plans/first/execution")');
+  await expect.poll(() => (h.element("run-agent-mode") as HTMLSelectElement).value).toBe("per-task");
+  const selection = h.w.eval('runExecutionSelection(__testState.runConfiguration,__testState.planning.draft.plan)');
+  expect(selection.tasks.find((item: any) => item.taskId === "spec")).toEqual({ taskId: "spec", runnerId: "codex", modelId: "my-fast-model" });
+  expect(selection.tasks.filter((item: any) => item.taskId !== "spec").every((item: any) => item.runnerId === "mock" && !item.modelId)).toBe(true);
+  expect(h.posts).toHaveLength(0);
+});
+
 it("selects only the graph-valid final verifier and requires an explicit run after approval", async () => {
   const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
@@ -502,7 +692,7 @@ it("selects only the graph-valid final verifier and requires an explicit run aft
   expect(options).toEqual(["verify"]);
   expect((h.element("run-verification") as HTMLSelectElement).value).toBe("verify");
   expect(h.posts.some(item => item.path.endsWith("/run"))).toBe(false);
-  expect(h.element("run-configuration-summary").textContent).toContain("沿用 Runner 自身配置");
+  expect(h.element("run-configuration-summary").textContent).toContain("Runner 默认模型");
   await expect.poll(() => (h.element("run-button") as HTMLButtonElement).disabled).toBe(false);
   h.element("run-button").click();
   await expect.poll(() => h.posts.some(item => item.path.endsWith("/run"))).toBe(true);

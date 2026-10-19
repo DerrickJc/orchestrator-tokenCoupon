@@ -52,9 +52,9 @@
 .attempt-message { padding: 16px 0; border-bottom: 1px solid var(--border, #dce1e8); }
 .attempt-message pre, #attempt-tools pre, #git-preview-content pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; line-height: 1.65; }
 #attempt-raw { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.git-file-list { max-height: 260px; overflow: auto; display: grid; gap: 8px; padding: 12px 0; }
-.git-file-list label { display: flex; align-items: baseline; gap: 8px; overflow-wrap: anywhere; }
-.git-file-list input { width: auto; }
+.git-file-list { max-height: 320px; overflow:auto; display:block; padding:6px 0; font-size:12px; }
+.git-file-list label { display:flex; align-items:center; gap:6px; overflow-wrap:anywhere; cursor:pointer; }
+.git-file-list input[type="checkbox"] { width:15px; height:15px; flex:0 0 15px; margin:0; }
 .session-progress { font-weight: 600; padding: 12px; background: var(--surface, #f3f6fa); border-radius: 8px; }
 #git-preview-dialog { max-width: min(900px, 94vw); max-height: 88vh; overflow: auto; }
 #git-preview-content { max-height: 50vh; overflow: auto; }
@@ -93,9 +93,21 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .task-agent-config-list { display:grid; gap:10px; max-height:min(55vh,640px); overflow:auto; margin:12px 0; }
 .task-agent-config-row { min-width:0; padding:12px; border:1px solid var(--line); border-radius:9px; }
 .task-agent-config-row legend { max-width:100%; padding:0 6px; font-size:12px; font-weight:700; overflow-wrap:anywhere; }
-.task-agent-config-fields { grid-template-columns:repeat(2,minmax(0,1fr)); margin:5px 0; }
+.task-agent-config-fields { grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; margin:5px 0; }
+.task-agent-config-fields label { display:grid; align-content:start; gap:5px; }
 .task-agent-config-fields select,.task-agent-config-fields input { width:100%; min-width:0; padding:9px; border:1px solid var(--line); border-radius:7px; background:#fff; }
 .task-agent-config-row>.hint { margin:7px 0 0; }
+.run-agent-configuration { min-width:0; margin:16px 0; padding:12px; border:1px solid var(--line); border-radius:9px; }
+.run-agent-configuration > legend { padding:0 5px; font-size:13px; font-weight:650; }
+.run-agent-configuration label { display:grid; gap:5px; font-size:12px; }
+.run-agent-configuration .hint { margin:7px 0; }
+#run-agent-defaults { margin-top:12px; }
+#run-agent-overrides { margin-top:12px; font-size:12px; }
+#run-agent-overrides > summary,.run-agent-task > summary { cursor:pointer; padding:5px 0; font-weight:600; }
+#run-agent-task-list { max-height:360px; overflow:auto; margin-top:8px; }
+.run-agent-task { margin:5px 0; padding:8px 10px; border:1px solid var(--line); border-radius:7px; }
+.run-agent-task > summary { overflow-wrap:anywhere; }
+.run-agent-configuration .run-agent-override-toggle { display:flex; align-items:center; gap:7px; padding:5px 0; }
 @media(max-width:600px) { .task-agent-config-fields { grid-template-columns:1fr; } }
 @media(max-width:600px) { .job-plan-link { max-width:100%; flex-basis:100%; } .remote-scope-list.permissions .remote-scope-options { grid-template-columns:1fr; } }
 .file-choice .file-entry { flex:1; min-width:0; }
@@ -186,12 +198,21 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .event-entry { display:grid; grid-template-columns:75px minmax(110px,220px) minmax(0,1fr); gap:8px; align-items:start; }
 .event-entry[data-level="error"] .event-content { color:#8b352d; background:#fff0ed; border-radius:5px; padding:2px 5px; }
 .event-entry[data-level="success"] .event-content { color:#3f6136; }
-.git-tree-select-all { display:block; padding:8px 10px; margin-bottom:7px; border-bottom:1px solid #e4e9df; font-weight:650; }
-.git-tree-folder { margin:4px 0 4px 11px; padding-left:8px; border-left:1px solid #e4e9df; }
-.git-tree-folder > summary { padding:5px 2px; cursor:pointer; }
-.git-tree-folder-label,.git-tree-file { display:flex; align-items:flex-start; gap:7px; line-height:1.6; overflow-wrap:anywhere; }
-.git-tree-file { margin:4px 0 4px 24px; font-size:11px; }
-.git-tree-folder input,.git-tree-file input,.git-tree-select-all input { margin-top:3px; accent-color:#536f48; flex:0 0 auto; }
+.git-tree-select-all { padding:5px 4px 8px; margin-bottom:4px; border-bottom:1px solid var(--line); font-weight:650; line-height:1.5; }
+.git-tree-folder { margin:0; padding:0; min-width:0; }
+.git-tree-folder > summary { display:grid; grid-template-columns:10px minmax(0,1fr) auto; align-items:center; gap:6px; min-height:28px; padding:3px 4px; list-style:none; border-radius:5px; cursor:pointer; font-size:12px; line-height:1.5; }
+.git-tree-folder > summary::-webkit-details-marker { display:none; }
+.git-tree-folder > summary::before { content:""; width:6px; height:6px; justify-self:center; border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted); transform:rotate(-45deg); }
+.git-tree-folder[open] > summary::before { transform:rotate(45deg); }
+.git-tree-folder-label { min-width:0; line-height:1.5; font-weight:600; }
+.git-tree-folder-count { color:var(--muted); font-size:11px; font-weight:400; white-space:nowrap; }
+.git-tree-children { margin-left:8px; padding-left:10px; border-left:1px solid var(--line); }
+.git-file-list .git-tree-file { display:grid; grid-template-columns:15px minmax(0,1fr) auto; align-items:start; gap:6px; margin:0 0 0 16px; padding:5px 4px; border-radius:5px; line-height:1.5; }
+.git-tree-file-name { min-width:0; overflow-wrap:anywhere; }
+.git-tree-file-status { max-width:150px; color:var(--muted); font-size:11px; text-align:right; }
+.git-tree-folder > summary:hover,.git-tree-file:hover { background:#f0f4eb; }
+.git-file-list input[type="checkbox"] { align-self:center; }
+@media(max-width:600px) { .git-file-list .git-tree-file { grid-template-columns:15px minmax(0,1fr); } .git-tree-file-status { grid-column:2; max-width:none; text-align:left; } }
 .approval-command { padding:10px 12px; border:1px solid #c7d4e2; border-radius:7px; background:#f3f7fb; white-space:pre-wrap; overflow-wrap:anywhere; color:#253c55; }
 .approval-reason { padding:9px 11px; border-left:3px solid #8296ad; background:#f5f7f9; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; }
 .approval-field-label { color:#314e6d; font-size:11px; }
@@ -407,6 +428,13 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 #session-blocker-actions { margin-top:10px; }
 
 .grant-saved-summary { margin:10px 0; }
+.remote-grant-card .remote-approval-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; }
+.grant-mcp-title { min-width:0; overflow-wrap:anywhere; }
+.remote-grant-card .grant-state { margin-left:auto; }
+.grant-name-form { margin:12px 0; padding:12px; background:var(--soft); border:1px solid var(--line); border-radius:8px; }
+.grant-name-form label { display:grid; gap:6px; font-size:13px; }
+.grant-name-form .hint { margin:6px 0; }
+.grant-name-feedback:empty { display:none; }
 .grant-workspace-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr)); gap:8px; }
 .grant-workspace-summary > div { display:grid; gap:4px; min-width:0; padding:10px 12px; border:1px solid var(--line); border-radius:9px; background:var(--soft); }
 .grant-workspace-summary strong { font-size:13px; }
@@ -442,5 +470,7 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .pending-approval-box.has-pending .interaction-card .hint { color:#52677e; }
 
 .execution-floating-status{position:fixed;right:24px;bottom:24px;z-index:45;display:grid;gap:7px;width:min(340px,calc(100vw - 32px));padding:16px 19px;border:1px solid #c5d3bf;border-left:4px solid var(--green-dark);border-radius:12px;background:#fbfdf8;color:var(--ink);box-shadow:0 8px 28px #20331f26;text-decoration:none;cursor:pointer}.execution-floating-status strong{font-size:13px;line-height:1.5;overflow-wrap:anywhere}.execution-floating-status span{font-size:12px;color:var(--green-dark)}.execution-floating-status:hover,.execution-floating-status:focus-visible{background:var(--soft);outline:2px solid #b8cbb0}.execution-floating-status[data-state=failed],.execution-floating-status[data-state=cancelled]{border-left-color:var(--red)}
+
+.settings-form{max-width:1000px}.settings-form>.compact-label{display:grid;gap:8px;max-width:340px;margin:18px 0}.policy-card{border:1px solid var(--line);border-radius:12px;padding:18px;margin:18px 0;min-width:0}.policy-card legend{font-weight:650;padding:0 7px}.policy-card>label{display:grid;gap:7px;max-width:400px;margin:10px 0;font-size:13px}.policy-card .agent-selection-controls{margin-top:14px}.settings-grants{display:grid;gap:8px;margin:12px 0}.settings-grant{padding:10px 13px;margin:0;border:1px solid var(--line);border-radius:9px;overflow-wrap:anywhere;font-size:13px}#cancel-directory-picker{margin-left:8px}#workspace-settings-page>.card{margin-bottom:18px}.settings-form select{width:100%;font:inherit;border:1px solid var(--line);border-radius:8px;padding:10px;background:white}.main-navigation button:disabled{opacity:.5;cursor:default}
 
 .reference-path-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}.reference-path-row input{flex:1;min-width:160px}#directory-dialog{width:min(720px,calc(100vw - 32px))}#directory-dialog input,#file-directory-path{border:1px solid var(--line);border-radius:7px;padding:10px;font:inherit;background:white}#directory-dialog label{display:block;font-size:12px;margin:12px 0 5px}#directory-query{width:100%}#directory-dialog .file-list{max-height:40vh;overflow:auto;margin:12px 0}
