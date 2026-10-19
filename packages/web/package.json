@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build --config vite.config.js",
-    "dev": "vite --config vite.config.js"
+    "dev": "vite --config vite.config.js",
+    "typecheck": "tsc --project tsconfig.json"
   }
 }

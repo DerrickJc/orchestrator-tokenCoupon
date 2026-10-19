@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/cli && npm run build --workspace @token-coupon/web && npm run build --workspace @token-coupon/daemon",
-    "typecheck": "npm run build --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/cli && npm run typecheck --workspace @token-coupon/daemon",
+    "typecheck": "npm run build --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/cli && npm run typecheck --workspace @token-coupon/web && npm run typecheck --workspace @token-coupon/daemon",
     "daemon": "npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/web && npm run build --workspace @token-coupon/daemon && node packages/daemon/dist/main.js",
     "web:dev": "npm run dev --workspace @token-coupon/web",
     "cli": "npm run build && node packages/cli/dist/main.js",
