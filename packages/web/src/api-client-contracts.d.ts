@@ -126,6 +126,19 @@ export type PlanOverviewBridge = {
 export type PlanTabsBridge = {
   render(selectedTab: string, onSelect: (tab: string) => void): void;
 };
+export type ConversationViewItem = {
+  messageId: string;
+  roleClass: "user" | "assistant";
+  label: string;
+  content: string;
+};
+export type ConversationViewModel = {
+  count: number;
+  messages: ConversationViewItem[];
+};
+export type ConversationViewBridge = {
+  render(model: ConversationViewModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -138,4 +151,5 @@ declare global {
   var tokenCouponPlanDraftView: PlanDraftViewBridge | undefined;
   var tokenCouponPlanOverview: PlanOverviewBridge | undefined;
   var tokenCouponPlanTabs: PlanTabsBridge | undefined;
+  var tokenCouponConversationView: ConversationViewBridge | undefined;
 }

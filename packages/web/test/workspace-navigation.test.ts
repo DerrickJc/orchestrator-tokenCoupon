@@ -573,6 +573,24 @@ it("uses the React plan tabs bridge for active navigation while preserving the c
   expect(received.selectedTab).toBe("execution");
 });
 
+it("passes recent conversation and pending webpage replies to the React message list", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  h.w.eval(`__testState.planning.messages = [
+    { messageId: "user-turn", role: "user", content: "确认技术默认方案" },
+    { messageId: "planner-turn", role: "assistant", content: "草案已生成" }
+  ]; __testState.planning.externalOperations = [{ operationId: "op-pending", sourceMessageId: "pending-turn", role: "plan", state: "prepared", message: "补充接口异常场景" }];`);
+  let received: any;
+  (h.w as any).tokenCouponConversationView = { render: (model: unknown) => { received = model; } };
+  h.w.eval("renderPlanning()");
+  expect(received.count).toBe(3);
+  expect(received.messages).toMatchObject([
+    { messageId: "user-turn", roleClass: "user", label: "你", content: "确认技术默认方案" },
+    { messageId: "planner-turn", roleClass: "assistant", label: "Planner", content: "草案已生成" },
+    { messageId: "pending-turn", roleClass: "user", label: "你 · 已登记，等待网页", content: "补充接口异常场景" },
+  ]);
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

@@ -1730,19 +1730,27 @@ function renderPlanning() {
   if (plan.sourcePlanning) { sourceLink.textContent = `修订自 ${shortId(plan.sourcePlanning.planningId)} · 原草案 draft-${plan.sourcePlanning.draftRevision} · 查看原记录`; sourceLink.href = `#/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/plans/${encodeURIComponent(plan.sourcePlanning.planningId)}`; }
   $("#planning-status").textContent = plan.workflow?.label || statuses[plan.session?.status] || statuses[plan.status] || plan.session?.status || plan.status;
   $("#planning-status").className = `badge ${statusClass(plan.session?.status || plan.status)}`;
-  $("#turn-count").textContent = `${plan.messages?.length || 0} 条`;
-  const conversation = $("#conversation"); conversation.replaceChildren();
-  for (const message of (plan.messages || []).slice(-30)) {
-    const item = document.createElement("article"); item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
-    item.innerHTML = `<div class="message-label">${message.role === "user" ? "你" : "Planner"}</div><div>${esc(message.content)}</div>`; conversation.append(item);
-  }
+  const conversationMessages = (plan.messages || []).slice(-30).map((message, index) => ({
+    messageId: String(message.messageId || `message-${index}`), roleClass: message.role === "user" ? "user" : "assistant",
+    label: message.role === "user" ? "你" : "Planner", content: message.content,
+  }));
   const pendingInputs = [...new Map((plan.externalOperations || []).filter((operation) => operation.role === "plan" && ["prepared", "stale", "interrupted", "failed"].includes(operation.state) && operation.message && !(plan.messages || []).some((message) => message.messageId === operation.sourceMessageId)).reverse().map(operation => [operation.sourceMessageId || operation.operationId, operation])).values()];
-  for (const operation of pendingInputs) {
-    const item = document.createElement("article"); item.className = "message user";
-    item.innerHTML = `<div class="message-label">你 · ${externalOperationState(operation) === "prepared" ? "已登记，等待网页" : "已登记，需要继续处理"}</div><div>${esc(operation.message)}</div>`; conversation.append(item);
+  const pendingMessages = pendingInputs.map(operation => ({
+    messageId: String(operation.sourceMessageId || operation.operationId), roleClass: "user",
+    label: `你 · ${externalOperationState(operation) === "prepared" ? "已登记，等待网页" : "已登记，需要继续处理"}`, content: operation.message,
+  }));
+  const messageItems = [...conversationMessages, ...pendingMessages];
+  const conversationModel = { count: (plan.messages?.length || 0) + pendingInputs.length, messages: messageItems };
+  if (globalThis.tokenCouponConversationView) globalThis.tokenCouponConversationView.render(conversationModel);
+  else {
+    $("#turn-count").textContent = `${conversationModel.count} 条`;
+    const conversation = $("#conversation"); conversation.replaceChildren();
+    for (const message of messageItems) {
+      const item = document.createElement("article"); item.className = `message ${message.roleClass}`;
+      const label = document.createElement("div"), content = document.createElement("div"); label.className = "message-label"; label.textContent = message.label; content.textContent = message.content; item.append(label, content); conversation.append(item);
+    }
+    if (!conversation.children.length) conversation.innerHTML = '<div class="empty-state">本轮还没有对话内容。</div>';
   }
-  $("#turn-count").textContent = `${(plan.messages?.length || 0) + pendingInputs.length} 条`;
-  if (!conversation.children.length) conversation.innerHTML = '<div class="empty-state">本轮还没有对话内容。</div>';
   renderRequirements(); renderDraft(); renderReview(); renderSession(); renderInteractions(); renderRunConfiguration();
   renderExternalOperations(); renderHandoffs();
   renderReviewerControls(plan);
