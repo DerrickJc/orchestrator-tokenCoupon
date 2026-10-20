@@ -433,6 +433,15 @@ export type RuntimeModelControlsCallbacks = {
 export type RuntimeModelControlsBridge = {
   render(model: RuntimeModelControlsModel, callbacks: RuntimeModelControlsCallbacks): void;
 };
+export type SystemPolicyRoutingModel = { priority: "web" | "agent"; webSource: "chatgpt" | "claude" };
+export type SystemPolicyRoutingCallbacks = {
+  onPriorityChange: (priority: "web" | "agent") => void;
+  onWebSourceChange: (source: "chatgpt" | "claude") => void;
+};
+export type SystemPolicyRoutingBridge = {
+  render(mount: HTMLElement, model: SystemPolicyRoutingModel, callbacks: SystemPolicyRoutingCallbacks): void;
+  unmount(mount: HTMLElement): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -534,6 +543,7 @@ declare global {
   var tokenCouponRunAgentMode: RunAgentModeBridge | undefined;
   var tokenCouponAgentSelectionControls: AgentSelectionControlsBridge | undefined;
   var tokenCouponRuntimeModelControls: RuntimeModelControlsBridge | undefined;
+  var tokenCouponSystemPolicyRouting: SystemPolicyRoutingBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;

@@ -34,7 +34,7 @@ it("opens backend directory selection by default for remote clients and register
   expect(h.nativeCalls).toHaveLength(0);
 });
 it("initializes unified preferences, persists a selected Agent and keeps per-function settings editable", async () => {
-  const h = await page({ empty: true, settings: defaultSystemSettings() });
+  const h = await page({ empty: true, settings: defaultSystemSettings(), reactSystemPolicyRouting: true });
   await expect.poll(() => h.w.location.hash).toBe("#/settings");
   expect(h.visible("system-settings-page")).toBe(true);
   const policy = h.element("system-settings-policies").querySelector<HTMLElement>('[data-function="unified"]')!;
@@ -372,7 +372,7 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
@@ -426,6 +426,16 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     custom.value = model.customModelId; custom.oninput = () => callbacks.onCustomModelChange(custom!.value);
     custom.parentElement!.classList.toggle("hidden", model.selectedModelId !== "__custom__");
   } } });
+  if (options.reactSystemPolicyRouting) Object.assign(w, { tokenCouponSystemPolicyRouting: { render(mount: HTMLElement, model: { priority: "web" | "agent"; webSource: "chatgpt" | "claude" }, callbacks: { onPriorityChange: (priority: "web" | "agent") => void; onWebSourceChange: (source: "chatgpt" | "claude") => void }) {
+    let priority = mount.querySelector<HTMLSelectElement>('[data-field="priority"]'), source = mount.querySelector<HTMLSelectElement>('[data-field="web-source"]');
+    if (!priority || !source) {
+      mount.innerHTML = '<label>默认方式<select data-field="priority"><option value="web">网页优先</option><option value="agent">指定 Agent 优先</option></select></label><label>默认网页<select data-field="web-source"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option></select></label>';
+      priority = mount.querySelector('[data-field="priority"]')!; source = mount.querySelector('[data-field="web-source"]')!;
+    }
+    priority.value = model.priority; priority.onchange = () => callbacks.onPriorityChange(priority!.value as "web" | "agent");
+    source.value = model.webSource; source.onchange = () => callbacks.onWebSourceChange(source!.value as "chatgpt" | "claude");
+    source.parentElement!.classList.toggle("hidden", model.priority !== "web");
+  }, unmount(mount: HTMLElement) { mount.replaceChildren(); } } });
   if (options.reactRunAdvanced) Object.assign(w, { tokenCouponRunParameters: { render(model: { parallelOptions: Array<{ id: string; label: string }>; selectedParallel: string; isolationOptions: Array<{ id: string; label: string }>; selectedIsolation: string; verificationOptions: Array<{ id: string; label: string }>; selectedVerification: string; showVerification: boolean }, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void) {
     const root = w.document.getElementById("run-advanced-options-root")!;
     const grid = w.document.createElement("div"); grid.className = "settings-grid advanced-grid";

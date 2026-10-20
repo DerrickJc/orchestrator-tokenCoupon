@@ -988,7 +988,7 @@ function renderSystemSettings() {
   const saved = state.systemSettings;
   if (!state.systemSettingsSupported || !saved || !state.operationRoutingSupported) {
     status.textContent = "当前后台尚未加载完整的功能路由设置。请重启后台并刷新后再配置。";
-    $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; disposeAgentSelectionControls(root); root.replaceChildren(); return;
+    $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; disposeAgentSelectionControls(root); disposeSystemPolicyRouting(root); root.replaceChildren(); return;
   }
   const draft = state.settingsDraft = structuredClone(saved);
   $("#system-settings-save").disabled = false; $("#system-settings-mode").disabled = false;
@@ -999,7 +999,7 @@ function renderSystemSettings() {
   renderSystemPolicyFields();
 }
 function renderSystemPolicyFields() {
-  const draft = state.settingsDraft, root = $("#system-settings-policies"); disposeAgentSelectionControls(root); root.replaceChildren();
+  const draft = state.settingsDraft, root = $("#system-settings-policies"); disposeAgentSelectionControls(root); disposeSystemPolicyRouting(root); root.replaceChildren();
   if (!draft) return;
   draft.functions.revision ??= structuredClone(draft.functions.planning);
   const names = draft.mode === "unified" ? [["unified", "所有功能"]] : [["planning", "规划"], ["review", "审查"], ["revision", "修订"], ["diagnosis", "错误分析"]];
@@ -1007,18 +1007,38 @@ function renderSystemPolicyFields() {
     const policy = name === "unified" ? draft.unified : draft.functions[name];
     const card = document.createElement("fieldset"); card.className = "policy-card"; card.dataset.function = name;
     const legend = document.createElement("legend"); legend.textContent = title;
-    const priorityLabel = document.createElement("label"); priorityLabel.textContent = "默认方式";
-    const priority = document.createElement("select"); priority.dataset.field = "priority";
-    priority.add(new Option("网页优先", "web")); priority.add(new Option("指定 Agent 优先", "agent")); priority.value = policy.priority; priorityLabel.append(priority);
-    const web = document.createElement("label"); web.textContent = "默认网页";
-    const source = document.createElement("select"); source.dataset.field = "web-source"; source.add(new Option("ChatGPT", "chatgpt")); source.add(new Option("Claude", "claude")); source.value = policy.webSource; web.append(source);
+    const routing = document.createElement("div"); routing.className = "policy-routing-mount"; routing.dataset.systemPolicyRoutingMount = "true";
     const current = () => state.settingsDraft === draft && card.isConnected;
     const controls = createAgentSelectionControls(policy.agent, value => { policy.agent = value; markSystemSettingsDirty(); }, current, (state.runners || []).filter(runner => ["codex", "claude-code"].includes(runner.id)));
-    const update = () => { show(web, priority.value === "web"); show(controls.root, priority.value === "agent"); };
-    priority.addEventListener("change", () => { policy.priority = priority.value; update(); if (policy.priority === "agent") void controls.load(); markSystemSettingsDirty(); });
-    source.addEventListener("change", () => { policy.webSource = source.value; markSystemSettingsDirty(); });
-    card.append(legend, priorityLabel, web, controls.root); root.append(card); update(); if (policy.priority === "agent") void controls.load();
+    const update = () => {
+      globalThis.tokenCouponSystemPolicyRouting?.render(routing, policy, {
+        onPriorityChange: value => { policy.priority = value; update(); if (value === "agent") void controls.load(); markSystemSettingsDirty(); },
+        onWebSourceChange: value => { policy.webSource = value; markSystemSettingsDirty(); },
+      });
+      if (!globalThis.tokenCouponSystemPolicyRouting) {
+        const priority = routing.querySelector<HTMLSelectElement>('[data-field="priority"]'), web = routing.querySelector<HTMLLabelElement>('[data-field="web-source"]');
+        if (priority) priority.value = policy.priority;
+        if (web) show(web, policy.priority === "web");
+        show(controls.root, policy.priority === "agent");
+      } else show(controls.root, policy.priority === "agent");
+    };
+    if (!globalThis.tokenCouponSystemPolicyRouting) {
+      const priorityLabel = document.createElement("label"); priorityLabel.textContent = "默认方式";
+      const priority = document.createElement("select"); priority.dataset.field = "priority";
+      priority.add(new Option("网页优先", "web")); priority.add(new Option("指定 Agent 优先", "agent")); priority.value = policy.priority; priorityLabel.append(priority);
+      const web = document.createElement("label"); web.dataset.field = "web-source"; web.textContent = "默认网页";
+      const source = document.createElement("select"); source.add(new Option("ChatGPT", "chatgpt")); source.add(new Option("Claude", "claude")); source.value = policy.webSource; web.append(source);
+      priority.addEventListener("change", () => { policy.priority = priority.value; update(); if (policy.priority === "agent") void controls.load(); markSystemSettingsDirty(); });
+      source.addEventListener("change", () => { policy.webSource = source.value; markSystemSettingsDirty(); });
+      routing.append(priorityLabel, web);
+    }
+    card.append(legend, routing, controls.root); root.append(card); update(); if (policy.priority === "agent") void controls.load();
   }
+}
+function disposeSystemPolicyRouting(container) {
+  const bridge = globalThis.tokenCouponSystemPolicyRouting;
+  if (!bridge) return;
+  for (const mount of [container, ...container.querySelectorAll("[data-system-policy-routing-mount]")]) bridge.unmount(mount);
 }
 function markSystemSettingsDirty() { $("#system-settings-status").textContent = "设置已修改，保存后对后续操作生效。"; show($("#system-settings-continue"), false); }
 $("#workspace-settings-nav").addEventListener("click", () => state.workspace && void navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/settings`));
