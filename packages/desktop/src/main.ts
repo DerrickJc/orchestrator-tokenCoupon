@@ -1,15 +1,21 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, session, Tray } from "electron";
 import { discoverOwnedDaemon } from "@token-coupon/client/node";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describeAttachmentFailure, DESKTOP_IPC, isAllowedDaemonOrigin, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl, type DesktopAttachment } from "./desktop-policy.js";
+import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const defaultHome = app.getPath("home") || homedir();
 const profileDirectory = daemonProfileDirectory(process.argv, process.env, defaultHome);
 let window: BrowserWindow | undefined;
 let attachment: DesktopAttachment | undefined;
+let tray: Tray | undefined;
+let windowStatePath: string | undefined;
+let stateSaveTimer: NodeJS.Timeout | undefined;
+let quitting = false;
 
 function daemonProfileDirectory(args: readonly string[], environment: NodeJS.ProcessEnv, home: string): string {
   const index = args.indexOf("--data-dir");
@@ -77,16 +83,71 @@ async function connectOrExplain(): Promise<DesktopAttachment | undefined> {
   }
 }
 
-function createWindow(origin: string): BrowserWindow {
+function readWindowBounds(): unknown {
+  if (!windowStatePath) return undefined;
+  try { return JSON.parse(readFileSync(windowStatePath, "utf8")); } catch { return undefined; }
+}
+
+function currentWorkAreas(): DisplayWorkArea[] { return screen.getAllDisplays().map(display => display.workArea); }
+
+function saveWindowBounds(instance = window): void {
+  if (!instance || !windowStatePath) return;
+  try {
+    mkdirSync(dirname(windowStatePath), { recursive: true });
+    const temporary = `${windowStatePath}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(instance.getNormalBounds())}\n`, { mode: 0o600 });
+    renameSync(temporary, windowStatePath);
+  } catch { /* A failed preference write must not prevent the application from closing. */ }
+}
+
+function scheduleWindowBoundsSave(instance: BrowserWindow): void {
+  if (stateSaveTimer) clearTimeout(stateSaveTimer);
+  stateSaveTimer = setTimeout(() => { stateSaveTimer = undefined; if (window === instance) saveWindowBounds(instance); }, 400);
+}
+
+function showMainWindow(): void {
+  if (!window) return;
+  if (window.isMinimized()) window.restore();
+  if (!window.isVisible()) window.show();
+  window.focus();
+}
+
+function installTray(): void {
+  if (tray) return;
+  try {
+    const icon = join(here, process.platform === "win32" ? "token-coupon.ico" : "token-coupon.png");
+    tray = new Tray(icon);
+    tray.setToolTip("Token Coupon");
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: "打开 Token Coupon", click: showMainWindow },
+      { type: "separator" },
+      { label: "退出应用", click: () => { quitting = true; app.quit(); } },
+    ]));
+    tray.on("click", showMainWindow);
+    tray.on("double-click", showMainWindow);
+  } catch { tray = undefined; }
+}
+
+async function createWindow(origin: string): Promise<BrowserWindow> {
   const target = new URL(origin);
   if (!isAllowedDaemonOrigin(target.origin)) throw new Error("desktop_daemon_origin_invalid：拒绝加载非本机后台页面");
+  const workAreas = currentWorkAreas();
+  const bounds = restoreWindowBounds(readWindowBounds(), workAreas);
+  const visibleArea = workAreas.find(area => bounds.x + bounds.width / 2 >= area.x && bounds.x + bounds.width / 2 <= area.x + area.width && bounds.y + bounds.height / 2 >= area.y && bounds.y + bounds.height / 2 <= area.y + area.height) ?? workAreas[0] ?? { width: 1440, height: 960 };
   const instance = new BrowserWindow({
-    width: 1440, height: 960, minWidth: 900, minHeight: 640, show: false,
+    ...bounds, minWidth: Math.min(900, visibleArea.width), minHeight: Math.min(640, visibleArea.height), show: false,
+    icon: join(here, process.platform === "win32" ? "token-coupon.ico" : "token-coupon.png"),
     webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true },
   });
   instance.webContents.on("will-frame-navigate", event => { if (!isTrustedRendererUrl(event.url, target.origin)) event.preventDefault(); });
   instance.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   instance.once("ready-to-show", () => instance.show());
+  instance.on("move", () => scheduleWindowBoundsSave(instance));
+  instance.on("resize", () => scheduleWindowBoundsSave(instance));
+  instance.on("close", event => {
+    saveWindowBounds(instance);
+    if (tray && !quitting) { event.preventDefault(); instance.hide(); }
+  });
   instance.on("closed", () => { if (window === instance) window = undefined; });
   void instance.loadURL(target.origin);
   return instance;
@@ -94,16 +155,20 @@ function createWindow(origin: string): BrowserWindow {
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on("second-instance", () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
+  app.on("second-instance", showMainWindow);
   await app.whenReady();
+  windowStatePath = join(app.getPath("userData"), "window-state.json");
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   const current = await connectOrExplain();
   if (!current) app.quit();
   else {
     attachment = current;
     registerIpc();
-    window = createWindow(current.origin);
+    window = await createWindow(current.origin);
+    installTray();
   }
-  app.on("activate", () => { if (!window && attachment) window = createWindow(attachment.origin); });
-  app.on("window-all-closed", () => app.quit());
+  app.on("activate", () => { if (!window && attachment) void createWindow(attachment.origin).then(created => { window = created; }); else showMainWindow(); });
+  app.on("before-quit", () => { quitting = true; if (stateSaveTimer) clearTimeout(stateSaveTimer); saveWindowBounds(); });
+  app.on("will-quit", () => { tray?.destroy(); tray = undefined; });
+  app.on("window-all-closed", () => { if (!tray) app.quit(); });
 }
