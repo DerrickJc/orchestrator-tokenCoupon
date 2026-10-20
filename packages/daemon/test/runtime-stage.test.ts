@@ -27,6 +27,6 @@ it("assembles production resources without the application's source, test direct
       onOutput: chunk => { if (chunk.stream === "stdout") output += chunk.text; else diagnostic += chunk.text; },
     });
     expect(result.exitCode, diagnostic).toBe(0);
-    expect(JSON.parse(output)).toMatchObject({ daemonEntry: "passed", authentication: "passed", mockPlanReviewApproveRun: "passed", restart: "passed", staleWrite: "rejected", persistedAttempt: "readable" });
+    expect(JSON.parse(output)).toMatchObject({ daemonEntry: "passed", discoveryProof: "passed", authentication: "passed", mockPlanReviewApproveRun: "passed", restart: "passed", staleWrite: "rejected", persistedAttempt: "readable" });
   } finally { await rm(stage.root, { recursive: true, force: true }); }
 }, 120000);

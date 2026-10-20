@@ -36,9 +36,11 @@ describe("local web console API", () => {
       const cookie = landing.headers.getSetCookie()[0]?.split(";", 1)[0];
       expect(cookie).toContain("tc_local=");
       expect((await fetch(`${origin}/api/v1/health`)).status).toBe(403);
-      const health = await fetch(`${origin}/api/v1/health`, { headers: { Cookie: cookie! } }).then((response) => response.json()) as { workspaceEnvironment: { currentDirectory: string; platform: string } };
+      const health = await fetch(`${origin}/api/v1/health`, { headers: { Cookie: cookie! } }).then((response) => response.json()) as { workspaceEnvironment: { currentDirectory: string; platform: string }; capabilities: { daemonDiscovery: number } };
       expect(health.workspaceEnvironment.currentDirectory).toBe(process.cwd());
       expect(health.workspaceEnvironment.platform).toBe(process.platform);
+      expect(health.capabilities.daemonDiscovery).toBe(0);
+      expect((await fetch(`${origin}/api/v1/daemon-challenge?nonce=${"a".repeat(64)}`)).status).toBe(404);
       expect((await fetch(`${origin}/api/v1/runners/mock/models`)).status).toBe(403);
       const mockModels = await fetch(`${origin}/api/v1/runners/mock/models`, { headers: { Cookie: cookie! } }).then(response=>response.json());
       expect(mockModels).toMatchObject({ source: "mock", models: [], customAllowed: false });

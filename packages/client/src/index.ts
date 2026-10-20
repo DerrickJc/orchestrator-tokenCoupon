@@ -13,6 +13,28 @@ export type DaemonHandshake = {
   profile?: { id: string; kind: "native" | "wsl"; platform: string };
   capabilities?: Record<string, number>;
 };
+export type DaemonChallenge = {
+  format: 1;
+  nonce: string;
+  origin: string;
+  host: string;
+  port: number;
+  issuedAt: string;
+  owner: { pid: number; hostname: string; platform: string; processStart: string };
+  epoch: string;
+  profileId: string;
+  protocol: ProtocolVersion;
+  applicationVersion: string;
+  buildId: string;
+  proof: string;
+};
+/** Canonical signed fields shared by the daemon and Node desktop host. */
+export function daemonChallengePayload(value: Omit<DaemonChallenge, "proof">): string {
+  return JSON.stringify({ format: value.format, nonce: value.nonce, origin: value.origin, host: value.host, port: value.port,
+    issuedAt: value.issuedAt, owner: { pid: value.owner.pid, hostname: value.owner.hostname, platform: value.owner.platform, processStart: value.owner.processStart },
+    epoch: value.epoch, profileId: value.profileId, protocol: { major: value.protocol.major, minor: value.protocol.minor },
+    applicationVersion: value.applicationVersion, buildId: value.buildId });
+}
 export type EventStreamHandlers = {
   onHello?: (event: Event) => void;
   onOpen?: (event: Event) => void;

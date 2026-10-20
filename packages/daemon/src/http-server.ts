@@ -1,15 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationService } from "./application-service.js";
-import { RepositoryReader, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
+import { RepositoryReader, currentOwner, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
 import { createMcpHttpHandler } from "./mcp-server.js";
 import type { RemoteMcpConnection } from "./oauth-gateway.js";
 import { browseDirectories } from "./workspace-tools.js";
 import { pickNativePath, nativePickerCapability, normalizePickedPaths, type NativePickerKind, type NativePickerResult } from "./native-picker.js";
-import { APPLICATION_VERSION, API_PROTOCOL, EPOCH_HEADER, PROTOCOL_HEADER } from "@token-coupon/client";
+import { APPLICATION_VERSION, API_PROTOCOL, daemonChallengePayload, EPOCH_HEADER, PROTOCOL_HEADER, type DaemonChallenge } from "@token-coupon/client";
+import { readDaemonOwnerCredential } from "@token-coupon/client/node";
 
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
@@ -57,7 +58,7 @@ function webAssetContentType(path: string): string {
   return types[extname(path).toLowerCase()] || "application/octet-stream";
 }
 
-export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
+export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; ownerToken?: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") throw new Error("daemon_bind_forbidden：本阶段服务只允许监听 loopback");
   const tokenPath = join(options.dataDirectory, "browser-session-token");
   let token: string;
@@ -70,9 +71,17 @@ export async function createLocalServer(service: ApplicationService, options: { 
   const mcpHandler = await createMcpHttpHandler(service, options.dataDirectory);
   const webBuild = await loadWebBuild();
   const profileId = createHash("sha256").update(await realpath(options.dataDirectory)).digest("hex").slice(0, 24);
+  const discoveryOwner = options.ownerToken ? await currentOwner() : undefined;
   const expectedHost = `${options.host.includes(":") ? `[${options.host}]` : options.host}:${options.port}`;
   const expectedOrigin = `http://${expectedHost}`;
   const origins = new Set([expectedOrigin, ...(options.host === "127.0.0.1" || options.host === "localhost" ? [`http://127.0.0.1:${options.port}`, `http://localhost:${options.port}`] : [])]);
+  let discoveryReady = false;
+  if (options.ownerToken) {
+    try {
+      const [credential, owner] = await Promise.all([readDaemonOwnerCredential(options.dataDirectory), currentOwner()]);
+      discoveryReady = credential.token === options.ownerToken && credential.owner.pid === owner.pid && credential.owner.hostname === owner.hostname && credential.owner.platform === owner.platform && credential.owner.processStart === owner.processStart;
+    } catch { /* Discovery remains unavailable unless the owner file and profile are protected. */ }
+  }
 
   const server = createServer((request, response) => {
     void dispatch(request, response).catch((error: unknown) => sendError(response, error));
@@ -103,6 +112,17 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const body = await readFile(join(builtAsset ? WEB_BUILD_DIRECTORY : PUBLIC_DIRECTORY, relativePath));
       response.setHeader("X-Content-Type-Options", "nosniff");
       response.writeHead(200, { "Content-Type": webAssetContentType(relativePath), "Cache-Control": builtAsset ? "public, max-age=31536000, immutable" : "no-cache" }); response.end(body); return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/daemon-challenge") {
+      const nonce = url.searchParams.get("nonce") ?? "";
+      if (!/^[0-9a-f]{64}$/i.test(nonce)) { sendJson(response, 400, { error: "daemon_discovery_nonce_invalid" }); return; }
+      if (!discoveryReady || !options.ownerToken || !discoveryOwner?.processStart || !discoveryOwner.hostname || !discoveryOwner.platform) { sendJson(response, 404, { error: "daemon_discovery_unavailable：后台 owner 文件权限或进程身份无法验证" }); return; }
+      const origin = `http://${host!.toLowerCase()}`;
+      const unsigned: Omit<DaemonChallenge, "proof"> = { format: 1, nonce, origin, host: new URL(origin).host, port: options.port,
+        issuedAt: new Date().toISOString(), owner: { pid: discoveryOwner.pid, hostname: discoveryOwner.hostname, platform: discoveryOwner.platform, processStart: discoveryOwner.processStart },
+        epoch: service.epoch, profileId, protocol: API_PROTOCOL, applicationVersion: APPLICATION_VERSION, buildId: "development" };
+      const proof = createHmac("sha256", options.ownerToken).update(daemonChallengePayload(unsigned)).digest("hex");
+      response.setHeader("Cache-Control", "no-store"); response.setHeader("X-Content-Type-Options", "nosniff"); sendJson(response, 200, { ...unsigned, proof }); return;
     }
     if (!url.pathname.startsWith("/api/v1/")) { sendJson(response, 404, { error: "not_found" }); return; }
     if (cookieValue(request.headers.cookie, "tc_local") !== token) {
@@ -175,7 +195,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
       sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: APPLICATION_VERSION, buildId: "development", protocol: API_PROTOCOL,
         profile: { id: profileId, kind: service.workspaceEnvironment().isWsl ? "wsl" : "native", platform: process.platform },
-        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }

@@ -4,15 +4,18 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import { expect, it, vi } from "vitest";
 import { createClient, API_PROTOCOL } from "@token-coupon/client";
+import { createDaemonChallengeNonce, readDaemonOwnerCredential, verifyDaemonChallenge } from "@token-coupon/client/node";
 import { ApplicationService } from "../src/application-service.js";
 import { createLocalServer } from "../src/http-server.js";
+import { acquireDaemonOwner } from "../src/daemon-owner.js";
 
 it("exposes an authenticated handshake and rejects stale/incompatible writes before any mutation", async () => {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-protocol-"));
   const service = new ApplicationService({ dataDirectory: root }); await service.initialize();
+  const releaseOwner = await acquireDaemonOwner(root);
   const reservation = createServer(); await new Promise<void>(done => reservation.listen(0, "127.0.0.1", done));
   const port = (reservation.address() as { port: number }).port; await new Promise<void>(done => reservation.close(() => done()));
-  const server = await createLocalServer(service, { port, host: "127.0.0.1", dataDirectory: root });
+  const server = await createLocalServer(service, { port, host: "127.0.0.1", dataDirectory: root, ownerToken: releaseOwner.token });
   await new Promise<void>(done => server.listen(port, "127.0.0.1", done));
   const origin = `http://127.0.0.1:${port}`;
   try {
@@ -20,9 +23,17 @@ it("exposes an authenticated handshake and rejects stale/incompatible writes bef
     const cookie = (await fetch(origin)).headers.getSetCookie()[0]!.split(";")[0]!;
     const headers = { Cookie: cookie, Origin: origin, "Content-Type": "application/json" };
     const client = createClient({ fetch: (async (path, options) => fetch(origin + String(path), { ...options, headers: { ...Object.fromEntries(new Headers(options?.headers)), Cookie: cookie, Origin: origin } })) as typeof fetch });
-    const health = await client.api("/api/v1/health") as { protocol: unknown; epoch: string; applicationVersion: string; profile: { id: string } };
+    const health = await client.api("/api/v1/health") as { protocol: unknown; epoch: string; applicationVersion: string; profile: { id: string }; capabilities: { daemonDiscovery: number } };
     expect(health.protocol).toEqual(API_PROTOCOL); expect(health.epoch).toBe(service.epoch);
-    expect(health.applicationVersion).toBe("0.1.0"); expect(health.profile.id).toMatch(/^[0-9a-f]{24}$/);
+    expect(health.applicationVersion).toBe("0.1.0"); expect(health.profile.id).toMatch(/^[0-9a-f]{24}$/); expect(health.capabilities.daemonDiscovery).toBe(1);
+    const nonce = createDaemonChallengeNonce();
+    const challengeResponse = await fetch(`${origin}/api/v1/daemon-challenge?nonce=${nonce}`);
+    expect(challengeResponse.status).toBe(200);
+    const credential = await readDaemonOwnerCredential(root);
+    const challenge = await challengeResponse.json();
+    await expect(verifyDaemonChallenge(challenge, credential, { nonce, origin, profileId: health.profile.id })).resolves.toBeUndefined();
+    await expect(verifyDaemonChallenge(challenge, credential, { nonce: createDaemonChallengeNonce(), origin, profileId: health.profile.id })).rejects.toThrow("daemon_discovery_proof_invalid");
+    await expect(verifyDaemonChallenge(challenge, credential, { nonce, origin: "http://localhost:4178", profileId: health.profile.id })).rejects.toThrow("daemon_discovery_proof_invalid");
     const register = vi.spyOn(service, "addWorkspace");
     const stale = await fetch(`${origin}/api/v1/workspaces`, { method: "POST", headers: { ...headers, "X-Token-Coupon-Protocol": "1", "X-Token-Coupon-Epoch": "old" }, body: "{}" });
     expect(stale.status).toBe(409); expect(await stale.text()).toContain("daemon_epoch_changed");
@@ -46,6 +57,6 @@ it("exposes an authenticated handshake and rejects stale/incompatible writes bef
     expect(await readHello(`after=2&epoch=${service.epoch}`)).toContain('"resetReason":"window_lost"');
   } finally {
     server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));
-    await service.shutdown(); await rm(root, { recursive: true, force: true });
+    await service.shutdown(); await releaseOwner(); await rm(root, { recursive: true, force: true });
   }
 });

@@ -3,8 +3,10 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { acquireLockCoordination, currentOwner, inspectLock } from "@token-coupon/core";
 
+export type DaemonOwnerRelease = (() => Promise<void>) & { readonly token: string };
+
 /** One daemon per state directory, shared by Web, HTTP MCP and stdio MCP. */
-export async function acquireDaemonOwner(directory: string): Promise<() => Promise<void>> {
+export async function acquireDaemonOwner(directory: string): Promise<DaemonOwnerRelease> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, "daemon-owner.json");
   const guard = await acquireLockCoordination([path], 3);
@@ -17,9 +19,9 @@ export async function acquireDaemonOwner(directory: string): Promise<() => Promi
     }
     await writeFile(path, JSON.stringify({ ...await currentOwner(), token, sessionId: null, acquiredAt: new Date().toISOString() }) + "\n", { flag: "wx", mode: 0o600 });
   } finally { await guard(); }
-  return async () => {
+  return Object.assign(async () => {
     const release = await acquireLockCoordination([path], 3);
     try { if ((await inspectLock(path)).owner?.token === token) await unlink(path); }
     finally { await release(); }
-  };
+  }, { token });
 }
