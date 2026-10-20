@@ -151,6 +151,23 @@ export type ExecutionProgressModel = {
 export type ExecutionProgressBridge = {
   render(model: ExecutionProgressModel): void;
 };
+export type LiveTaskReplyCard = {
+  attemptId: string;
+  heading: string;
+  reply: string;
+  activity: string;
+  error?: string;
+  showDiagnosis: boolean;
+  onDiagnose: () => void;
+};
+export type LiveTaskRepliesModel = {
+  visible: LiveTaskReplyCard[];
+  overflow: LiveTaskReplyCard[];
+  overflowLabel: string;
+};
+export type LiveTaskRepliesBridge = {
+  render(model: LiveTaskRepliesModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -165,4 +182,5 @@ declare global {
   var tokenCouponPlanTabs: PlanTabsBridge | undefined;
   var tokenCouponConversationView: ConversationViewBridge | undefined;
   var tokenCouponExecutionProgress: ExecutionProgressBridge | undefined;
+  var tokenCouponLiveTaskReplies: LiveTaskRepliesBridge | undefined;
 }

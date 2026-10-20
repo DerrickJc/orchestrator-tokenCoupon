@@ -2512,37 +2512,51 @@ function taskExecutionLabel(task) {
 function renderLiveTaskReplies(tasks) {
   const root = $("#live-task-replies");
   const wasOpen = !!root.querySelector("details[open]");
-  root.replaceChildren();
   const ordered = tasks.filter(item => item.currentAttempt).map((task, index) => ({ task, index, time: Date.parse(task.currentAttempt.startedAt || task.currentAttempt.lastActivityAt || "") || 0 }))
     .sort((a, b) => b.time - a.time || b.index - a.index).map(item => item.task);
   const latest = ordered[0], current = ordered.filter(task => task.status === "running" || task === latest), history = ordered.filter(task => !current.includes(task));
   const latestButton = $("#execution-latest-details"); latestButton.disabled = !latest;
   latestButton.dataset.attemptId = latest?.currentAttempt.attemptId || "";
   $("#execution-response-context").textContent = latest ? `最近一次记录：${latest.title || latest.taskId} · ${shortId(latest.currentAttempt.attemptId)}${latest.currentAttempt.startedAt ? ` · ${new Date(latest.currentAttempt.startedAt).toLocaleString()}` : ""}。历史任务结果另行折叠。` : "尚无执行记录；启动后在此查看任务与模型返回。";
-  const overflow = document.createElement("details"); overflow.className = "live-replies-overflow foldout"; overflow.open = wasOpen;
-  const extraCount = Math.max(0, current.length - 3) + history.length;
-  const summary = document.createElement("summary"); summary.textContent = `其他任务与历史返回（${extraCount} 项，不代表本次重试）`; overflow.append(summary);
-  for (const [index, task] of [...current, ...history].entries()) {
-    const attempt = task.currentAttempt, card = document.createElement("article"), heading = document.createElement("strong"), body = document.createElement("p"), activity = document.createElement("p");
-    const model = attempt.reportedModel ? reportedModelLabel(attempt.reportedModel, attempt.reportedModelSource) : attempt.execution?.modelId ? `${attempt.execution.modelId}（配置值）` : "Runner 默认模型，实际未验证";
+  const cards = [...current, ...history].map((task, index) => {
+    const attempt = task.currentAttempt;
+    const modelLabel = attempt.reportedModel ? reportedModelLabel(attempt.reportedModel, attempt.reportedModelSource) : attempt.execution?.modelId ? `${attempt.execution.modelId}（配置值）` : "Runner 默认模型，实际未验证";
     const historical = history.includes(task);
-    card.className = "live-task-reply"; card.dataset.attemptId = attempt.attemptId;
     const pending = pendingTaskInteraction(task);
-    heading.textContent = `${historical ? "历史任务 · " : ""}${task.title || task.taskId} · ${taskExecutionLabel(task)} · ${model}`;
-    body.textContent = attempt.lastReply ? `模型返回：${attempt.lastReply}` : "模型尚未返回文字；以工具活动及执行状态为准。";
     const time = attempt.lastActivityAt ? Date.parse(attempt.lastActivityAt) : NaN;
-    activity.className = "hint"; activity.textContent = pending ? `${shortId(attempt.attemptId)} · 请在上方“审批与回答”处理：${pending.request.summary || pending.request.title}。提交后继续当前任务。` : `${shortId(attempt.attemptId)} · ${attempt.activity || (task.status === "running" ? "等待下一条可观测活动" : "本次任务执行已结束")}${Number.isFinite(time) ? ` · ${new Date(time).toLocaleString()}` : ""}${task.status === "running" ? "。长任务暂无输出不等于已停止。" : ""}`;
-    card.append(heading);
-    if (attempt.reason && ["failed", "interrupted", "cancelled", "timed_out"].includes(task.status)) { const error = document.createElement("p"); error.className = "reply-verdict reply-error"; error.textContent = `中断／错误原因：${attempt.reason}`; card.append(error); }
-    card.append(body, activity);
-    if (["failed", "interrupted", "cancelled", "timed_out"].includes(task.status) || task.status === "blocked" && task.reasonCode === "user_input_required") {
-      const diagnose = document.createElement("button"); diagnose.type = "button"; diagnose.className = "button button-quiet"; diagnose.textContent = "分析原因";
-      diagnose.addEventListener("click", async () => { await openTaskDetails(attempt.attemptId); await openAttemptDiagnosis(); }); card.append(diagnose);
+    const failed = ["failed", "interrupted", "cancelled", "timed_out"].includes(task.status);
+    return {
+      attemptId: attempt.attemptId,
+      heading: `${historical ? "历史任务 · " : ""}${task.title || task.taskId} · ${taskExecutionLabel(task)} · ${modelLabel}`,
+      reply: attempt.lastReply ? `模型返回：${attempt.lastReply}` : "模型尚未返回文字；以工具活动及执行状态为准。",
+      activity: pending ? `${shortId(attempt.attemptId)} · 请在上方“审批与回答”处理：${pending.request.summary || pending.request.title}。提交后继续当前任务。` : `${shortId(attempt.attemptId)} · ${attempt.activity || (task.status === "running" ? "等待下一条可观测活动" : "本次任务执行已结束")}${Number.isFinite(time) ? ` · ${new Date(time).toLocaleString()}` : ""}${task.status === "running" ? "。长任务暂无输出不等于已停止。" : ""}`,
+      ...(attempt.reason && failed ? { error: `中断／错误原因：${attempt.reason}` } : {}),
+      showDiagnosis: failed || task.status === "blocked" && task.reasonCode === "user_input_required",
+      onDiagnose: async () => { await openTaskDetails(attempt.attemptId); await openAttemptDiagnosis(); },
+    };
+  });
+  const visible = cards.slice(0, Math.min(3, current.length)), overflowCards = cards.slice(visible.length);
+  const model = { visible, overflow: overflowCards, overflowLabel: `其他任务与历史返回（${overflowCards.length} 项，不代表本次重试）` };
+  if (globalThis.tokenCouponLiveTaskReplies) globalThis.tokenCouponLiveTaskReplies.render(model);
+  else {
+    root.replaceChildren();
+    const renderCard = cardModel => {
+      const card = document.createElement("article"), heading = document.createElement("strong"), body = document.createElement("p"), activity = document.createElement("p");
+      card.className = "live-task-reply"; card.dataset.attemptId = cardModel.attemptId; heading.textContent = cardModel.heading; body.textContent = cardModel.reply; activity.className = "hint"; activity.textContent = cardModel.activity; card.append(heading);
+      if (cardModel.error) { const error = document.createElement("p"); error.className = "reply-verdict reply-error"; error.textContent = cardModel.error; card.append(error); }
+      card.append(body, activity);
+      if (cardModel.showDiagnosis) { const diagnose = document.createElement("button"); diagnose.type = "button"; diagnose.className = "button button-quiet"; diagnose.textContent = "分析原因"; diagnose.addEventListener("click", cardModel.onDiagnose); card.append(diagnose); }
+      return card;
+    };
+    for (const card of visible) root.append(renderCard(card));
+    if (overflowCards.length) {
+      const overflow = document.createElement("details"); overflow.className = "live-replies-overflow foldout"; overflow.open = wasOpen;
+      const summary = document.createElement("summary"); summary.textContent = model.overflowLabel; overflow.append(summary);
+      for (const card of overflowCards) overflow.append(renderCard(card));
+      root.append(overflow);
     }
-    (index < 3 && !historical ? root : overflow).append(card);
   }
-  if (extraCount) root.append(overflow);
-  show(root, !!root.children.length);
+  show(root, !!cards.length);
 }
 function renderRuntimeModelPanel(tasks) {
   const candidates = tasks.filter(task => task.status !== "succeeded" && (task.execution?.runnerId || state.planning.draft?.plan.tasks.find(entry => entry.task.id === task.taskId)?.task.execution.runnerId) !== "mock");
