@@ -1061,16 +1061,16 @@ HTTP 回归覆盖未授权请求、旧 epoch、活跃任务阻断及空闲状态
 
 ### 13.78 Electron 运行时 extraResources 组装命令（2026-10-20）
 
-新增 `npm run desktop:stage-resources -- --resources-dir <绝对目录>`，先构建应用，再用 `TOKEN_COUPON_BUNDLED_NODE` 指定目标本机平台的标准 Node.js v22.12.0，将 daemon 及生产依赖暂存后安装到 `<绝对目录>/token-coupon-runtime`。PowerShell 示例：
+新增 `npm run desktop:stage-resources -- --resources-dir <绝对目录>`，先构建应用，再用 `TOKEN_COUPON_BUNDLED_NODE` 指定目标本机平台的标准 Node.js v22.12.0，将 daemon 及生产依赖安装到 `<绝对目录>/token-coupon-runtime`，随后自动使用随包 Node 启动该 daemon 并运行离线 HTTP smoke。PowerShell 示例：
 
 ```powershell
 $env:TOKEN_COUPON_BUNDLED_NODE = "C:\release-tools\node-v22.12.0\node.exe"
 npm run desktop:stage-resources -- --resources-dir "C:\release-build\electron\resources"
 ```
 
-目录已有同名运行时、Node 缺失或清单路径越界时失败，不删除/覆盖已有内容。manifest 标为 `kind=electron-extra-resource`、`runtimeReady=true`、`releaseReady=false`；Electron 打包工具可将该目录作为 `extraResources` 放入 `process.resourcesPath`，但本命令不生成安装器、不交叉编译、不完成签名。
+目录已有同名运行时、Node 缺失或清单路径越界时失败，不删除/覆盖已有内容。smoke 失败时命令返回失败并保留暂存目录及 daemon 诊断，方便排查。manifest 标为 `kind=electron-extra-resource`、`runtimeReady=true`、`releaseReady=false`；Electron 打包工具可将该目录作为 `extraResources` 放入 `process.resourcesPath`，但本命令不生成安装器、不交叉编译、不完成签名。
 
-组装器的目标布局、清单标记、重复运行保护和路径越界校验有单元覆盖。另从 Node 官方 v22.12.0 归档下载 Linux x64 运行时并核对 `SHASUMS256.txt`（SHA-256：`22982235e1b71fa8850f82edd09cdae7e3f32df1764a9ec298c72d25ef2c164f`），执行 `desktop:stage-resources` 后用该 Node 运行 `scripts/desktop-daemon-smoke.mjs --entry <staged daemonEntry>`；离线计划审查/批准/执行、daemon 重启、旧 epoch 写入拒绝和 Attempt 记录读取均通过。该证据只覆盖 Linux x64 资源闭环；没有安装 Electron 二进制，Windows Node 资源、安装包、GUI 与系统集成仍未验收。
+组装器的目标布局、清单标记、重复运行保护和路径越界校验有单元覆盖。从 Node 官方 v22.12.0 归档下载 Linux x64 运行时并核对 `SHASUMS256.txt`（SHA-256：`22982235e1b71fa8850f82edd09cdae7e3f32df1764a9ec298c72d25ef2c164f`）后，运行 `desktop:stage-resources` 会自动用暂存目录内的 Node 启动 daemon smoke。审查/批准/执行、daemon 重启、旧 epoch 写入拒绝和 Attempt 记录读取均通过；命令最终输出 `runtimeReady=true`、`installerReady=false`。该证据只覆盖 Linux x64 资源闭环；没有安装 Electron 二进制，Windows Node 资源、安装包、GUI 与系统集成仍未验收。
 
 ## 14. 剩余实施台账（2026-10-20）
 
