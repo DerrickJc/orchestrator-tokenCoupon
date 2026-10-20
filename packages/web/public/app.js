@@ -2939,28 +2939,30 @@ async function previewTaskResult(view, path) {
   } catch (error) { if (state.taskResultView === view && request === view.previewRequest) { show($("#task-results-preview-wrap"), false); $("#task-results-error").textContent = error.message; } }
 }
 function renderAttemptChoices(tasks) {
-  const select = $("#attempt-select"), previous = select.value;
+  const select = $("#attempt-select"), previous = state.attemptSelection?.selectedAttemptId || select.value;
   const choices = tasks.flatMap(task => (task.attempts || []).map((attempt, index) => {
     const projected = task.currentAttempt?.attemptId === attempt.attemptId ? task.currentAttempt : {};
     return { ...attempt, taskId: task.taskId, label: `${task.title || task.taskId} · 第 ${index + 1} 次 · ${shortId(attempt.attemptId)}`, active: task.activeAttemptId === attempt.attemptId,
       at: projected.startedAt || attempt.lastActivityAt || projected.finishedAt || "" };
   }));
   const identity = `${state.workspace?.workspaceId}:${state.planning?.planningId}:${state.planning?.session?.sessionId}`;
-  if (state.attemptSelection?.identity !== identity) state.attemptSelection = { identity, mode: "auto" };
+  if (state.attemptSelection?.identity !== identity) state.attemptSelection = { identity, mode: "auto", selectedAttemptId: "" };
   state.attemptChoices = choices;
   const activeChoices = choices.filter(item => item.active);
   state.latestAttemptChoice = (activeChoices.length ? activeChoices : [...choices].reverse()).sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0))[0];
   show($("#attempt-reader"), !!choices.length);
   show($("#attempt-empty"), !choices.length);
   const signature = JSON.stringify([state.workspace?.workspaceId, state.planning?.planningId, choices]);
-  if (signature !== state.attemptChoiceSignature) {
+  if (!globalThis.tokenCouponAttemptSelection && signature !== state.attemptChoiceSignature) {
     state.attemptChoiceSignature = signature; select.replaceChildren();
     for (const choice of choices) select.add(new Option(choice.label, choice.attemptId));
   }
-  select.value = state.attemptSelection.mode === "history" && choices.some(item => item.attemptId === previous) ? previous : state.latestAttemptChoice?.attemptId || "";
+  state.attemptSelection.selectedAttemptId = state.attemptSelection.mode === "history" && choices.some(item => item.attemptId === previous) ? previous : state.latestAttemptChoice?.attemptId || "";
+  if (!globalThis.tokenCouponAttemptSelection) select.value = state.attemptSelection.selectedAttemptId;
   renderAttemptSelectionContext();
-  const projection = tasks.find(task => task.currentAttempt?.attemptId === select.value)?.currentAttempt;
-  if (projection && state.attemptView?.attemptId === select.value && state.attemptView.workspaceId === state.workspace?.workspaceId && state.attemptView.planningId === state.planning?.planningId) {
+  const selectedAttemptId = state.attemptSelection.selectedAttemptId;
+  const projection = tasks.find(task => task.currentAttempt?.attemptId === selectedAttemptId)?.currentAttempt;
+  if (projection && state.attemptView?.attemptId === selectedAttemptId && state.attemptView.workspaceId === state.workspace?.workspaceId && state.attemptView.planningId === state.planning?.planningId) {
     const changed = state.attemptView.attempt?.status !== projection.status;
     state.attemptView.attempt = { ...state.attemptView.attempt, ...projection };
     if (changed) void readSelectedAttempt(true);
@@ -2971,22 +2973,47 @@ async function openTaskDetails(attemptId) {
   const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId;
   await planTab("attempts");
   if (state.route?.tab !== "attempts" || state.workspace?.workspaceId !== workspaceId || state.planning?.planningId !== planningId) return;
-  if (attemptId && [...$("#attempt-select").options].some(option => option.value === attemptId)) { $("#attempt-select").value = attemptId; state.attemptSelection.mode = "history"; }
-  else { state.attemptSelection.mode = "auto"; $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; }
+  if (attemptId && state.attemptChoices?.some(option => option.attemptId === attemptId)) { state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = attemptId; }
+  else { state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || ""; }
+  if (!globalThis.tokenCouponAttemptSelection) $("#attempt-select").value = state.attemptSelection.selectedAttemptId;
+  renderAttemptSelectionContext();
   await selectAttempt();
   const target = $("#attempt-reader").classList.contains("hidden") ? $("#attempt-empty") : $("#attempt-reader");
   target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 function renderAttemptSelectionContext() {
-  const selected = state.attemptChoices?.find(item => item.attemptId === $("#attempt-select").value), latest = state.latestAttemptChoice;
+  const selectedAttemptId = state.attemptSelection?.selectedAttemptId || $("#attempt-select").value;
+  const selected = state.attemptChoices?.find(item => item.attemptId === selectedAttemptId), latest = state.latestAttemptChoice;
   const historical = !!selected && !selected.active && selected.attemptId !== latest?.attemptId;
-  $("#attempt-selection-context").textContent = selected ? `${selected.active ? "运行中任务记录" : historical ? "历史执行记录 · 不是本次重试返回" : "最近一次执行记录"}：${selected.label}${selected.at ? ` · ${new Date(selected.at).toLocaleString()}` : ""}` : "请选择执行记录。";
+  const model = {
+    choices: (state.attemptChoices || []).map(item => ({ attemptId: item.attemptId, label: item.label })),
+    selectedAttemptId,
+    contextText: selected ? `${selected.active ? "运行中任务记录" : historical ? "历史执行记录 · 不是本次重试返回" : "最近一次执行记录"}：${selected.label}${selected.at ? ` · ${new Date(selected.at).toLocaleString()}` : ""}` : "请选择执行记录。",
+    historical,
+    latestDisabled: !latest || selected?.attemptId === latest.attemptId,
+  };
+  if (globalThis.tokenCouponAttemptSelection) {
+    globalThis.tokenCouponAttemptSelection.render(model, {
+      onSelect(attemptId) {
+        if (!state.attemptSelection) return;
+        state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = attemptId;
+        void selectAttempt();
+      },
+      onLatest() {
+        if (!state.attemptSelection) return;
+        state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || "";
+        void selectAttempt();
+      },
+    });
+    return;
+  }
+  $("#attempt-selection-context").textContent = model.contextText;
   $("#attempt-selection-context").classList.toggle("is-history", historical);
-  $("#attempt-show-latest").disabled = !latest || selected?.attemptId === latest.attemptId;
+  $("#attempt-show-latest").disabled = model.latestDisabled;
 }
 async function selectAttempt() {
   renderAttemptSelectionContext();
-  const attemptId = $("#attempt-select").value;
+  const attemptId = state.attemptSelection?.selectedAttemptId || $("#attempt-select").value;
   if (!attemptId || !state.workspace || !state.planning) return;
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}:${attemptId}`;
   if (state.attemptView?.identity !== identity) {
@@ -4588,8 +4615,10 @@ $("#git-save-identity").addEventListener("click", async () => {
   await startJob("保存仓库身份", requestKey => api(`/api/v1/workspaces/${state.workspace.workspaceId}/git/identity`, { method: "POST", body: JSON.stringify({ requestKey, confirmed: true, name: $("#git-name").value, email: $("#git-email").value }) }), true);
   await refreshGitReadiness(true);
 });
-$("#attempt-select").addEventListener("change", () => { if (state.attemptSelection) state.attemptSelection.mode = "history"; void selectAttempt(); });
-$("#attempt-show-latest").addEventListener("click", () => { if (state.attemptSelection) state.attemptSelection.mode = "auto"; $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; void selectAttempt(); });
+if (!globalThis.tokenCouponAttemptSelection) {
+  $("#attempt-select").addEventListener("change", () => { if (state.attemptSelection) { state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = $("#attempt-select").value; } void selectAttempt(); });
+  $("#attempt-show-latest").addEventListener("click", () => { if (state.attemptSelection) { state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || ""; } $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; void selectAttempt(); });
+}
 $("#execution-latest-details").addEventListener("click", () => void openTaskDetails());
 $("#copy-execution-clarification").addEventListener("click", () => void openRevisionPlanning());
 $("#attempt-refresh").addEventListener("click", () => readSelectedAttempt(true));

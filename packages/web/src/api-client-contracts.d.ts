@@ -344,6 +344,17 @@ export type AttemptRawEventsModel = { lines: string[]; filterValue: string; page
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
 };
+export type AttemptSelectionChoice = { attemptId: string; label: string };
+export type AttemptSelectionModel = {
+  choices: AttemptSelectionChoice[];
+  selectedAttemptId: string;
+  contextText: string;
+  historical: boolean;
+  latestDisabled: boolean;
+};
+export type AttemptSelectionBridge = {
+  render(model: AttemptSelectionModel, callbacks: { onSelect: (attemptId: string) => void; onLatest: () => void }): void;
+};
 export type AttemptDiagnosisMessageView = { messageId: string; role: "user" | "assistant"; heading: string; content: string };
 export type AttemptDiagnosisHistoryModel = {
   messages: AttemptDiagnosisMessageView[];
@@ -420,6 +431,7 @@ declare global {
   var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
+  var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
   var tokenCouponAttemptDiagnosisComposer: AttemptDiagnosisComposerBridge | undefined;
   var tokenCouponAttemptDiagnosisControls: AttemptDiagnosisControlsBridge | undefined;
