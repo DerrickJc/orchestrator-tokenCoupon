@@ -1,0 +1,18 @@
+{
+  "name": "@token-coupon/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc --project tsconfig.json && node scripts/copy-preload.mjs",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@token-coupon/client": "*"
+  },
+  "devDependencies": {
+    "electron": "44.9.1"
+  }
+}
