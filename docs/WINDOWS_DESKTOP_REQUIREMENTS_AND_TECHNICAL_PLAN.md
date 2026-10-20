@@ -973,14 +973,24 @@ Codex、CLI 模式及目录/诊断复用该启动边界；Claude managed 通过 
 
 完整类型检查、构建与回归：119 个测试文件通过、1 个 Windows 专用文件在 Linux 跳过；777 项通过、1 项跳过。Windows 专用场景已另用上述真实 Windows 运行时直接执行，不能把 Linux skip 当作 Windows 通过。真实 coding agent 的安装/认证、受限制 PowerShell 环境、Electron/安装包与私有转发仍需独立验收。实现依据：[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[创建进程与句柄白名单](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)、[Node 22.12 校验清单](https://nodejs.org/dist/v22.12.0/SHASUMS256.txt)。
 
+### 13.65 可移植后台暂存与原生 Windows HTTP 闭环（2026-10-20）
+
+新增维护脚本 `scripts/stage-desktop-runtime.mjs`，按 lockfile 将已安装的生产依赖及各 workspace 构建产物复制到独立目录，生成明确标记为非发布包的 manifest。暂存过程拒绝越界依赖路径，跳过未安装的 optional 依赖，并确保 workspace 包是实体目录而非 npm 链接；此步骤不会跨平台编译原生依赖，也不生成安装包。
+
+新增 `scripts/desktop-daemon-smoke.mjs`，使用临时数据目录和独立端口启动实际 daemon 入口，验证匿名 API 拒绝、profile 身份、Mock 规划/审查/批准/运行、Attempt 事件读取、重启后旧 epoch 写入拒绝，以及完成记录恢复读取。`packages/daemon/test/runtime-stage.test.ts` 会构造暂存布局并运行上述端到端流程，结束后清理自己的目录。该演示不连接公网 OAuth，不调用真实付费模型，也不触碰用户现有 profile 或工作区。
+
+同一套隔离 HTTP 闭环已在 Linux WSL 仓库入口、Linux 暂存入口和**原生 Windows Node 22.12.0 暂存入口**分别通过。原生 Windows 测试使用官方 Node ZIP，并用官方同版本 SHA-256 清单核对；Windows 是通过 WSL UNC 路径启动测试文件及暂存目录。完整输出记录包括 platform、Node 版本、认证、Mock 规划至运行、重启、旧写入拒绝和产物读取结果。完整类型检查及全量仓库回归通过：120 个测试文件通过、1 个 Windows 专用文件在 Linux 跳过；778 项通过、1 项跳过。Linux Windows 专用测试的跳过不代表 Windows 场景通过，原生 Windows 场景已按上文另行执行。
+
+这轮验证证明构建产物在实体 npm 目录布局下可启动并完成 Mock 流程，仍不代表 Electron、安装包、桌面通知/原生文件选择、真实 Codex/Claude 安装认证、Windows 受限 PowerShell、Windows 私有转发或活跃任务的强制崩溃恢复已通过验收。
+
 ## 14. 剩余实施台账（2026-10-20）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
 
 | 范围 | 后续工作 | 验证边界 |
 | --- | --- | --- |
-| C：共享契约 | 共享客户端、协议/能力握手及重启对账已完成；继续完整领域 DTO、桌面安全发现和发布构建身份 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作 |
-| B：发布与平台基础 | 用户数据目录与可发布 Mock 资源已完成；继续 Windows 命令/身份/锁/进程树及私有转发 | 各自隔离测试，Windows 能力另做原生实测；未通过前保留“不支持/未验证” |
+| C：共享契约 | 共享客户端、协议/能力握手、重启对账与暂存布局已完成；继续完整领域 DTO、桌面安全发现和发布构建身份 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作 |
+| B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
 | D：桌面预览 | Electron main/preload、后台发现、托盘、选择器、安装资源 | 支持矩阵内真实 Windows 无开发环境闭环；不能用 WSL 结果代替 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |
 | F：既有质量主线 | 关键任务产物 Review、成果追溯、可信用量、CLI daemon 模式 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
