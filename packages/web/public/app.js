@@ -2599,15 +2599,22 @@ function renderSession() {
   const progress = $("#session-progress"), completed = tasks.filter(task => task.status === "succeeded").length;
   const progressSignature = JSON.stringify([session?.status, tasks.map(task => [task.status, task.reasonCode]), waiting, session?.maxParallel]);
   if (progress.dataset.signature !== progressSignature) {
-    progress.dataset.signature = progressSignature; progress.replaceChildren();
-    const status = document.createElement("span"); status.className = "execution-state badge " + statusClass(session?.status); status.textContent = session ? waitingForUser.length ? "等待用户决策" : waiting ? "等待人工处理" : statuses[session.status] || session.status : "尚未启动 Session"; progress.append(status);
-    if (session) {
-      const track = document.createElement("progress"); track.max = tasks.length || 1; track.value = completed; track.setAttribute("aria-label", "已完成任务比例"); progress.append(track);
-      const metrics = document.createElement("div"); metrics.className = "execution-metrics";
-      for (const [label, value, kind] of [["成功", `${completed}/${tasks.length}`, "completed"], ["运行中", running.length, "running"], ...(waiting ? [["等待回答／审批", waiting, "waiting"]] : []), ["待执行", tasks.filter(task => ["planned", "created", "blocked", "ready", "paused"].includes(task.status)).length, "pending"], ["失败／中断", tasks.filter(task => ["failed", "timed_out", "interrupted", "cancelled", "unavailable"].includes(task.status)).length, "errors"], ["并发上限", session.maxParallel || 1, "parallel"]]) {
-        const metric = document.createElement("div"); metric.className = "execution-metric"; metric.dataset.kind = kind; const text = document.createElement("span"), count = document.createElement("strong"); text.textContent = label + " "; count.textContent = String(value); metric.append(text, count); metrics.append(metric);
+    progress.dataset.signature = progressSignature;
+    const statusLabel = session ? waitingForUser.length ? "等待用户决策" : waiting ? "等待人工处理" : statuses[session.status] || session.status : "尚未启动 Session";
+    const metrics = session ? [["成功", `${completed}/${tasks.length}`, "completed"], ["运行中", running.length, "running"], ...(waiting ? [["等待回答／审批", waiting, "waiting"]] : []), ["待执行", tasks.filter(task => ["planned", "created", "blocked", "ready", "paused"].includes(task.status)).length, "pending"], ["失败／中断", tasks.filter(task => ["failed", "timed_out", "interrupted", "cancelled", "unavailable"].includes(task.status)).length, "errors"], ["并发上限", session.maxParallel || 1, "parallel"]] : [];
+    const model = { statusLabel, statusTone: statusClass(session?.status), hasSession: !!session, completed, total: tasks.length, metrics: metrics.map(([label, value, kind]) => ({ label, value, kind })) };
+    if (globalThis.tokenCouponExecutionProgress) globalThis.tokenCouponExecutionProgress.render(model);
+    else {
+      progress.replaceChildren();
+      const status = document.createElement("span"); status.className = `execution-state badge ${model.statusTone}`; status.textContent = model.statusLabel; progress.append(status);
+      if (session) {
+        const track = document.createElement("progress"); track.max = tasks.length || 1; track.value = completed; track.setAttribute("aria-label", "已完成任务比例"); progress.append(track);
+        const metricsRoot = document.createElement("div"); metricsRoot.className = "execution-metrics";
+        for (const metricData of model.metrics) {
+          const metric = document.createElement("div"); metric.className = "execution-metric"; metric.dataset.kind = metricData.kind; const text = document.createElement("span"), count = document.createElement("strong"); text.textContent = metricData.label + " "; count.textContent = String(metricData.value); metric.append(text, count); metricsRoot.append(metric);
+        }
+        progress.append(metricsRoot);
       }
-      progress.append(metrics);
     }
   }
   const health = session?.health;

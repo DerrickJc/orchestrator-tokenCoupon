@@ -139,6 +139,18 @@ export type ConversationViewModel = {
 export type ConversationViewBridge = {
   render(model: ConversationViewModel): void;
 };
+export type ExecutionProgressMetric = { label: string; value: string | number; kind: string };
+export type ExecutionProgressModel = {
+  statusLabel: string;
+  statusTone: string;
+  hasSession: boolean;
+  completed: number;
+  total: number;
+  metrics: ExecutionProgressMetric[];
+};
+export type ExecutionProgressBridge = {
+  render(model: ExecutionProgressModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -152,4 +164,5 @@ declare global {
   var tokenCouponPlanOverview: PlanOverviewBridge | undefined;
   var tokenCouponPlanTabs: PlanTabsBridge | undefined;
   var tokenCouponConversationView: ConversationViewBridge | undefined;
+  var tokenCouponExecutionProgress: ExecutionProgressBridge | undefined;
 }
