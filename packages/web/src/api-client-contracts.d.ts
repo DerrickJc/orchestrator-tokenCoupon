@@ -386,8 +386,9 @@ export type AttemptDiagnosisChoiceBridge = {
   render(mount: HTMLElement, callbacks: { onClose: () => void; onLocal: () => void; onWeb: () => void }): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type AttemptDiagnosisDialogModel = { contextText: string; statusText: string; sendLabel: string; sendDisabled: boolean };
 export type AttemptDiagnosisDialogBridge = {
-  render(mount: HTMLElement, callbacks: { onClose: () => void; onSwitch: () => void }): void;
+  render(mount: HTMLElement, model: AttemptDiagnosisDialogModel, callbacks: { onClose: () => void; onSwitch: () => void }): void;
   unmountWithin(container: HTMLElement): void;
 };
 

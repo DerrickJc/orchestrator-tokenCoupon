@@ -1,11 +1,13 @@
-export function AttemptDiagnosisDialog({ onClose, onSwitch }: { onClose(): void; onSwitch(): void }) {
+import type { AttemptDiagnosisDialogModel } from "./api-client-contracts.js";
+
+export function AttemptDiagnosisDialog({ model, onClose, onSwitch }: { model: AttemptDiagnosisDialogModel; onClose(): void; onSwitch(): void }) {
   return <>
     <div className="section-title">
-      <div><h3>任务诊断</h3><p id="attempt-diagnosis-context" className="hint"></p></div>
+      <div><h3>任务诊断</h3><p id="attempt-diagnosis-context" className="hint">{model.contextText}</p></div>
       <div className="button-row"><button type="button" className="text-button" onClick={onSwitch}>切换分析方式</button><button type="button" data-diagnosis-close className="text-button" onClick={onClose}>关闭</button></div>
     </div>
     <div id="attempt-diagnosis-history-controls-root"><select id="attempt-diagnosis-history-select" aria-label="历史诊断" className="hidden"></select></div>
-    <p id="attempt-diagnosis-status" className="diagnosis-chat-status" role="status"></p>
+    <p id="attempt-diagnosis-status" className="diagnosis-chat-status" role="status">{model.statusText}</p>
     <section id="attempt-diagnosis-history" className="diagnosis-chat-history" aria-label="诊断对话"></section>
     <form id="attempt-diagnosis-form" className="diagnosis-chat-composer">
       <label className="sr-only" htmlFor="attempt-diagnosis-reply">发送诊断问题</label>
@@ -16,7 +18,7 @@ export function AttemptDiagnosisDialog({ onClose, onSwitch }: { onClose(): void;
           <label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label>
           <label id="diagnosis-custom-wrap" className="hidden">模型 ID<input id="diagnosis-custom-model" maxLength={200} placeholder="输入模型 ID" /></label>
         </div>
-        <button id="attempt-diagnosis-send" type="submit" className="button button-primary">发送</button>
+        <button id="attempt-diagnosis-send" type="submit" className="button button-primary" disabled={model.sendDisabled}>{model.sendLabel}</button>
       </div>
       <p className="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p>
     </form>

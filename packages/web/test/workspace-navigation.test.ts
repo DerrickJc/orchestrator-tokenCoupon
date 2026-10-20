@@ -2338,7 +2338,7 @@ it("renders the diagnosis route selector through its React bridge and wires its 
     unmountWithin() {},
   } as any;
   h.w.tokenCouponAttemptDiagnosisDialog = {
-    render(mount: HTMLElement, next: typeof dialogCallbacks) { dialogCallbacks = next; mount.innerHTML = renderToStaticMarkup(createElement(AttemptDiagnosisDialog, next)); },
+    render(mount: HTMLElement, model: any, next: typeof dialogCallbacks) { dialogCallbacks = next; mount.innerHTML = renderToStaticMarkup(createElement(AttemptDiagnosisDialog, { model, ...next })); },
     unmountWithin() {},
   } as any;
   h.w.eval('__testState.attemptView = {workspaceId:"project",planningId:"first",attemptId:"diagnostic-attempt",attempt:{runnerId:"codex"}}; void openAttemptDiagnosis()');
