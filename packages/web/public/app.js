@@ -3275,7 +3275,7 @@ async function exportAttemptDiagnosis(context) {
 function renderAttemptDiagnosticExport(context) {
   const mount = $("#diagnosis-export-root"), model = context.exportState || { status: "正在保存证据…", path: "", copyLabel: "复制分析提示", copyDisabled: true };
   if (globalThis.tokenCouponAttemptDiagnosisExport) {
-    globalThis.tokenCouponAttemptDiagnosisExport.render(mount, model, { onClose: () => $("#diagnosis-export-dialog").close(), onCopy: () => void copyExportedDiagnosticPrompt() });
+    globalThis.tokenCouponAttemptDiagnosisExport.render(mount, model, { onClose: () => $("#diagnosis-export-dialog").close(), onCopy: () => void copyExportedDiagnosticPrompt(), onSwitch: () => { $("#diagnosis-export-dialog").close(); $("#diagnosis-choice-dialog").showModal(); } });
     return;
   }
   $("#diagnosis-export-status").textContent = model.status; $("#diagnosis-export-path").value = model.path;

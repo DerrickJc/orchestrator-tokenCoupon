@@ -379,7 +379,7 @@ export type AttemptDiagnosisControlsBridge = {
 };
 export type AttemptDiagnosisExportModel = { status: string; path: string; copyLabel: string; copyDisabled: boolean };
 export type AttemptDiagnosisExportBridge = {
-  render(mount: HTMLElement, model: AttemptDiagnosisExportModel, callbacks: { onClose: () => void; onCopy: () => void }): void;
+  render(mount: HTMLElement, model: AttemptDiagnosisExportModel, callbacks: { onClose: () => void; onCopy: () => void; onSwitch: () => void }): void;
   unmountWithin(container: HTMLElement): void;
 };
 
