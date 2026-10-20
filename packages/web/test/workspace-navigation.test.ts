@@ -561,6 +561,18 @@ it("passes the current plan metrics and primary action through the React overvie
   await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/review");
 });
 
+it("uses the React plan tabs bridge for active navigation while preserving the current route actions", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/review" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  let received: any;
+  (h.w as any).tokenCouponPlanTabs = { render: (selectedTab: string, onSelect: (tab: string) => void) => { received = { selectedTab, onSelect }; } };
+  h.w.eval("renderRoute()");
+  expect(received.selectedTab).toBe("review");
+  received.onSelect("execution");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/execution");
+  expect(received.selectedTab).toBe("execution");
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

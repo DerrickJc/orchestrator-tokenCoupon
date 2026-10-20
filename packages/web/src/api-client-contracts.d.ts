@@ -123,6 +123,9 @@ export type PlanOverviewModel = {
 export type PlanOverviewBridge = {
   render(model: PlanOverviewModel, onPrimaryAction: () => void, onResume: () => void): void;
 };
+export type PlanTabsBridge = {
+  render(selectedTab: string, onSelect: (tab: string) => void): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -134,4 +137,5 @@ declare global {
   var tokenCouponReplyComposer: ReplyComposerBridge | undefined;
   var tokenCouponPlanDraftView: PlanDraftViewBridge | undefined;
   var tokenCouponPlanOverview: PlanOverviewBridge | undefined;
+  var tokenCouponPlanTabs: PlanTabsBridge | undefined;
 }

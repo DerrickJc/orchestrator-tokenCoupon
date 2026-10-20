@@ -753,7 +753,8 @@ function renderRoute() {
   if (composer.parentElement !== host) host.append(composer);
   show(composer, route.page === "new" || route.page === "plan");
   for (const panel of document.querySelectorAll("[data-plan-panel]")) show(panel, panel.dataset.planPanel === route.tab);
-  for (const button of document.querySelectorAll("[data-plan-tab]")) { const selected = button.dataset.planTab === route.tab || button.dataset.planTab === "execution" && ["models", "attempts"].includes(route.tab); button.classList.toggle("active", selected); button.setAttribute("aria-current", selected ? "page" : "false"); }
+  if (globalThis.tokenCouponPlanTabs) globalThis.tokenCouponPlanTabs.render(route.tab || "overview", tab => void planTab(tab));
+  else for (const button of document.querySelectorAll("[data-plan-tab]")) { const selected = button.dataset.planTab === route.tab || button.dataset.planTab === "execution" && ["models", "attempts"].includes(route.tab); button.classList.toggle("active", selected); button.setAttribute("aria-current", selected ? "page" : "false"); }
   document.title = route.page === "plan" ? `${state.planning?.draft?.plan?.title || "Plan"} · Token Coupon` : `${$("#project-title").textContent} · Token Coupon`;
   closeNavigation();
   renderExecutionFloatingStatus();
@@ -4150,7 +4151,7 @@ async function previewReferenceFile(path, startLine = 1) {
   } catch (error) { if (request === state.filePreviewRequest) { show($("#file-preview-wrap"), false); $("#file-error").textContent = error.message; show($("#file-error")); } }
 }
 for (const button of document.querySelectorAll("[data-route]")) button.addEventListener("click", () => void navigate(button.dataset.route));
-for (const button of document.querySelectorAll("[data-plan-tab]")) button.addEventListener("click", () => void planTab(button.dataset.planTab));
+if (!globalThis.tokenCouponPlanTabs) for (const button of document.querySelectorAll("[data-plan-tab]")) button.addEventListener("click", () => void planTab(button.dataset.planTab));
 window.addEventListener("hashchange", () => { if (state.initialized) void applyRoute(location.hash.slice(1) || "/connect", true); });
 $("#connection-next").addEventListener("click", () => void navigate("/workspaces"));
 $("#connection-local").addEventListener("click", () => void navigate("/workspaces"));
