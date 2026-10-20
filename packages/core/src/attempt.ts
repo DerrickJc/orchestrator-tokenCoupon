@@ -1,4 +1,5 @@
 import type { ExecutionConfig } from "./task.js";
+import type { ProcessOwner } from "./owner-lock.js";
 import type { ResolvedRunnerSpec, RunnerCleanupStatus, RunnerNativeOutcome, RunnerNativeError, RunnerModelSource } from "./runner.js";
 
 export type AttemptStatus =
@@ -18,7 +19,7 @@ export interface AttemptRecord {
   cwd: string;
   runnerId: string;
   execution: ExecutionConfig;
-  owner?: { pid: number; hostname: string; processStart?: string; bootId?: string };
+  owner?: ProcessOwner & { hostname: string };
   /** Policy actually used by this new Attempt; legacy timeoutMs is informational only. */
   executionPolicy?: { mode: "idle_notice"; idleAfterMs: number };
   completionToken: string;
