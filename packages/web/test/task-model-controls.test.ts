@@ -1,3 +1,4 @@
+import { createClient } from "@token-coupon/client";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
@@ -44,7 +45,8 @@ async function page(options: { lateCodex?: boolean; reactModelSelectors?: boolea
     if (path.endsWith("/plannings/existing-plan")) return Response.json(existing);
     throw new Error(`unexpected request: ${path}`);
   };
-  w.eval(clientScript); w.eval(script);
+  Object.assign(w, { createClient: () => createClient({ fetch: ((path, options) => w.fetch(String(path), options)) as typeof fetch, eventSource: (path) => new w.EventSource(path) }) });
+  w.eval(clientScript.replace(/^import .*;$/m, "")); w.eval(script);
   const element = (id: string) => w.document.getElementById(id)!;
   const choose = (id: string, value: string) => { (element(id) as HTMLSelectElement).value = value; element(id).dispatchEvent(new w.Event("change", { bubbles: true })); };
   await expect.poll(()=>element("planning-panel").classList.contains("hidden")).toBe(false);

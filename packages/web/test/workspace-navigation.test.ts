@@ -1,3 +1,4 @@
+import { createClient } from "@token-coupon/client";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
@@ -328,8 +329,8 @@ it("distinguishes a generic web source from its MCP name and saves a name withou
 it("keeps an unsuccessful name edit and allows cancellation without changing the saved name", async () => {
   const h = await page({ ready: true });
   h.setGrants([{ grantId: "named", alias: "demo1", source: "chatgpt", workspaceIds: ["project"], expiresAt: Date.now() + 60000 }]);
-  h.element("refresh").click(); await expect.poll(() => h.element("remote-grants").children.length).toBe(1);
-  const card = h.element("remote-grants").firstElementChild!;
+  h.element("refresh").click(); await expect.poll(() => h.element("remote-grants").querySelector('[data-grant-id="named"]')).not.toBeNull();
+  const card = h.element("remote-grants").querySelector('[data-grant-id="named"]')!;
   card.querySelector<HTMLButtonElement>(".grant-rename")!.click();
   const input = card.querySelector<HTMLInputElement>(".grant-name-input")!; input.value = "new-name";
   const original = h.w.fetch;
@@ -372,6 +373,38 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
+it("reconciles a restarted daemon without replaying mutations or discarding local inputs", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/draft" });
+  await expect.poll(() => (h.w as any).__testState.initialized).toBe(true);
+  h.element("toggle-plan-edit").click();
+  const title = h.element("plan-text-editor").querySelector("input") as HTMLInputElement;
+  title.value = "尚未保存的标题"; title.dispatchEvent(new h.w.Event("input", { bubbles: true }));
+  const input = h.element("reply-text") as HTMLTextAreaElement; input.value = "未提交澄清";
+  const sources: any[] = [];
+  h.w.EventSource = class {
+    listeners = new Map<string, (event: any) => void>();
+    constructor(readonly url: string) { sources.push(this); }
+    addEventListener(name: string, callback: (event: any) => void) { this.listeners.set(name, callback); }
+    close() {}
+    emit(name: string, value: any) { this.listeners.get(name)?.({ data: JSON.stringify(value) }); }
+  } as any;
+  const originalFetch = h.w.fetch;
+  h.w.fetch = async (path: string, options?: RequestInit) => String(path).endsWith("/health")
+    ? Response.json({ epoch: "restarted", protocol: { major: 1, minor: 0 }, workspaceEnvironment: { currentDirectory: "/projects" }, capabilities: { executionSelection: 1 } })
+    : originalFetch(path, options);
+  const before = h.posts.length;
+  h.w.eval("__testState.lastEventId = 800; connectEvents();");
+  expect(sources[0].url).toContain("epoch=test");
+  sources[0].emit("hello", { epoch: "restarted", latestSequence: 2, resetReason: "epoch_changed" });
+  await expect.poll(() => h.element("connection-label").textContent).toContain("状态已核对");
+  expect((h.w as any).__testState.daemonEpoch).toBe("restarted");
+  expect((h.w as any).__testState.lastEventId).toBe(2);
+  expect((h.element("plan-text-editor").querySelector("input") as HTMLInputElement).value).toBe("尚未保存的标题");
+  expect(input.value).toBe("未提交澄清");
+  expect(h.posts).toHaveLength(before);
+  h.w.eval("connectEvents();");
+  expect(sources[1].url).toContain("after=2&epoch=restarted");
+});
 async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
@@ -516,11 +549,13 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     if (path.endsWith("/repository")) return url.searchParams.get("tool") === "repo_read" ? Response.json({ path: "README.md", startLine: 1, content: "1: <img src=x onerror=alert(1)>\n2: 项目说明", sha256: "a".repeat(64), truncated: false }) : Response.json({ path: ".", entries: [{ name: "README.md", type: "file" }], nextOffset: null });
     throw new Error(`unexpected GET ${path}`);
   };
-  w.eval(clientScript); w.eval(script + "\nwindow.__testState = state;");
+  Object.assign(w, { createClient: () => createClient({ fetch: ((path, options) => w.fetch(String(path), options)) as typeof fetch, eventSource: (path) => new w.EventSource(path) }) });
+  w.eval(clientScript.replace(/^import .*;$/m, "")); w.eval(script + "\nwindow.__testState = state;");
   const element = (id: string) => w.document.getElementById(id)!;
   const visible = (id: string) => { for (let node: Element | null = element(id); node; node = node.parentElement) if (node.classList.contains("hidden")) return false; return true; };
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
+  await expect.poll(() => (w as any).__testState.initialized).toBe(true);
   return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
 

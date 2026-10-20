@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { createMcpHttpHandler } from "./mcp-server.js";
 import type { RemoteMcpConnection } from "./oauth-gateway.js";
 import { browseDirectories } from "./workspace-tools.js";
 import { pickNativePath, nativePickerCapability, normalizePickedPaths, type NativePickerKind, type NativePickerResult } from "./native-picker.js";
+import { APPLICATION_VERSION, API_PROTOCOL, EPOCH_HEADER, PROTOCOL_HEADER } from "@token-coupon/client";
 
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
@@ -68,6 +69,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
   }
   const mcpHandler = await createMcpHttpHandler(service, options.dataDirectory);
   const webBuild = await loadWebBuild();
+  const profileId = createHash("sha256").update(await realpath(options.dataDirectory)).digest("hex").slice(0, 24);
   const expectedHost = `${options.host.includes(":") ? `[${options.host}]` : options.host}:${options.port}`;
   const expectedOrigin = `http://${expectedHost}`;
   const origins = new Set([expectedOrigin, ...(options.host === "127.0.0.1" || options.host === "localhost" ? [`http://127.0.0.1:${options.port}`, `http://localhost:${options.port}`] : [])]);
@@ -109,6 +111,14 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method !== "GET") {
       if (!origins.has(request.headers.origin ?? "")) { sendJson(response, 403, { error: "local_origin_required：操作必须由本机控制台发起" }); return; }
       if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) { sendJson(response, 415, { error: "content_type_json_required" }); return; }
+      const protocol = request.headers[PROTOCOL_HEADER.toLowerCase()];
+      // Unversioned legacy clients keep their existing /api/v1 behavior.
+      if (protocol !== undefined && protocol !== String(API_PROTOCOL.major)) {
+        sendJson(response, 426, { error: "daemon_protocol_incompatible：界面与后台协议不兼容，请更新后重新打开；仍可查看记录" }); return;
+      }
+      if (protocol !== undefined && request.headers[EPOCH_HEADER.toLowerCase()] !== service.epoch) {
+        sendJson(response, 409, { error: "daemon_epoch_changed：后台已重启或尚未核对，请刷新状态后检查操作回执，再决定是否重新提交" }); return;
+      }
     }
     const parts = url.pathname.split("/").filter(Boolean).slice(2);
     if (request.method === "POST" && url.pathname === "/api/v1/native-picker") {
@@ -163,7 +173,9 @@ export async function createLocalServer(service: ApplicationService, options: { 
       if (request.method === "POST") { sendJson(response, 200, await service.saveSystemSettings(await readJsonBody(request))); return; }
     }
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+      sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: APPLICATION_VERSION, buildId: "development", protocol: API_PROTOCOL,
+        profile: { id: profileId, kind: service.workspaceEnvironment().isWsl ? "wsl" : "native", platform: process.platform },
+        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -380,9 +392,13 @@ export async function createLocalServer(service: ApplicationService, options: { 
 
 function streamEvents(service: ApplicationService, request: IncomingMessage, response: ServerResponse, url: URL): void {
   const after = Number(request.headers["last-event-id"] ?? url.searchParams.get("after") ?? 0);
+  const epoch = url.searchParams.get("epoch");
+  const window = service.eventWindow();
+  const resetReason = epoch && epoch !== service.epoch ? "epoch_changed" : !Number.isSafeInteger(after) || after < 0 || after > window.latest ? "cursor_invalid" : after > 0 && after < window.first - 1 ? "window_lost" : undefined;
+  const replayFrom = resetReason ? 0 : after;
   response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
-  response.write(`event: hello\ndata: ${JSON.stringify({ epoch: service.epoch })}\n\n`);
-  for (const event of service.eventsAfter(Number.isSafeInteger(after) ? after : 0)) response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  response.write(`event: hello\ndata: ${JSON.stringify({ epoch: service.epoch, protocol: API_PROTOCOL, firstSequence: window.first, latestSequence: window.latest, replayFrom, ...(resetReason ? { resetReason } : {}) })}\n\n`);
+  for (const event of service.eventsAfter(replayFrom)) response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   const unsubscribe = service.subscribe((event) => { if (!response.destroyed) response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); });
   const keepalive = setInterval(() => { if (!response.destroyed) response.write(": keepalive\n\n"); }, 15_000); keepalive.unref();
   request.once("close", () => { clearInterval(keepalive); unsubscribe(); });

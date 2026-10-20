@@ -1,3 +1,4 @@
+import { createClient } from "@token-coupon/client";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
@@ -69,7 +70,8 @@ async function page(options: { mcp?: boolean; failReply?: boolean; failSave?: bo
     if (path.endsWith("/jobs/save")) return Response.json(saveResult());
     throw new Error(`unexpected GET ${path}`);
   };
-  w.eval(clientScript); w.eval(script);
+  Object.assign(w, { createClient: () => createClient({ fetch: ((path, options) => w.fetch(String(path), options)) as typeof fetch, eventSource: (path) => new w.EventSource(path) }) });
+  w.eval(clientScript.replace(/^import .*;$/m, "")); w.eval(script);
   const element = (id: string) => w.document.getElementById(id)!;
   const value = (id: string) => (element(id) as HTMLTextAreaElement).value;
   const input = (id: string, text: string) => { (element(id) as HTMLTextAreaElement).value = text; element(id).dispatchEvent(new w.Event("input", { bubbles: true })); };

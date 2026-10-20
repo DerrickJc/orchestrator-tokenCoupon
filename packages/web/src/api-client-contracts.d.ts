@@ -1,17 +1,6 @@
-export type ApiRequestOptions = Omit<RequestInit, "headers"> & { headers?: HeadersInit };
+export type { ApiRequestOptions, EventStreamHandlers } from "@token-coupon/client";
 
-export type EventStreamHandlers = {
-  onHello?: (event: Event) => void;
-  onOpen?: (event: Event) => void;
-  onError?: (event: Event) => void;
-  onMessage?: (event: Event) => void;
-  eventTypes?: readonly string[];
-};
-
-export type TokenCouponClient = {
-  api(path: string, options?: ApiRequestOptions): Promise<unknown | null>;
-  openEventStream(path: string, handlers?: EventStreamHandlers): EventSource;
-};
+export type TokenCouponClient = Pick<ReturnType<typeof import("@token-coupon/client").createClient>, "api" | "openEventStream">;
 
 export type CommandPaletteEntry = {
   label: string;

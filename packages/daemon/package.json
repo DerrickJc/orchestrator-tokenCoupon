@@ -14,6 +14,7 @@
     "@token-coupon/core": "*",
     "express": "^5.2.1",
     "undici": "^7.30.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@token-coupon/client": "*"
   }
 }

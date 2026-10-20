@@ -975,6 +975,9 @@ export class ApplicationService {
   }
 
   eventsAfter(sequence: number): DaemonEvent[] { return this.eventTail.filter((event) => event.sequence > sequence); }
+  eventWindow(): { first: number; latest: number } {
+    return { first: this.eventTail[0]?.sequence ?? this.eventSequence + 1, latest: this.eventSequence };
+  }
   subscribe(listener: (event: DaemonEvent) => void): () => void { this.subscribers.add(listener); return () => this.subscribers.delete(listener); }
 
   private async waitForInteraction(workspaceId: string, planningId: string, requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal): Promise<RunnerInteractionReply> {

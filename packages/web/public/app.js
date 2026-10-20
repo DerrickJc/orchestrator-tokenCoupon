@@ -1065,11 +1065,9 @@ $("#system-settings-continue").addEventListener("click", () => { state.initialSe
 async function init() {
   try {
     const health = await api("/api/v1/health");
+    applyDaemonHandshake(health);
+    state.daemonEpoch = health.epoch;
     state.environment = health.workspaceEnvironment;
-    state.executionSelectionSupported = health.capabilities?.executionSelection === 1;
-    state.systemSettingsSupported = health.capabilities?.systemSettings === 1;
-    state.operationRoutingSupported = health.capabilities?.operationRouting === 1;
-    state.plannerProgressSupported = health.capabilities?.plannerProgress === 1;
     if (state.systemSettingsSupported) state.systemSettings = await api("/api/v1/settings");
     if (health.mcp?.localReady) { $("#mcp-local-address").textContent = `本机 MCP 地址：${health.mcp.url}`; show($("#mcp-connection")); }
     const environment = state.environment;
@@ -1079,14 +1077,23 @@ async function init() {
     $("#use-current-directory").disabled = !environment?.currentDirectory;
     $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接";
     [state.workspaces, state.providers, state.runners] = await Promise.all([api("/api/v1/workspaces"), api("/api/v1/providers"), api("/api/v1/runners")]);
-    renderProviders(); renderRunners(); renderWorkspaces(); connectEvents();
+    renderProviders(); renderRunners(); renderWorkspaces();
     await refreshRemoteConnection();
-    state.initialized = true;
     const firstUse = state.systemSettings && !state.systemSettings.initialized && !state.workspaces.length && !location.hash;
     state.initialSetup = !!firstUse;
     await applyRoute(firstUse ? "/settings" : location.hash.slice(1) || "/connect", true);
     await maybeNavigateToAuthorization();
+    state.initialized = true;
+    connectEvents();
   } catch (error) { disconnected(error); }
+}
+function applyDaemonHandshake(health) {
+    state.environment = health.workspaceEnvironment;
+    state.executionSelectionSupported = health.capabilities?.executionSelection === 1;
+    state.systemSettingsSupported = health.capabilities?.systemSettings === 1;
+    state.operationRoutingSupported = health.capabilities?.operationRouting === 1;
+    state.plannerProgressSupported = health.capabilities?.plannerProgress === 1;
+    if (health.protocol && health.protocol.major !== 1) showToast("界面与后台协议不兼容，写操作已暂停。请更新后重新打开；当前仍可查看记录。", true);
 }
 function disconnected(error) { $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; showToast(error.message || "无法连接本机服务", true); }
 function renderProviders() {
@@ -1378,25 +1385,56 @@ async function loadWorkspace(workspaceId, sequence = state.navigationSequence) {
 function connectEvents() {
   clearTimeout(state.reconnectTimer);
   state.eventSource?.close();
-  const connected = () => { state.reconnectAttempts = 0; $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接"; if (state.initialized) { void refreshAll(); void readSelectedAttempt(); } };
+  const generation = state.eventGeneration = (state.eventGeneration || 0) + 1;
+  const connected = () => { if (generation === state.eventGeneration) $("#connection-label").textContent = "已连接，正在核对状态"; };
   const failed = () => {
+    if (generation !== state.eventGeneration) return;
     state.eventSource?.close(); state.eventSource = null; $("#connection-dot").classList.remove("online");
     if (state.reconnectAttempts >= 5) { $("#connection-label").textContent = "需要重新连接"; return; }
     $("#connection-label").textContent = "正在重连";
     const delay = Math.min(16000, 1000 * (2 ** state.reconnectAttempts)) + Math.floor(Math.random() * 250);
     state.reconnectAttempts += 1; state.reconnectTimer = setTimeout(connectEvents, delay);
   };
-  state.eventSource = openEventStream(`/api/v1/events?after=${state.lastEventId}`, {
-    onHello: connected,
+  state.eventSource = openEventStream(`/api/v1/events?after=${state.lastEventId}${state.daemonEpoch ? `&epoch=${encodeURIComponent(state.daemonEpoch)}` : ""}`, {
+    onHello: event => { void reconcileDaemon(event, generation).catch(error => { if (generation === state.eventGeneration) { disconnected(error); failed(); } }); },
     onOpen: connected,
     onError: failed,
-    onMessage: consumeEvent,
+    onMessage: event => { if (generation === state.eventGeneration) consumeEvent(event); },
     eventTypes: ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.progress", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"],
   });
+}
+async function reconcileDaemon(event, generation) {
+  const hello = JSON.parse(event.data);
+  if (generation !== state.eventGeneration) return;
+  state.eventReconciling = true;
+  if (hello.epoch !== state.daemonEpoch || hello.resetReason) state.lastEventId = Number.isSafeInteger(hello.latestSequence) ? hello.latestSequence : 0;
+  try {
+    const health = await api("/api/v1/health");
+    if (generation !== state.eventGeneration) return;
+    if (hello.epoch !== health.epoch) throw new Error("daemon_epoch_changed：核对期间后台再次重启，请重新连接。");
+    const changed = state.daemonEpoch !== health.epoch;
+    applyDaemonHandshake(health);
+    state.daemonEpoch = health.epoch;
+    if (changed || hello.resetReason) {
+      state.loggedPlanEvents?.clear(); state.taskActivity = {};
+    }
+    // Only authoritative reads: do not re-submit any interrupted command or clear local inputs.
+    const [workspaces, providers, runners] = await Promise.all([api("/api/v1/workspaces"), api("/api/v1/providers"), api("/api/v1/runners")]);
+    if (generation !== state.eventGeneration) return;
+    state.workspaces = workspaces; state.providers = providers; state.runners = runners;
+    // Keep the current provider/model form controls and drafts untouched during a reconnect.
+    renderWorkspaces();
+    if (state.systemSettingsSupported) state.systemSettings = await api("/api/v1/settings");
+    if (state.initialized) { await refreshAll(true); await readSelectedAttempt(); await refreshRemoteConnection(); }
+    if (generation !== state.eventGeneration) return;
+    state.reconnectAttempts = 0; $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接 · 状态已核对";
+    if (changed) showToast("后台已重新连接，已读取最新状态。未提交输入已保留，执行操作不会自动重放。");
+  } finally { if (generation === state.eventGeneration) state.eventReconciling = false; }
 }
 function consumeEvent(event) {
   let data; try { data = JSON.parse(event.data); } catch { return; }
   const sequence = Number(event.lastEventId || data.sequence); if (Number.isFinite(sequence)) state.lastEventId = Math.max(state.lastEventId, sequence);
+  if (state.eventReconciling || state.daemonEpoch && data.epoch !== state.daemonEpoch) return;
   if (data.type === "planning.progress") { consumePlanningProgress(data); return; }
   if (data.workspaceId === state.workspace?.workspaceId && data.planningId === state.planning?.planningId) logPlanEvent(data);
   if (data.type === "task.model-switch.waiting" && data.workspaceId === state.workspace?.workspaceId && data.planningId === state.planning?.planningId) { $("#job-label").textContent = data.payload?.message || "目标任务正在收尾，等待安全重试"; show($("#job-bar")); }
@@ -1829,7 +1867,7 @@ function startNewTask() {
   state.resetPlanningPolicy = true;
   return navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/new`);
 }
-async function refreshAll() {
+async function refreshAll(rethrow = false) {
   if (!state.workspace) return;
   try {
     const workspaceId = state.workspace.workspaceId;
@@ -1840,7 +1878,7 @@ async function refreshAll() {
     const id = state.planning?.planningId;
     if (id && state.plannings.some((plan) => plan.planningId === id) && state.route?.page === "plan") await loadPlanning(id);
     renderWorkspaceAccess();
-  } catch (error) { showToast(error.message, true); }
+  } catch (error) { showToast(error.message, true); if (rethrow === true) throw error; }
 }
 function renderPlanning() {
   const plan = state.planning; if (!plan) return;
@@ -3912,11 +3950,13 @@ async function renderInteractions() {
   if (state.interactionSignature === signature) return;
   state.interactionSignature = signature;
   const answers = new Map([...root.querySelectorAll("input[data-question-id]")].map(input => [input.id, { value: input.value, checked: input.checked }]));
-  globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
-  globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
-  globalThis.tokenCouponPendingRunnerQuestions?.unmountWithin(root);
-  globalThis.tokenCouponPendingInteractionGuidance?.unmountWithin(root);
-  globalThis.tokenCouponPendingElicitation?.unmountWithin(root);
+  if (root.childElementCount) {
+    globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
+    globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
+    globalThis.tokenCouponPendingRunnerQuestions?.unmountWithin(root);
+    globalThis.tokenCouponPendingInteractionGuidance?.unmountWithin(root);
+    globalThis.tokenCouponPendingElicitation?.unmountWithin(root);
+  }
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
     const card = document.createElement("div"); card.className = "interaction-card";
