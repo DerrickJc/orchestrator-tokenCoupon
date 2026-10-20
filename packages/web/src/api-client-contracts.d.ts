@@ -212,6 +212,18 @@ export type SessionControlsModel = { buttons: SessionControlButton[] };
 export type SessionControlsBridge = {
   render(model: SessionControlsModel): void;
 };
+export type SessionContinueBlocker = { taskId: string; label: string; onView: () => void };
+export type SessionContinueModel = {
+  label: string;
+  disabled: boolean;
+  message: string;
+  blockers: SessionContinueBlocker[];
+  onContinue: () => void;
+  onRevise: () => void;
+};
+export type SessionContinueBridge = {
+  render(model: SessionContinueModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -230,4 +242,5 @@ declare global {
   var tokenCouponTaskBoard: TaskBoardBridge | undefined;
   var tokenCouponTaskDependencyPreview: TaskDependencyPreviewBridge | undefined;
   var tokenCouponSessionControls: SessionControlsBridge | undefined;
+  var tokenCouponSessionContinue: SessionContinueBridge | undefined;
 }

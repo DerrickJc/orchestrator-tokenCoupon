@@ -2843,6 +2843,21 @@ function sessionContinueAction(session) {
 }
 function renderSessionContinue(session) {
   const action = sessionContinueAction(session), button = $("#session-continue");
+  if (globalThis.tokenCouponSessionContinue) {
+    const blockers = (action.blockers || []).flatMap(task => {
+      const attemptId = task.activeAttemptId || task.attempts?.at(-1)?.attemptId;
+      return attemptId ? [{ taskId: task.taskId, label: action.blockers.length === 1 ? "查看阻塞回复" : `查看阻塞：${task.title || task.taskId}`, onView: () => void openTaskDetails(attemptId) }] : [];
+    });
+    globalThis.tokenCouponSessionContinue.render({
+      label: action.kind === "recover" ? "核验断点状态" : "从断点继续执行",
+      disabled: !!action.disabled || !!state.submittingJob || state.activeJob?.status === "running",
+      message: action.message,
+      blockers,
+      onContinue: openSessionContinue,
+      onRevise: openRevisionPlanning,
+    });
+    return;
+  }
   button.disabled = !!action.disabled || !!state.submittingJob || state.activeJob?.status === "running";
   button.textContent = action.kind === "recover" ? "核验断点状态" : "从断点继续执行";
   $("#session-continue-hint").textContent = action.message;
@@ -4055,7 +4070,7 @@ $("#budget-extension-cancel").addEventListener("click", () => { $("#budget-exten
 $("#confirm-action-yes").addEventListener("click", () => settleConfirmAction(true));
 $("#confirm-action-no").addEventListener("click", () => settleConfirmAction(false));
 $("#confirm-action-dialog").addEventListener("cancel", event => { event.preventDefault(); settleConfirmAction(false); });
-$("#session-continue").addEventListener("click", openSessionContinue);
+if (!globalThis.tokenCouponSessionContinue) $("#session-continue").addEventListener("click", openSessionContinue);
 $("#session-continue-confirm").addEventListener("click", () => void confirmSessionContinue());
 $("#session-continue-cancel").addEventListener("click", () => { $("#session-continue-dialog").close(); state.continueContext = null; });
 $("#dag-focus").addEventListener("change", () => { if (!state.dagView) return; state.dagView.focusId = $("#dag-focus").value; state.dagView.autoFocus = false; updateTaskDag(true); });

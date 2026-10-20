@@ -1871,6 +1871,19 @@ it("sends Session pause and cancel controls through the React bridge", async () 
   expect(received.buttons.every((button: any) => !button.disabled)).toBe(true);
 });
 
+it("sends the current resume decision to React and keeps the existing confirmation dialog", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { sessionId: "paused-session", status: "paused", health: { state: "exited", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", title: "接口文档", status: "planned", attempts: [] }] };
+  let received: any;
+  h.w.tokenCouponSessionContinue = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  expect(received).toMatchObject({ label: "从断点继续执行", disabled: false, message: "继续调度剩余任务，保留全部已完成任务。" });
+  received.onContinue();
+  expect((h.element("session-continue-dialog") as HTMLDialogElement).open).toBe(true);
+  expect((h.element("session-continue-target") as HTMLSelectElement).value).toBe("__resume__");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };
