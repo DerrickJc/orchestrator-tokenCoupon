@@ -3389,6 +3389,7 @@ async function renderInteractions() {
   state.interactionSignature = signature;
   const answers = new Map([...root.querySelectorAll("input[data-question-id]")].map(input => [input.id, { value: input.value, checked: input.checked }]));
   globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
+  globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
     const card = document.createElement("div"); card.className = "interaction-card";
@@ -3416,12 +3417,20 @@ async function renderInteractions() {
     if (request.kind === "approval") {
       if (request.operation?.command) appendApprovalText(card, "approval-command", "待审批命令", request.operation.command, `${interaction.requestId}:command`, 6, 800, true);
       if (request.cwd) { const cwd = document.createElement("p"); cwd.className = "hint"; cwd.textContent = `工作目录：${request.cwd}`; card.append(cwd); }
-      const actions = document.createElement("div"); actions.className = "interaction-actions";
-      for (const [decision, text] of [["allow-once", "本次允许"], ["deny", "拒绝本次操作"]]) {
-        const button = document.createElement("button"); button.className = `button ${decision === "allow-once" ? "button-primary" : "button-quiet"}`; button.textContent = text;
-        button.addEventListener("click", () => respondInteraction(interaction.requestId, { kind: "approval", decision })); actions.append(button);
+      if (globalThis.tokenCouponPendingApprovalDecision) {
+        const actions = document.createElement("div"); actions.className = "approval-decision-react-root"; card.append(actions);
+        globalThis.tokenCouponPendingApprovalDecision.render(actions, {
+          onAllow: () => respondInteraction(interaction.requestId, { kind: "approval", decision: "allow-once" }),
+          onDeny: () => respondInteraction(interaction.requestId, { kind: "approval", decision: "deny" }),
+        });
+      } else {
+        const actions = document.createElement("div"); actions.className = "interaction-actions";
+        for (const [decision, text] of [["allow-once", "本次允许"], ["deny", "拒绝本次操作"]]) {
+          const button = document.createElement("button"); button.className = `button ${decision === "allow-once" ? "button-primary" : "button-quiet"}`; button.textContent = text;
+          button.addEventListener("click", () => respondInteraction(interaction.requestId, { kind: "approval", decision })); actions.append(button);
+        }
+        card.append(actions);
       }
-      card.append(actions);
     } else if (request.kind === "elicitation") {
       renderCodexElicitation(card, interaction);
     } else {

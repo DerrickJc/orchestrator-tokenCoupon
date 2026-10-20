@@ -1918,6 +1918,34 @@ it("sends approval reasons and commands to the React text bridge and releases ro
   await expect.poll(() => rendered.length).toBe(3);
 });
 
+it("routes React approval decisions through the existing interaction API", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  const original = h.w.fetch;
+  let requests: any[] = [{ requestId: "react-approval", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行测试", operation: { command: "npm test" } } }];
+  h.w.fetch = (async (raw: string, init?: any) => {
+    if (raw.includes("/interactions/")) {
+      if (init?.method === "POST") { h.posts.push({ path: raw, body: JSON.parse(init.body) }); return Response.json({ ok: true }); }
+      return Response.json(requests);
+    }
+    return original(raw, init);
+  }) as any;
+  let decision: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingApprovalDecision = {
+    render(mount: HTMLElement, model: any) { decision = model; mount.textContent = "React actions"; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.element("refresh").click();
+  await expect.poll(() => decision).toBeTruthy();
+  decision.onAllow();
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-approval", body: { kind: "approval", decision: "allow-once" } });
+
+  requests = [{ requestId: "react-approval-next", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行构建", operation: { command: "npm run build" } } }];
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

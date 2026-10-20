@@ -241,6 +241,14 @@ export type PendingApprovalTextBridge = {
   render(mount: HTMLElement, model: PendingApprovalTextModel): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type PendingApprovalDecisionModel = {
+  onAllow: () => void;
+  onDeny: () => void;
+};
+export type PendingApprovalDecisionBridge = {
+  render(mount: HTMLElement, model: PendingApprovalDecisionModel): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -262,4 +270,5 @@ declare global {
   var tokenCouponSessionContinue: SessionContinueBridge | undefined;
   var tokenCouponPendingApprovalOverview: PendingApprovalOverviewBridge | undefined;
   var tokenCouponPendingApprovalText: PendingApprovalTextBridge | undefined;
+  var tokenCouponPendingApprovalDecision: PendingApprovalDecisionBridge | undefined;
 }
