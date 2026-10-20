@@ -1832,6 +1832,21 @@ it("places decisions before tasks and execution returns after tasks, with sideba
   expect(h.element("session-progress").querySelector("progress")!.max).toBeGreaterThan(0);
 });
 
+it("sends current task cards to the React board bridge while retaining existing task actions", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { status: "failed", health: { state: "exited", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", title: "接口文档", status: "failed", dependsOn: [], attempts: [{ attemptId: "attempt-1" }], currentAttempt: { attemptId: "attempt-1", runnerId: "codex", reportedModel: "gpt-6.1-sol", reason: "退出码 1", activity: "构建失败" } }] };
+  let received: any;
+  h.w.tokenCouponTaskBoard = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  const failed = received.groups.find((group: any) => group.id === "errors").tasks[0];
+  expect(failed).toMatchObject({ taskId: "spec", title: "接口文档", statusLabel: "失败", outcome: "错误结论：任务失败" });
+  expect(failed.runnerModel).toContain("codex / gpt-6.1-sol");
+  expect(failed.actions.map((action: any) => action.label)).toEqual(["查看明细", "查看回复与工具活动", "重试 spec"]);
+  failed.actions[0].onClick();
+  expect((h.element("dag-task-dialog") as HTMLDialogElement).open).toBe(true);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

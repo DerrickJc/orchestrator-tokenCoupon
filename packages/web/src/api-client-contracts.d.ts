@@ -168,6 +168,35 @@ export type LiveTaskRepliesModel = {
 export type LiveTaskRepliesBridge = {
   render(model: LiveTaskRepliesModel): void;
 };
+export type TaskBoardAction = { label: string; onClick: () => void };
+export type TaskBoardDependency = { label: string; tone: string };
+export type TaskBoardEntry = {
+  taskId: string;
+  icon: string;
+  iconTone: string;
+  title: string;
+  runnerModel: string;
+  attemptSummary: string;
+  elapsed: string;
+  reasonCode?: string;
+  activity: string;
+  resultSummary?: string;
+  resultTruncated?: boolean;
+  dependencyLabel: string;
+  dependencies: TaskBoardDependency[];
+  completedDependencyLabel?: string;
+  completedDependencies?: TaskBoardDependency[];
+  nextModel?: string;
+  outcome?: string;
+  statusLabel: string;
+  statusTone: string;
+  actions: TaskBoardAction[];
+};
+export type TaskBoardGroup = { id: string; label: string; tasks: TaskBoardEntry[] };
+export type TaskBoardModel = { emptyMessage?: string; groups: TaskBoardGroup[] };
+export type TaskBoardBridge = {
+  render(model: TaskBoardModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -183,4 +212,5 @@ declare global {
   var tokenCouponConversationView: ConversationViewBridge | undefined;
   var tokenCouponExecutionProgress: ExecutionProgressBridge | undefined;
   var tokenCouponLiveTaskReplies: LiveTaskRepliesBridge | undefined;
+  var tokenCouponTaskBoard: TaskBoardBridge | undefined;
 }

@@ -2509,6 +2509,63 @@ function taskExecutionLabel(task) {
   const pending = pendingTaskInteraction(task);
   return pending ? pending.request.kind === "question" ? "等待回答" : pending.request.kind === "approval" ? "等待工具审批" : "等待表单／网页确认" : statuses[task.status] || task.status;
 }
+function taskBoardViewModel(session, tasks) {
+  const groups = [
+    { id: "completed", label: "已完成", tasks: [] },
+    { id: "running", label: "运行中", tasks: [] },
+    { id: "pending", label: "未开始 / 等待依赖", tasks: [] },
+    { id: "errors", label: "错误 / 中断", tasks: [] },
+  ];
+  const definitions = new Map((state.planning.draft?.plan.tasks || []).map(entry => [entry.task.id, entry]));
+  for (const task of tasks) {
+    const definition = definitions.get(task.taskId), status = task.status, pending = pendingTaskInteraction(task);
+    const attempt = task.currentAttempt, execution = attempt?.execution || task.execution || definition?.task.execution || {};
+    const dependencies = task.dependsOn || definition?.dependsOn || [];
+    const unfinishedDependencies = dependencies.filter(id => !tasks.some(item => item.taskId === id && item.status === "succeeded"));
+    const dependencyItems = (unfinishedDependencies.length ? unfinishedDependencies : dependencies).map(id => {
+      const dependency = tasks.find(item => item.taskId === id);
+      return { label: `${dependency?.title || id}（${statuses[dependency?.status] || "状态待核验"}）`, tone: statusClass(dependency?.status) };
+    });
+    const completedDependencies = unfinishedDependencies.length && unfinishedDependencies.length < dependencies.length ? dependencies.filter(id => !unfinishedDependencies.includes(id)).map(id => {
+      const dependency = tasks.find(item => item.taskId === id);
+      return { label: `${dependency?.title || id}（${statuses[dependency?.status] || "状态待核验"}）`, tone: statusClass(dependency?.status) };
+    }) : [];
+    const id = task.activeAttemptId || task.attempts?.at(-1)?.attemptId;
+    const runner = attempt?.runnerId || execution.runnerId || "未知 Runner";
+    const model = attempt?.reportedModel ? reportedModelLabel(attempt.reportedModel, attempt.reportedModelSource) : execution.modelId ? `${execution.modelId}（配置模型）` : "沿用 Runner 默认，实际模型未报告";
+    const elapsed = attempt?.startedAt ? ` · 耗时 ${Math.max(0, Math.floor(((attempt.finishedAt ? Date.parse(attempt.finishedAt) : Date.now()) - Date.parse(attempt.startedAt)) / 1000))} 秒` : "";
+    const recent = attempt?.activity || state.taskActivity?.[task.taskId];
+    const activity = pending ? "请在上方“审批与回答”处理；提交后继续当前任务" : recent || (status === "planned" ? `等待依赖：${dependencies.join("、") || "等待调度"}` : task.reasonCode === "user_input_required" ? "已暂停自动调度，请查看最新 Attempt 的结论" : attempt?.lastActivityAt ? `最近活动：${new Date(attempt.lastActivityAt).toLocaleTimeString()}` : "等待输出");
+    const taskStatusLabel = status === "blocked" && task.reasonCode === "user_input_required" ? "等待用户决策" : status === "blocked" && task.reasonCode === "dependency_not_succeeded" ? "等待前置任务" : taskExecutionLabel(task);
+    const icon = status === "succeeded" ? "✓" : status === "failed" ? "!" : status === "running" ? "◌" : status === "blocked" ? "Ⅱ" : "·";
+    const actions = [{ label: "查看明细", onClick: () => showDagTaskDetails(task.taskId) }];
+    if (id) actions.push({ label: "查看回复与工具活动", onClick: () => void openTaskDetails(id) });
+    if (status === "succeeded") actions.push({ label: "查看任务生成结果", onClick: () => void openTaskResults(task.taskId) });
+    const retryable = ["failed", "timed_out", "cancelled", "interrupted"].includes(status) && dependencies.every(id => tasks.some(item => item.taskId === id && item.status === "succeeded")) && !session.health?.recoveryRequired && !["active", "unknown", "identity_conflict"].includes(session.health?.state);
+    if (retryable) actions.push({ label: `重试 ${task.taskId}`, onClick: () => startSessionAction("session/retry", `重试 ${task.taskId}`, { taskId: task.taskId }) });
+    groups.find(group => group.id === taskBoardGroup(status)).tasks.push({
+      taskId: task.taskId,
+      icon: pending ? "Ⅱ" : icon,
+      iconTone: pending ? "blocked" : status,
+      title: task.title || definition?.task.title || task.taskId,
+      runnerModel: `${runner} / ${model}`,
+      attemptSummary: `${task.attempts?.length || 0} 次 attempt`,
+      elapsed,
+      ...(task.reasonCode ? { reasonCode: task.reasonCode } : {}),
+      activity,
+      ...(task.result?.summary ? { resultSummary: task.result.summary, resultTruncated: task.result.truncated } : {}),
+      dependencyLabel: unfinishedDependencies.length ? "等待前置任务完成：" : "前置任务已全部完成：",
+      dependencies: dependencyItems,
+      ...(completedDependencies.length ? { completedDependencyLabel: "已完成的前置任务：", completedDependencies } : {}),
+      ...(session.models?.overrides?.[task.taskId] ? { nextModel: `下次启动模型：${session.models.overrides[task.taskId].modelId || "沿用 Session 启动配置"}；当前 Attempt 不原地变更` } : {}),
+      ...(executionConclusion(status, task.reasonCode) ? { outcome: executionConclusion(status, task.reasonCode) } : {}),
+      statusLabel: taskStatusLabel,
+      statusTone: statusClass(pending ? "blocked" : status),
+      actions,
+    });
+  }
+  return { groups };
+}
 function renderLiveTaskReplies(tasks) {
   const root = $("#live-task-replies");
   const wasOpen = !!root.querySelector("details[open]");
@@ -2641,7 +2698,14 @@ function renderSession() {
   $("#session-progress").className = `session-progress ${statusClass(session?.status)}`;
   renderTaskDependencies(tasks); renderLiveTaskReplies(tasks); renderRuntimeModelPanel(tasks);
   renderAttemptChoices(tasks);
-  if (!session?.tasks) { box.innerHTML = `<div class="empty-state">${state.planning.status === "approved" ? "草案已批准，点击“运行计划”启动。" : "完成审查和批准后，任务进度会显示在这里。"}</div>`; return; }
+  if (!session?.tasks) {
+    const emptyMessage = state.planning.status === "approved" ? "草案已批准，点击“运行计划”启动。" : "完成审查和批准后，任务进度会显示在这里。";
+    if (globalThis.tokenCouponTaskBoard) globalThis.tokenCouponTaskBoard.render({ emptyMessage, groups: [] });
+    else box.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
+    return;
+  }
+  if (globalThis.tokenCouponTaskBoard) globalThis.tokenCouponTaskBoard.render(taskBoardViewModel(session, tasks));
+  else {
   ensureTaskBoard(box);
   const existingRows = new Map([...box.querySelectorAll(".task-row")].map(row => [row.dataset.taskId, row]));
   for (const [id, row] of existingRows) if (!tasks.some(task => task.taskId === id)) row.remove();
@@ -2692,6 +2756,7 @@ function renderSession() {
     rows.slice(3).forEach(row => extra.append(row));
     overflow.querySelector("summary").textContent = `展开其余 ${Math.max(0, rows.length - 3)} 项任务`;
     show(overflow, rows.length > 3);
+  }
   }
   const pendingControl = session.pendingControl || (session.controlState?.requestId && !session.controlState.acknowledgedAt ? session.controlState : null);
   const controls = $("#session-controls"), controlSignature = JSON.stringify([session.status, session.health?.state, session.health?.recoveryRequired, tasks.map(task => task.status), session.isolation?.mode, pendingControl?.requestId, pendingControl?.kind, state.controlJob?.jobId, state.controlJob?.status, state.submittingControl]);
