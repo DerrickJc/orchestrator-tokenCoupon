@@ -3270,10 +3270,23 @@ function renderAttemptContent() {
   const tools = $("#attempt-tools"), toolScroll = tools.scrollTop, rawScroll = $("#attempt-raw").scrollTop;
   const oldTools = new Map([...tools.querySelectorAll("details")].map(item => [item.dataset.eventKey, item]));
   const toolPage = activityPage(view, "tools", view.tools);
-  for (const [eventKey, element] of oldTools) if (!toolPage.some(tool => String(tool.sequence) === eventKey)) element.remove();
-  for (const [index, tool] of toolPage.entries()) { const details = oldTools.get(String(tool.sequence)) || document.createElement("details"), signature = JSON.stringify(tool);
-    if (details.dataset.signature !== signature) { details.dataset.signature = signature; details.replaceChildren(); const summary = document.createElement("summary"), pre = document.createElement("pre"); details.className = "foldout"; details.dataset.eventKey = String(tool.sequence); if (tool.exitCode && tool.exitCode !== 0 || tool.type === "stderr") details.classList.add("activity-error"); summary.textContent = `${tool.timestamp ? new Date(tool.timestamp).toLocaleTimeString() + " · " : ""}${tool.type}${tool.exitCode === undefined ? "" : ` · 退出码 ${tool.exitCode}`} · ${tool.text.slice(0, 180)}`; pre.textContent = [tool.text, tool.output].filter(Boolean).join("\n"); details.append(summary, pre); }
-    if (tools.children[index] !== details) tools.insertBefore(details, tools.children[index] || null);
+  if (globalThis.tokenCouponAttemptTools) {
+    const openEventKeys = [...oldTools.values()].filter(element => element.open).map(element => element.dataset.eventKey).filter(Boolean);
+    globalThis.tokenCouponAttemptTools.render({
+      openEventKeys,
+      tools: toolPage.map(tool => ({
+        eventKey: String(tool.sequence),
+        summary: `${tool.timestamp ? new Date(tool.timestamp).toLocaleTimeString() + " · " : ""}${tool.type}${tool.exitCode === undefined ? "" : ` · 退出码 ${tool.exitCode}`} · ${tool.text.slice(0, 180)}`,
+        text: [tool.text, tool.output].filter(Boolean).join("\n"),
+        isError: !!tool.exitCode && tool.exitCode !== 0 || tool.type === "stderr",
+      })),
+    });
+  } else {
+    for (const [eventKey, element] of oldTools) if (!toolPage.some(tool => String(tool.sequence) === eventKey)) element.remove();
+    for (const [index, tool] of toolPage.entries()) { const details = oldTools.get(String(tool.sequence)) || document.createElement("details"), signature = JSON.stringify(tool);
+      if (details.dataset.signature !== signature) { details.dataset.signature = signature; details.replaceChildren(); const summary = document.createElement("summary"), pre = document.createElement("pre"); details.className = "foldout"; details.dataset.eventKey = String(tool.sequence); if (tool.exitCode && tool.exitCode !== 0 || tool.type === "stderr") details.classList.add("activity-error"); summary.textContent = `${tool.timestamp ? new Date(tool.timestamp).toLocaleTimeString() + " · " : ""}${tool.type}${tool.exitCode === undefined ? "" : ` · 退出码 ${tool.exitCode}`} · ${tool.text.slice(0, 180)}`; pre.textContent = [tool.text, tool.output].filter(Boolean).join("\n"); details.append(summary, pre); }
+      if (tools.children[index] !== details) tools.insertBefore(details, tools.children[index] || null);
+    }
   }
   const filter = $("#attempt-event-filter").value.trim();
   const raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);

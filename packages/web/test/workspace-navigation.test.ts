@@ -2061,6 +2061,27 @@ it("publishes deduplicated final replies to the React Attempt message list in ne
   expect(received.messages[0]).toMatchObject({ title: "2. 最新回复 · 最终结论", text: "完成结论：全部测试通过" });
 });
 
+it("publishes the current tool page and open foldout state to the React Attempt activity list", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  h.w.tokenCouponAttemptTools = { render(model: any) { received = model; } } as any;
+  h.element("attempt-tools").innerHTML = '<details data-event-key="16" open></details>';
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-tools",
+      attempt: { runnerId: "codex", status: "succeeded" },
+      messages: new Map(), finalText: "", textStream: "", semanticMessages: false,
+      tools: Array.from({ length: 16 }, (_, index) => ({ sequence: index + 1, type: index === 15 ? "command.completed" : "tool.completed", text: "command-" + (index + 1), output: index === 15 ? "2 tests passed" : undefined, exitCode: index === 15 ? 1 : 0, timestamp: "2026-10-20T03:00:00.000Z" })),
+      raw: [], toolsPage: 1, rawPage: 0, notice: "", hasMore: false,
+    };
+    renderAttemptContent();
+  `);
+  expect(received.tools).toHaveLength(1);
+  expect(received.tools[0]).toMatchObject({ eventKey: "16", summary: expect.stringContaining("command-16"), text: "command-16\n2 tests passed", isError: true });
+  expect(received.openEventKeys).toEqual(["16"]);
+  expect(h.element("attempt-tools-page").textContent).toContain("第 2 / 2 页");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

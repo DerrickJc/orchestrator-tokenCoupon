@@ -335,6 +335,11 @@ export type AttemptMessagesModel = { messages: AttemptMessageView[]; emptyMessag
 export type AttemptMessagesBridge = {
   render(model: AttemptMessagesModel): void;
 };
+export type AttemptToolView = { eventKey: string; summary: string; text: string; isError: boolean };
+export type AttemptToolsModel = { tools: AttemptToolView[]; openEventKeys: string[] };
+export type AttemptToolsBridge = {
+  render(model: AttemptToolsModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -362,4 +367,5 @@ declare global {
   var tokenCouponPendingElicitation: PendingElicitationBridge | undefined;
   var tokenCouponAttemptOverview: AttemptOverviewBridge | undefined;
   var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
+  var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
 }
