@@ -1848,6 +1848,12 @@ function renderPlanWorkflowBanner() {
 function renderReviewerControls(plan) {
   let select = $("#reviewer-mode");
   const button = $("#review-button");
+  const setReviewerMode = mode => {
+    localStorage.setItem("tc-reviewer-mode", mode);
+    $("#reviewer-model").value = "";
+    state.modelChoiceSelections.reviewer = "";
+    state.reviewerModelMode = "";
+  };
   if (!select) {
     const controls = document.createElement("div"); controls.className = "review-run-controls";
     const methodLabel = document.createElement("label"); methodLabel.className = "compact-label"; methodLabel.textContent = "审查方式";
@@ -1869,7 +1875,7 @@ function renderReviewerControls(plan) {
   }
   if (!select.dataset.bound) {
     select.dataset.bound = "true";
-    select.addEventListener("change", () => { localStorage.setItem("tc-reviewer-mode", select.value); $("#reviewer-model").value = ""; state.reviewerModelMode = ""; renderReviewerControls(state.planning); });
+    if (!globalThis.tokenCouponReviewerModeSelector) select.onchange = () => { setReviewerMode(select.value); renderReviewerControls(state.planning); };
     if (!globalThis.tokenCouponModelChoiceSelectors) $("#reviewer-model-choice").addEventListener("change", () => applyModelChoice("reviewer"));
   }
   const reviewKey = `${plan.planningId}:${state.systemSettings?.revision || 0}`;
@@ -1881,6 +1887,15 @@ function renderReviewerControls(plan) {
   }
   const stored = functionPolicy("review") ? null : localStorage.getItem("tc-reviewer-mode");
   if (stored && [...select.options].some(option => option.value === stored)) select.value = stored;
+  if (globalThis.tokenCouponReviewerModeSelector) {
+    select.onchange = null;
+    globalThis.tokenCouponReviewerModeSelector.render({ options: [...select.options].map(option => ({ id: option.value, label: option.textContent || option.value })), selectedMode: select.value || "planning" }, mode => {
+      setReviewerMode(mode);
+      queueMicrotask(() => renderReviewerControls(state.planning));
+    });
+  } else {
+    select.onchange = () => { setReviewerMode(select.value); renderReviewerControls(state.planning); };
+  }
   const mode = select.value || "planning";
   const web = mode === "web-chatgpt" || mode === "web-claude" || mode === "planning" && isWebMcp(plan.config.provider);
   const model = ["codex-agent", "claude-agent", "deepseek-api", "web-chatgpt", "web-claude"].includes(mode);
