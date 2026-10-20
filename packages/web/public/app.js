@@ -2670,7 +2670,10 @@ async function changeRuntimeModel(stopAndRetry) {
 }
 function renderSession() {
   const box = $("#task-list"); const session = state.planning.session;
-  if (!session) { $("#session-controls").replaceChildren(); delete $("#session-controls").dataset.signature; }
+  if (!session) {
+    if (globalThis.tokenCouponSessionControls) globalThis.tokenCouponSessionControls.render({ buttons: [] });
+    else { $("#session-controls").replaceChildren(); delete $("#session-controls").dataset.signature; }
+  }
   renderSessionContinue(session);
   renderControlFeedback(session);
   renderExecutionFloatingStatus();
@@ -2768,17 +2771,25 @@ function renderSession() {
   }
   }
   const pendingControl = session.pendingControl || (session.controlState?.requestId && !session.controlState.acknowledgedAt ? session.controlState : null);
-  const controls = $("#session-controls"), controlSignature = JSON.stringify([session.status, session.health?.state, session.health?.recoveryRequired, tasks.map(task => task.status), session.isolation?.mode, pendingControl?.requestId, pendingControl?.kind, state.controlJob?.jobId, state.controlJob?.status, state.submittingControl]);
   acknowledgeResumedSession();
-  if (controls.dataset.signature === controlSignature) return;
-  controls.dataset.signature = controlSignature; controls.replaceChildren();
+  const busy = !!state.submittingControl || state.controlJob?.status === "running", controlButtons = [];
   if (["running", "pausing"].includes(session.status)) {
-    const busy = !!state.submittingControl || state.controlJob?.status === "running";
-    const pause = document.createElement("button"); pause.className = "button button-session-pause"; pause.textContent = pendingControl?.kind === "pause" || session.status === "pausing" ? "等待当前任务收尾…" : "暂停会话"; pause.title = "停止继续派发任务；当前运行任务完成后暂停，不冻结模型进程。"; pause.disabled = busy || !!pendingControl || session.status === "pausing"; pause.addEventListener("click", () => startSessionAction("session/pause", "暂停会话")); controls.append(pause);
-    const cancel = document.createElement("button"); cancel.className = "button button-session-cancel"; cancel.textContent = pendingControl?.kind === "cancel" ? "正在取消…" : "取消会话"; cancel.disabled = busy || pendingControl?.kind === "cancel"; cancel.addEventListener("click", () => startSessionAction("session/cancel", "取消会话")); controls.append(cancel);
+    controlButtons.push({ label: pendingControl?.kind === "pause" || session.status === "pausing" ? "等待当前任务收尾…" : "暂停会话", className: "button button-session-pause", title: "停止继续派发任务；当前运行任务完成后暂停，不冻结模型进程。", disabled: busy || !!pendingControl || session.status === "pausing", onClick: () => startSessionAction("session/pause", "暂停会话") });
+    controlButtons.push({ label: pendingControl?.kind === "cancel" ? "正在取消…" : "取消会话", className: "button button-session-cancel", disabled: busy || pendingControl?.kind === "cancel", onClick: () => startSessionAction("session/cancel", "取消会话") });
   }
   if (session.status === "succeeded" && session.isolation?.mode === "git-worktree") {
-    const delivery = document.createElement("button"); delivery.className = "button button-primary"; delivery.textContent = "生成交付报告"; delivery.addEventListener("click", () => startSessionAction("session/delivery", "生成交付报告")); controls.append(delivery);
+    controlButtons.push({ label: "生成交付报告", className: "button button-primary", disabled: busy, onClick: () => startSessionAction("session/delivery", "生成交付报告") });
+  }
+  if (globalThis.tokenCouponSessionControls) globalThis.tokenCouponSessionControls.render({ buttons: controlButtons });
+  else {
+    const controls = $("#session-controls"), controlSignature = JSON.stringify([session.status, session.health?.state, session.health?.recoveryRequired, tasks.map(task => task.status), session.isolation?.mode, pendingControl?.requestId, pendingControl?.kind, state.controlJob?.jobId, state.controlJob?.status, state.submittingControl]);
+    if (controls.dataset.signature === controlSignature) return;
+    controls.dataset.signature = controlSignature; controls.replaceChildren();
+    for (const model of controlButtons) {
+      const button = document.createElement("button"); button.type = "button"; button.className = model.className; button.textContent = model.label; button.disabled = model.disabled;
+      if (model.title) button.title = model.title;
+      button.addEventListener("click", model.onClick); controls.append(button);
+    }
   }
 
 }

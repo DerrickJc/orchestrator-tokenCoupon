@@ -207,6 +207,11 @@ export type TaskDependencyPreviewModel = {
 export type TaskDependencyPreviewBridge = {
   render(model: TaskDependencyPreviewModel | null): void;
 };
+export type SessionControlButton = { label: string; className: string; title?: string; disabled: boolean; onClick: () => void };
+export type SessionControlsModel = { buttons: SessionControlButton[] };
+export type SessionControlsBridge = {
+  render(model: SessionControlsModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -224,4 +229,5 @@ declare global {
   var tokenCouponLiveTaskReplies: LiveTaskRepliesBridge | undefined;
   var tokenCouponTaskBoard: TaskBoardBridge | undefined;
   var tokenCouponTaskDependencyPreview: TaskDependencyPreviewBridge | undefined;
+  var tokenCouponSessionControls: SessionControlsBridge | undefined;
 }

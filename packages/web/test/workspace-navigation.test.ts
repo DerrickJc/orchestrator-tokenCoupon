@@ -1860,6 +1860,17 @@ it("sends current task cards to the React board bridge while retaining existing 
   expect((h.element("dag-task-dialog") as HTMLDialogElement).open).toBe(true);
 });
 
+it("sends Session pause and cancel controls through the React bridge", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { status: "running", health: { state: "active", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "backend", status: "running", attempts: [] }] };
+  let received: any;
+  h.w.tokenCouponSessionControls = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received?.buttons?.length).toBe(2);
+  expect(received.buttons.map((button: any) => button.label)).toEqual(["暂停会话", "取消会话"]);
+  expect(received.buttons.every((button: any) => !button.disabled)).toBe(true);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };
