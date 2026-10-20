@@ -2192,6 +2192,25 @@ it("publishes diagnosis history and model choices from the current diagnostic co
   expect(h.w.eval("__testState.attemptDiagnosticContext.diagnosisModelId")).toBe("__custom__");
 });
 
+it("publishes evidence export progress and saved path to the React diagnosis export dialog", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  const renderModels: any[] = [];
+  h.w.tokenCouponAttemptDiagnosisExport = { render(_mount: HTMLElement, model: any) { received = model; renderModels.push(model); }, unmountWithin() {} } as any;
+  const original = h.w.fetch;
+  h.w.fetch = (async (url: string, init?: any) => url.endsWith("/diagnostics/export") ? Response.json({ absolutePath: "/workspace/.scratch/diagnosis.md", prompt: "读取并分析证据" }) : original(url, init)) as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    __testState.attemptDiagnosticContext = { identity: "project:first:export", workspaceId: "project", planningId: "first", attemptId: "attempt-export" };
+    void exportAttemptDiagnosis(__testState.attemptDiagnosticContext);
+  `);
+  await expect.poll(() => renderModels.some(model => model.status.includes("正在把诊断证据保存"))).toBe(true);
+  await expect.poll(() => received?.path).toBe("/workspace/.scratch/diagnosis.md");
+  await expect.poll(() => received?.copyLabel).toContain("已复制");
+  expect(received.copyDisabled).toBe(false);
+  expect(h.copied).toContain("读取并分析证据");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

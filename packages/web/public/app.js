@@ -3064,6 +3064,9 @@ function ensureAttemptDiagnosticUI() {
   const exported = document.createElement("dialog"); exported.id = "diagnosis-export-dialog"; exported.className = "reference-dialog";
   exported.innerHTML = `<div class="section-title"><h3>到网页分析</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><p id="diagnosis-export-status" role="status">正在保存证据…</p><label>证据文件<input id="diagnosis-export-path" readonly></label><p class="hint">在已连接 Token Coupon MCP 的 GPT／Claude 网页粘贴提示即可读取。网页无法直接访问本机路径；未启用 MCP 时，请上传此文件。此操作不调用本机诊断模型。</p><button id="diagnosis-export-copy" type="button" class="button button-primary" disabled>复制分析提示</button>`;
   document.body.append(exported);
+  const exportRoot = document.createElement("div"); exportRoot.id = "diagnosis-export-root";
+  while (exported.firstChild) exportRoot.append(exported.firstChild);
+  exported.append(exportRoot);
   for (const dialog of [choice, chat, exported]) dialog.querySelector("[data-diagnosis-close]").addEventListener("click", () => dialog.close());
   for (const dialog of [chat, exported]) {
     const switchMode = document.createElement("button"); switchMode.type = "button"; switchMode.className = "text-button"; switchMode.textContent = "切换分析方式";
@@ -3258,18 +3261,30 @@ async function sendAttemptDiagnosticMessage() {
 }
 async function exportAttemptDiagnosis(context) {
   if (!diagnosticContextIsCurrent(context)) return;
-  $("#diagnosis-export-dialog").showModal(); $("#diagnosis-export-copy").disabled = true; $("#diagnosis-export-status").textContent = "正在把诊断证据保存到当前工作区…"; $("#diagnosis-export-path").value = "";
+  $("#diagnosis-export-dialog").showModal();
+  context.exportState = { status: "正在把诊断证据保存到当前工作区…", path: "", copyLabel: "复制分析提示", copyDisabled: true };
+  renderAttemptDiagnosticExport(context);
   try {
     const result = await api(`${attemptDiagnosticPath(context)}/export`, { method: "POST", body: "{}" });
     if (!diagnosticContextIsCurrent(context)) return;
-    context.exported = result; $("#diagnosis-export-path").value = result.absolutePath; $("#diagnosis-export-status").textContent = `证据已保存${result.truncated ? "（日志按限额截取）" : ""}。复制简短提示，到网页发送即可。`; $("#diagnosis-export-copy").disabled = false;
+    context.exported = result; context.exportState = { status: `证据已保存${result.truncated ? "（日志按限额截取）" : ""}。复制简短提示，到网页发送即可。`, path: result.absolutePath, copyLabel: "复制分析提示", copyDisabled: false };
+    renderAttemptDiagnosticExport(context);
     await copyExportedDiagnosticPrompt();
-  } catch (error) { if (diagnosticContextIsCurrent(context)) $("#diagnosis-export-status").textContent = `保存未完成：${error.message}`; }
+  } catch (error) { if (diagnosticContextIsCurrent(context)) { context.exportState = { status: `保存未完成：${error.message}`, path: "", copyLabel: "复制分析提示", copyDisabled: true }; renderAttemptDiagnosticExport(context); } }
+}
+function renderAttemptDiagnosticExport(context) {
+  const mount = $("#diagnosis-export-root"), model = context.exportState || { status: "正在保存证据…", path: "", copyLabel: "复制分析提示", copyDisabled: true };
+  if (globalThis.tokenCouponAttemptDiagnosisExport) {
+    globalThis.tokenCouponAttemptDiagnosisExport.render(mount, model, { onClose: () => $("#diagnosis-export-dialog").close(), onCopy: () => void copyExportedDiagnosticPrompt() });
+    return;
+  }
+  $("#diagnosis-export-status").textContent = model.status; $("#diagnosis-export-path").value = model.path;
+  $("#diagnosis-export-copy").textContent = model.copyLabel; $("#diagnosis-export-copy").disabled = model.copyDisabled;
 }
 async function copyExportedDiagnosticPrompt() {
   const result = state.attemptDiagnosticContext?.exported;
   if (!result) return;
-  try { await navigator.clipboard.writeText(result.prompt); $("#diagnosis-export-copy").textContent = "已复制 · 再次复制"; }
+  try { await navigator.clipboard.writeText(result.prompt); if (state.attemptDiagnosticContext) { state.attemptDiagnosticContext.exportState.copyLabel = "已复制 · 再次复制"; renderAttemptDiagnosticExport(state.attemptDiagnosticContext); } }
   catch { showCopyFallback("复制网页分析提示", result.prompt); }
 }
 function reportedModelLabel(model, source) {
