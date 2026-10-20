@@ -550,6 +550,17 @@ it("passes structured and legacy task fields to the React draft view while retai
   expect(received.tasks[1]).toMatchObject({ schemaLabel: "旧版正文", sections: [{ label: "任务正文", value: "代码正文按需展开" }] });
 });
 
+it("passes the current plan metrics and primary action through the React overview bridge", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  let received: any;
+  (h.w as any).tokenCouponPlanOverview = { render: (model: unknown, onPrimaryAction: () => void, onResume: () => void) => { received = { model, onPrimaryAction, onResume }; } };
+  h.w.eval("renderPlanOverview()");
+  expect(received.model).toMatchObject({ stage: "待核对与批准", taskCount: 5, completedTaskCount: 0, reviewStatus: "有效", primaryActionLabel: "核对并批准", resumeDisabled: false });
+  received.onPrimaryAction();
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/review");
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

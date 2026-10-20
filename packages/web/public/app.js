@@ -911,17 +911,24 @@ function renderPlanOverview() {
   const session = plan.session, review = plan.review;
   const waiting = (plan.interactions || []).length || state.waitingInteractions || 0;
   const stage = plan.workflow?.label || (session ? waiting ? "等待人工处理" : statuses[session.status] || session.status : plan.status === "approved" ? "待执行" : review?.current ? "待核对与批准" : plan.draft ? "待审查" : "等待网页规划");
-  $("#plan-stage").textContent = stage;
-  $("#plan-stage").className = `badge ${statusClass(session?.status || plan.status)}`;
-  $("#plan-next-action").textContent = session ? waiting ? "Runner 正在等待你的批准或回答，进入执行页处理。" : "进入执行与结果页查看任务状态、恢复操作和交付证据。" : plan.status === "approved" ? "草案已批准。查看本次并发与隔离配置后，到执行页运行。" : review?.current ? "核对审查结论和必要的豁免记录，然后在审查页批准。" : plan.draft ? "查看草案；在网页继续审查，提交有效报告后再批准。" : "到已连接的网页继续需求澄清与规划。可复制下方提示，在新会话恢复同一 Plan。";
-  if (plan.workflow) $("#plan-next-action").textContent = plan.workflow.detail;
-  if (!session && !plan.workflow?.role && !review?.current && !selectedOperationIsWeb("review")) $("#plan-next-action").textContent = plan.draft ? "在审查与修订页点击所选 Agent／API 的审查按钮，核对结果后再批准。" : "在本机回答澄清或补充需求，继续规划。";
-  $("#plan-summary").innerHTML = `<div><strong>${plan.draft?.plan?.tasks?.length || 0}</strong><span>计划任务</span></div><div><strong>${session?.tasks?.filter(task => task.status === "succeeded").length || 0}</strong><span>执行完成</span></div><div><strong>${review?.current ? "有效" : review ? "已过期" : "待提交"}</strong><span>审查报告</span></div>`;
+  let nextAction = session ? waiting ? "Runner 正在等待你的批准或回答，进入执行页处理。" : "进入执行与结果页查看任务状态、恢复操作和交付证据。" : plan.status === "approved" ? "草案已批准。查看本次并发与隔离配置后，到执行页运行。" : review?.current ? "核对审查结论和必要的豁免记录，然后在审查页批准。" : plan.draft ? "查看草案；在网页继续审查，提交有效报告后再批准。" : "到已连接的网页继续需求澄清与规划。可复制下方提示，在新会话恢复同一 Plan。";
+  if (plan.workflow) nextAction = plan.workflow.detail;
+  if (!session && !plan.workflow?.role && !review?.current && !selectedOperationIsWeb("review")) nextAction = plan.draft ? "在审查与修订页点击所选 Agent／API 的审查按钮，核对结果后再批准。" : "在本机回答澄清或补充需求，继续规划。";
+  state.planNextAction = nextAction;
   const approved = plan.workflow ? plan.workflow.stage === "approved" : plan.status === "approved";
   const target = session || approved ? "execution" : review?.current || plan.workflow?.role === "review" || plan.workflow?.stage?.startsWith("review_") ? "review" : plan.draft ? "draft" : "overview";
-  $("#plan-primary-action").textContent = target === "execution" ? "查看执行与结果" : target === "review" ? "核对并批准" : target === "draft" ? "查看草案" : "复制网页继续提示";
-  $("#plan-primary-action").onclick = () => target === "overview" ? $("#copy-plan-resume").click() : planTab(target);
-  $("#copy-plan-resume").disabled = !isWebMcp(plan.config.provider) && !(plan.handoffs || []).length;
+  const primaryActionLabel = target === "execution" ? "查看执行与结果" : target === "review" ? "核对并批准" : target === "draft" ? "查看草案" : "复制网页继续提示";
+  const resumeDisabled = !isWebMcp(plan.config.provider) && !(plan.handoffs || []).length;
+  const overview = globalThis.tokenCouponPlanOverview;
+  if (overview) overview.render({ stage, stageTone: statusClass(session?.status || plan.status), nextAction, taskCount: plan.draft?.plan?.tasks?.length || 0, completedTaskCount: session?.tasks?.filter(task => task.status === "succeeded").length || 0, reviewStatus: review?.current ? "有效" : review ? "已过期" : "待提交", primaryActionLabel, resumeDisabled }, () => target === "overview" ? void copyResumePrompt() : planTab(target), () => void copyResumePrompt());
+  else {
+    $("#plan-stage").textContent = stage; $("#plan-stage").className = `badge ${statusClass(session?.status || plan.status)}`;
+    $("#plan-next-action").textContent = nextAction;
+    $("#plan-summary").innerHTML = `<div><strong>${plan.draft?.plan?.tasks?.length || 0}</strong><span>计划任务</span></div><div><strong>${session?.tasks?.filter(task => task.status === "succeeded").length || 0}</strong><span>执行完成</span></div><div><strong>${review?.current ? "有效" : review ? "已过期" : "待提交"}</strong><span>审查报告</span></div>`;
+    $("#plan-primary-action").textContent = primaryActionLabel;
+    $("#plan-primary-action").onclick = () => target === "overview" ? $("#copy-plan-resume").click() : planTab(target);
+    $("#copy-plan-resume").disabled = resumeDisabled;
+  }
 }
 function renderReference() {
   const root = $("#reference-summary"); if (!root) return;
@@ -1750,7 +1757,7 @@ function renderPlanWorkflowBanner() {
   const plan = state.planning; if (!plan) return;
   const banner = $("#plan-workflow-banner"); banner.replaceChildren();
   const heading = document.createElement("strong"); heading.textContent = plan.workflow?.label || $("#planning-status").textContent;
-  const detail = document.createElement("p"); detail.textContent = plan.workflow?.role ? plan.workflow.detail : $("#plan-next-action").textContent;
+  const detail = document.createElement("p"); detail.textContent = plan.workflow?.role ? plan.workflow.detail : state.planNextAction || $("#plan-next-action").textContent;
   banner.append(heading, detail);
   const lastTurn = plan.turns?.at(-1);
   if (["codex-agent", "claude-agent"].includes(plan.config.provider) && !plan.execution && !plan.localOperation?.progress && ["failed", "timed_out", "cancelled", "interrupted"].includes(lastTurn?.status) && !(plan.externalOperations || []).some(item => ["prepared", "submitting"].includes(item.state))) {

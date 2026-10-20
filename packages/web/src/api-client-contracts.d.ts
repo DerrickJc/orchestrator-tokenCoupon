@@ -110,6 +110,19 @@ export type PlanDraftViewModel = {
 export type PlanDraftViewBridge = {
   render(model: PlanDraftViewModel): void;
 };
+export type PlanOverviewModel = {
+  stage: string;
+  stageTone: string;
+  nextAction: string;
+  taskCount: number;
+  completedTaskCount: number;
+  reviewStatus: string;
+  primaryActionLabel: string;
+  resumeDisabled: boolean;
+};
+export type PlanOverviewBridge = {
+  render(model: PlanOverviewModel, onPrimaryAction: () => void, onResume: () => void): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -120,4 +133,5 @@ declare global {
   var tokenCouponPlannerRequestComposer: PlannerRequestComposerBridge | undefined;
   var tokenCouponReplyComposer: ReplyComposerBridge | undefined;
   var tokenCouponPlanDraftView: PlanDraftViewBridge | undefined;
+  var tokenCouponPlanOverview: PlanOverviewBridge | undefined;
 }
