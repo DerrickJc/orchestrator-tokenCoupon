@@ -3431,7 +3431,7 @@ function renderAttemptContent() {
   }
   const tools = $("#attempt-tools"), toolScroll = tools.scrollTop, rawScroll = $("#attempt-raw").scrollTop;
   const oldTools = new Map([...tools.querySelectorAll("details")].map(item => [item.dataset.eventKey, item]));
-  const toolPage = activityPage(view, "tools", view.tools);
+  const toolPageState = activityPageState(view, "tools", view.tools), toolPage = toolPageState.items;
   if (globalThis.tokenCouponAttemptTools) {
     const openEventKeys = [...oldTools.values()].filter(element => element.open).map(element => element.dataset.eventKey).filter(Boolean);
     globalThis.tokenCouponAttemptTools.render({
@@ -3450,6 +3450,12 @@ function renderAttemptContent() {
       if (tools.children[index] !== details) tools.insertBefore(details, tools.children[index] || null);
     }
   }
+  if (globalThis.tokenCouponAttemptToolsPagination) globalThis.tokenCouponAttemptToolsPagination.render({
+    pageLabel: toolPageState.label, previousDisabled: toolPageState.page === 0, nextDisabled: toolPageState.page + 1 >= toolPageState.pages,
+  }, {
+    onPrevious: () => { if (state.attemptView) { state.attemptView.toolsPage--; renderAttemptView(); } },
+    onNext: () => { if (state.attemptView) { state.attemptView.toolsPage++; renderAttemptView(); } },
+  });
   const filterValue = view.rawFilter ?? $("#attempt-event-filter").value, filter = filterValue.trim();
   const raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
   const rawPage = activityPageState(view, "raw", raw), rawLines = rawPage.items.map(event => JSON.stringify(event));
@@ -3474,15 +3480,13 @@ function appendHighlightedReply(root, text) {
     root.append(document.createTextNode("\n"));
   }
 }
-function activityPage(view, kind, items) {
-  return activityPageState(view, kind, items).items;
-}
 function activityPageState(view, kind, items) {
   const size = 15, pages = Math.max(1, Math.ceil(items.length / size));
   view[`${kind}Page`] = Math.max(0, Math.min(view[`${kind}Page`] || 0, pages - 1));
   const page = view[`${kind}Page`];
   const label = `第 ${page + 1} / ${pages} 页 · 已加载 ${items.length} 条${view.hasMore ? "（还有历史待加载）" : ""}`;
-  if (kind !== "raw" || !globalThis.tokenCouponAttemptRawEvents) {
+  const reactOwned = kind === "raw" ? globalThis.tokenCouponAttemptRawEvents : kind === "tools" ? globalThis.tokenCouponAttemptToolsPagination : undefined;
+  if (!reactOwned) {
     $("#attempt-" + kind + "-page").textContent = label;
     $("#attempt-" + kind + "-prev").disabled = page === 0;
     $("#attempt-" + kind + "-next").disabled = page + 1 >= pages;
@@ -4715,7 +4719,7 @@ $("#workspace-browse").addEventListener("click", openWorkspaceForm);
 $("#session-check").addEventListener("click", () => refreshAll());
 $("#session-recover").addEventListener("click", diagnoseAndRecover);
 $("#pending-action-open").addEventListener("click", async () => { await planTab("execution"); $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" }); });
-for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-tools-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.toolsPage += delta; renderAttemptView(); });
+if (!globalThis.tokenCouponAttemptToolsPagination) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-tools-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.toolsPage += delta; renderAttemptView(); });
 if (!globalThis.tokenCouponAttemptRawEvents) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-raw-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.rawPage += delta; renderAttemptView(); });
 if (!state.remotePoll) state.remotePoll = setInterval(() => void refreshRemoteConnection(), 3000);
 setInterval(() => { if (state.workspace && (!state.activeJob || ["planning.run", "session.resume", "session.retry"].includes(state.activeJob.kind))) { void refreshAll(); if (state.planning?.session?.status === "running") void readSelectedAttempt(); } }, 5000);

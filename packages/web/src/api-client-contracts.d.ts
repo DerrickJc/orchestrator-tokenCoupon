@@ -340,6 +340,10 @@ export type AttemptToolsModel = { tools: AttemptToolView[]; openEventKeys: strin
 export type AttemptToolsBridge = {
   render(model: AttemptToolsModel): void;
 };
+export type AttemptToolsPaginationModel = { pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
+export type AttemptToolsPaginationBridge = {
+  render(model: AttemptToolsPaginationModel, callbacks: { onPrevious: () => void; onNext: () => void }): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -430,6 +434,7 @@ declare global {
   var tokenCouponAttemptOverview: AttemptOverviewBridge | undefined;
   var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
+  var tokenCouponAttemptToolsPagination: AttemptToolsPaginationBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
