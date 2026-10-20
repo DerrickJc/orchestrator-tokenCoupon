@@ -1967,9 +1967,16 @@ function renderRequirements() {
   $("#send-reply").disabled = state.replying || !!state.planning.execution;
 }
 function renderDraft() {
-  const draft = state.planning.draft; const target = $("#plan-view");
-  const expanded = new Set([...target.querySelectorAll("details[open]")].map(item => item.dataset.taskId)); target.replaceChildren();
-  if (!draft) { closePlanEditor(); target.innerHTML = `<div class="empty-state">${isWebMcp(state.planning.config.provider) ? "等待网页模型生成草案；请在 ChatGPT／Claude 中提出需求或回答澄清。" : "Planner 正在收集需求，或尚未生成草案。回答上方的问题后继续。"}</div>`; return; }
+  const draft = state.planning.draft; const target = $("#plan-view"); const draftView = globalThis.tokenCouponPlanDraftView;
+  const expanded = draftView ? new Set() : new Set([...target.querySelectorAll("details[open]")].map(item => item.dataset.taskId));
+  if (!draftView) target.replaceChildren();
+  if (!draft) {
+    closePlanEditor();
+    const emptyMessage = isWebMcp(state.planning.config.provider) ? "等待网页模型生成草案；请在 ChatGPT／Claude 中提出需求或回答澄清。" : "Planner 正在收集需求，或尚未生成草案。回答上方的问题后继续。";
+    if (draftView) draftView.render({ contextKey: `${state.planning.planningId}:empty`, emptyMessage, tasks: [] });
+    else target.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
+    return;
+  }
   if (!state.editingPlan && state.editedPlanHash !== draft.planHash) {
     $("#plan-editor").value = JSON.stringify(draft.plan, null, 2); state.savedPlanText = $("#plan-editor").value; state.editedPlanHash = draft.planHash;
   }
@@ -1981,20 +1988,33 @@ function renderDraft() {
   for (const candidate of candidates) verification.add(new Option(`${candidate.title} · ${candidate.taskId}`, candidate.taskId));
   verification.value = candidates.some(item => item.taskId === previous) ? previous : candidates.length === 1 ? candidates[0].taskId : "";
   show($("#verification-wrap"), $("#isolation").value === "git-worktree");
-  for (const entry of draft.plan.tasks) {
-    const card = document.createElement("details"); card.className = "plan-card"; card.dataset.taskId = entry.task.id; card.open = expanded.has(entry.task.id);
-    card.innerHTML = `<summary><span>${esc(entry.task.title)}</span><span class="muted small">${esc(entry.task.id)} · ${entry.task.schemaVersion === 2 ? "结构化任务" : "旧版正文"} · 查看详情</span></summary>`;
+  const taskViews = draft.plan.tasks.map(entry => {
+    const task = entry.task;
+    const sections = task.schemaVersion === 2
+      ? [["需求目标", task.objective], ["设计与技术方案", task.approach], ["实施步骤", task.steps], ["交付物", task.deliverables], ["验收标准", task.acceptanceCriteria], ["约束", task.constraints], ["其他说明", task.notes]]
+      : [["任务正文", task.prompt]];
+    return {
+      taskId: task.id,
+      title: task.title,
+      schemaLabel: task.schemaVersion === 2 ? "结构化任务" : "旧版正文",
+      sections: sections.filter(([, value]) => value !== undefined && value !== "" && !(Array.isArray(value) && !value.length)).map(([label, value]) => ({ label, value })),
+      dependsOn: entry.dependsOn,
+      runnerLabel: labels[task.execution.runnerId] || task.execution.runnerId,
+      modelLabel: task.execution.modelId || "Runner 默认模型",
+    };
+  });
+  if (draftView) draftView.render({ contextKey: `${state.planning.planningId}:${draft.planHash}`, tasks: taskViews });
+  else for (const task of taskViews) {
+    const card = document.createElement("details"); card.className = "plan-card"; card.dataset.taskId = task.taskId; card.open = expanded.has(task.taskId);
+    const summary = document.createElement("summary"), title = document.createElement("span"), hint = document.createElement("span");
+    title.textContent = task.title; hint.className = "muted small"; hint.textContent = `${task.taskId} · ${task.schemaLabel} · 查看详情`; summary.append(title, hint);
     const sections = document.createElement("div"); sections.className = "plan-field-preview";
-    const content = entry.task.schemaVersion === 2
-      ? [["需求目标", entry.task.objective], ["设计与技术方案", entry.task.approach], ["实施步骤", entry.task.steps], ["交付物", entry.task.deliverables], ["验收标准", entry.task.acceptanceCriteria], ["约束", entry.task.constraints], ["其他说明", entry.task.notes]]
-      : [["任务正文", entry.task.prompt]];
-    for (const [label, value] of content) {
-      if (value === undefined || value === "" || Array.isArray(value) && !value.length) continue;
-      const section = document.createElement("section"), heading = document.createElement("strong"), body = document.createElement("p"); heading.textContent = label;
-      body.textContent = Array.isArray(value) ? value.map((line, index) => `${index + 1}. ${line}`).join("\n") : value; section.append(heading, body); sections.append(section);
+    for (const item of task.sections) {
+      const section = document.createElement("section"), heading = document.createElement("strong"), body = document.createElement("p"); heading.textContent = item.label;
+      body.textContent = Array.isArray(item.value) ? item.value.map((line, index) => `${index + 1}. ${line}`).join("\n") : item.value; section.append(heading, body); sections.append(section);
     }
-    const meta = document.createElement("div"); meta.className = "task-meta"; meta.textContent = `依赖：${entry.dependsOn.join(", ") || "无"} · ${labels[entry.task.execution.runnerId] || entry.task.execution.runnerId}${entry.task.execution.modelId ? ` / ${entry.task.execution.modelId}` : " / Runner 默认模型"}`;
-    card.append(sections, meta); target.append(card);
+    const meta = document.createElement("div"); meta.className = "task-meta"; meta.textContent = `依赖：${task.dependsOn.join(", ") || "无"} · ${task.runnerLabel} / ${task.modelLabel}`;
+    card.append(summary, sections, meta); target.append(card);
   }
   renderPlanEditControls();
 }

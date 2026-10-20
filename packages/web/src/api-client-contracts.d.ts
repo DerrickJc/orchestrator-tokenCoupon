@@ -93,6 +93,24 @@ export type ReplyComposerBridge = PlannerRequestComposerBridge & {
   setDisabled(value: boolean): void;
 };
 
+export type PlanDraftViewTask = {
+  taskId: string;
+  title: string;
+  schemaLabel: string;
+  sections: { label: string; value: string | string[] }[];
+  dependsOn: string[];
+  runnerLabel: string;
+  modelLabel: string;
+};
+export type PlanDraftViewModel = {
+  contextKey: string;
+  emptyMessage?: string;
+  tasks: PlanDraftViewTask[];
+};
+export type PlanDraftViewBridge = {
+  render(model: PlanDraftViewModel): void;
+};
+
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
   var tokenCouponCommandPalette: CommandPaletteBridge | undefined;
@@ -101,4 +119,5 @@ declare global {
   var tokenCouponReviewView: ReviewViewBridge | undefined;
   var tokenCouponPlannerRequestComposer: PlannerRequestComposerBridge | undefined;
   var tokenCouponReplyComposer: ReplyComposerBridge | undefined;
+  var tokenCouponPlanDraftView: PlanDraftViewBridge | undefined;
 }

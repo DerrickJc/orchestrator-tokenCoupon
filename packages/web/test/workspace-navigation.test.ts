@@ -523,6 +523,33 @@ it("passes review findings to the React view and persists the chosen revision gu
   expect(JSON.parse(h.w.sessionStorage.getItem(storageKey)!)).toMatchObject({ F1: { choice: "custom", custom: "增加错误响应断言" } });
 });
 
+it("passes structured and legacy task fields to the React draft view while retaining old-plan compatibility", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/draft" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  const structuredTask = {
+    schemaVersion: 2, id: "spec", title: "接口与数据库设计", objective: "定义排课接口", approach: "使用 SQLite",
+    steps: ["整理实体", "定义接口"], deliverables: ["接口文档"], acceptanceCriteria: ["CRUD 可验证"], constraints: ["不增加前端"],
+    execution: { runnerId: "codex", mode: "managed", modelId: "fast-model" },
+  };
+  h.w.eval(`__testState.planning.draft.plan.tasks[0].task = ${JSON.stringify(structuredTask)}`);
+  let received: any;
+  (h.w as any).tokenCouponPlanDraftView = { render: (model: unknown) => { received = model; } };
+  h.w.eval("renderDraft()");
+  expect(received.tasks).toHaveLength(5);
+  expect(received.tasks[0]).toMatchObject({
+    taskId: "spec", title: "接口与数据库设计", schemaLabel: "结构化任务", runnerLabel: "Codex", modelLabel: "fast-model",
+    sections: [
+      { label: "需求目标", value: "定义排课接口" },
+      { label: "设计与技术方案", value: "使用 SQLite" },
+      { label: "实施步骤", value: ["整理实体", "定义接口"] },
+      { label: "交付物", value: ["接口文档"] },
+      { label: "验收标准", value: ["CRUD 可验证"] },
+      { label: "约束", value: ["不增加前端"] },
+    ],
+  });
+  expect(received.tasks[1]).toMatchObject({ schemaLabel: "旧版正文", sections: [{ label: "任务正文", value: "代码正文按需展开" }] });
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();
