@@ -363,6 +363,20 @@ export type AttemptDiagnosisComposerBridge = {
   setValue(mount: HTMLElement, value: string): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type AttemptDiagnosisControlsModel = {
+  diagnostics: { id: string; label: string }[];
+  selectedDiagnosticId: string;
+  runnerId: string;
+  modelId: string;
+  models: { id: string; label: string }[];
+  customModelId: string;
+  disabled: boolean;
+};
+export type AttemptDiagnosisControlsBridge = {
+  renderHistory(mount: HTMLElement, diagnostics: AttemptDiagnosisControlsModel["diagnostics"], selectedId: string, disabled: boolean, onChange: (id: string) => void): void;
+  renderModels(mount: HTMLElement, model: AttemptDiagnosisControlsModel, callbacks: { onRunnerChange: (runnerId: string) => void; onModelChange: (modelId: string) => void; onCustomModelChange: (modelId: string) => void }): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -394,4 +408,5 @@ declare global {
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
   var tokenCouponAttemptDiagnosisComposer: AttemptDiagnosisComposerBridge | undefined;
+  var tokenCouponAttemptDiagnosisControls: AttemptDiagnosisControlsBridge | undefined;
 }

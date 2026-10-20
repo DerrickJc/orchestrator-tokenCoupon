@@ -2155,6 +2155,43 @@ it("binds the React diagnosis composer to the saved draft and existing form subm
   expect(submit).toBeTypeOf("function");
 });
 
+it("publishes diagnosis history and model choices from the current diagnostic context to React", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let historyModel: any;
+  let historyChange: ((id: string) => void) | undefined;
+  let controlsModel: any;
+  let controlsCallbacks: any;
+  h.w.tokenCouponAttemptDiagnosisControls = {
+    renderHistory(_mount: HTMLElement, diagnostics: any, selectedId: string, disabled: boolean, onChange: (id: string) => void) { historyModel = { diagnostics, selectedId, disabled }; historyChange = onChange; },
+    renderModels(_mount: HTMLElement, model: any, callbacks: any) { controlsModel = model; controlsCallbacks = callbacks; },
+    unmountWithin() {},
+  } as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    const context = {
+      identity: "project:first:controls", workspaceId: "project", planningId: "first", attemptId: "attempt-controls",
+      runnerId: "codex", selectedId: "diagnostic-2", running: false, pendingSubmission: null,
+      diagnosisRunnerId: "claude-code", diagnosisModelId: "deepseek-flash", diagnosisModels: [{ id: "deepseek-flash", label: "DeepSeek Flash" }],
+      data: { diagnostics: [
+        { diagnosticId: "diagnostic-1", status: "completed", runnerId: "codex", messages: [] },
+        { diagnosticId: "diagnostic-2", status: "failed", runnerId: "claude-code", messages: [] },
+      ] },
+    };
+    __testState.attemptDiagnosticContext = context;
+    renderAttemptDiagnosticHistory(context);
+  `);
+  expect(historyModel).toMatchObject({ selectedId: "diagnostic-2", disabled: false });
+  expect(historyModel.diagnostics.map((item: any) => item.label)).toEqual(["诊断 1 · 分析完成", "诊断 2 · 分析失败"]);
+  expect(controlsModel).toMatchObject({ runnerId: "claude-code", modelId: "deepseek-flash", selectedDiagnosticId: "diagnostic-2", disabled: false });
+  expect(controlsModel.models).toEqual([{ id: "deepseek-flash", label: "DeepSeek Flash" }]);
+  historyChange?.("diagnostic-1");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.selectedId")).toBe("diagnostic-1");
+  controlsCallbacks.onCustomModelChange("custom-model");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.diagnosisCustomModelId")).toBe("custom-model");
+  controlsCallbacks.onModelChange("__custom__");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.diagnosisModelId")).toBe("__custom__");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

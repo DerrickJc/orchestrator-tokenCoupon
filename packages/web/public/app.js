@@ -3058,6 +3058,9 @@ function ensureAttemptDiagnosticUI() {
   const chat = document.createElement("dialog"); chat.id = "attempt-diagnosis-dialog"; chat.className = "diagnosis-chat-dialog";
   chat.innerHTML = `<div class="section-title"><div><h3>任务诊断</h3><p id="attempt-diagnosis-context" class="hint"></p></div><button type="button" data-diagnosis-close class="text-button">关闭</button></div><select id="attempt-diagnosis-history-select" aria-label="历史诊断" class="hidden"></select><p id="attempt-diagnosis-status" class="diagnosis-chat-status" role="status"></p><section id="attempt-diagnosis-history" class="diagnosis-chat-history" aria-label="诊断对话"></section><form id="attempt-diagnosis-form" class="diagnosis-chat-composer"><label class="sr-only" for="attempt-diagnosis-reply">发送诊断问题</label><textarea id="attempt-diagnosis-reply" rows="3" maxlength="8192" placeholder="输入问题、补充事实，或讨论处理方案…"></textarea><div class="diagnosis-chat-footer"><div class="diagnosis-model-selectors"><label>助手<select id="attempt-diagnosis-runner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label><label id="diagnosis-custom-wrap" class="hidden">模型 ID<input id="diagnosis-custom-model" maxlength="200" placeholder="输入模型 ID"></label></div><button id="attempt-diagnosis-send" type="submit" class="button button-primary">发送</button></div><p class="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p></form>`;
   document.body.append(chat);
+  const diagnosisHistorySelect = $("#attempt-diagnosis-history-select"), diagnosisHistoryControls = document.createElement("div");
+  diagnosisHistoryControls.id = "attempt-diagnosis-history-controls-root"; diagnosisHistorySelect.replaceWith(diagnosisHistoryControls); diagnosisHistoryControls.append(diagnosisHistorySelect);
+  $(".diagnosis-model-selectors").id = "attempt-diagnosis-model-controls-root";
   const exported = document.createElement("dialog"); exported.id = "diagnosis-export-dialog"; exported.className = "reference-dialog";
   exported.innerHTML = `<div class="section-title"><h3>到网页分析</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><p id="diagnosis-export-status" role="status">正在保存证据…</p><label>证据文件<input id="diagnosis-export-path" readonly></label><p class="hint">在已连接 Token Coupon MCP 的 GPT／Claude 网页粘贴提示即可读取。网页无法直接访问本机路径；未启用 MCP 时，请上传此文件。此操作不调用本机诊断模型。</p><button id="diagnosis-export-copy" type="button" class="button button-primary" disabled>复制分析提示</button>`;
   document.body.append(exported);
@@ -3068,8 +3071,9 @@ function ensureAttemptDiagnosticUI() {
   }
   $("#diagnosis-local").addEventListener("click", () => { choice.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); });
   $("#diagnosis-web").addEventListener("click", () => { choice.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); });
-  $("#attempt-diagnosis-runner").addEventListener("change", () => void loadAttemptDiagnosticModels(state.attemptDiagnosticContext));
-  $("#attempt-diagnosis-model").addEventListener("change", () => show($("#diagnosis-custom-wrap"), $("#attempt-diagnosis-model").value === "__custom__"));
+  $("#attempt-diagnosis-runner").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) { context.diagnosisRunnerId = $("#attempt-diagnosis-runner").value; context.diagnosisModelId = ""; void loadAttemptDiagnosticModels(context); } });
+  $("#attempt-diagnosis-model").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) context.diagnosisModelId = $("#attempt-diagnosis-model").value; show($("#diagnosis-custom-wrap"), $("#attempt-diagnosis-model").value === "__custom__"); });
+  $("#diagnosis-custom-model").addEventListener("input", () => { if (state.attemptDiagnosticContext) state.attemptDiagnosticContext.diagnosisCustomModelId = $("#diagnosis-custom-model").value; });
   $("#attempt-diagnosis-history-select").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) { context.selectedId = $("#attempt-diagnosis-history-select").value; renderAttemptDiagnosticHistory(context); } });
   $("#attempt-diagnosis-reply").addEventListener("input", () => { if (state.attemptDiagnosticContext) state.attemptDiagnosticContext.unsentText = $("#attempt-diagnosis-reply").value; });
   $("#attempt-diagnosis-form").addEventListener("submit", event => { event.preventDefault(); void sendAttemptDiagnosticMessage(); });
@@ -3089,16 +3093,21 @@ function diagnosticContextIsCurrent(context) { return !!context && state.attempt
 function selectedAttemptDiagnostic(context) { return context?.data?.diagnostics?.find(item => item.diagnosticId === context.selectedId); }
 async function loadAttemptDiagnosticModels(context, savedModel = "") {
   if (!diagnosticContextIsCurrent(context)) return;
-  const runnerId = $("#attempt-diagnosis-runner").value, request = context.modelRequest = (context.modelRequest || 0) + 1, select = $("#attempt-diagnosis-model");
-  select.replaceChildren(new Option("默认模型", ""), new Option("自定义模型…", "__custom__"));
+  const runnerId = context.diagnosisRunnerId || $("#attempt-diagnosis-runner")?.value || ( ["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex" );
+  context.diagnosisRunnerId = runnerId;
+  context.diagnosisModels = [];
+  context.diagnosisModelId = "";
+  const request = context.modelRequest = (context.modelRequest || 0) + 1;
+  renderAttemptDiagnosticControls(context);
   try {
     const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(context.workspaceId)}`);
     if (!diagnosticContextIsCurrent(context) || request !== context.modelRequest) return;
-    for (const model of catalog.models || []) select.add(new Option(model.label || model.id, model.id), select.options.length - 1);
+    context.diagnosisModels = (catalog.models || []).map(model => ({ id: model.id, label: model.label || model.id }));
   } catch { if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = "候选模型暂不可读，可使用默认模型或填写模型 ID。"; }
   if (!diagnosticContextIsCurrent(context) || request !== context.modelRequest) return;
-  if (savedModel && ![...select.options].some(item => item.value === savedModel)) select.add(new Option(savedModel, savedModel), select.options.length - 1);
-  select.value = savedModel; show($("#diagnosis-custom-wrap"), false);
+  if (savedModel && !context.diagnosisModels.some(model => model.id === savedModel)) context.diagnosisModels.push({ id: savedModel, label: savedModel });
+  context.diagnosisModelId = savedModel;
+  renderAttemptDiagnosticControls(context);
 }
 async function loadAttemptDiagnosticHistory(context) {
   const data = await api(attemptDiagnosticPath(context));
@@ -3110,8 +3119,7 @@ async function loadAttemptDiagnosticHistory(context) {
 function renderAttemptDiagnosticHistory(context) {
   if (!diagnosticContextIsCurrent(context)) return;
   const root = $("#attempt-diagnosis-history"), previousScroll = root.scrollTop, atBottom = root.scrollHeight - root.clientHeight - root.scrollTop < 50;
-  const records = context.data?.diagnostics || [], select = $("#attempt-diagnosis-history-select");
-  select.replaceChildren(...records.map((item, index) => new Option(`诊断 ${index + 1} · ${diagnosticStatuses[item.status] || item.status}`, item.diagnosticId))); select.value = context.selectedId || ""; show(select, records.length > 1);
+  const records = context.data?.diagnostics || [];
   const diagnostic = selectedAttemptDiagnostic(context);
   if (globalThis.tokenCouponAttemptDiagnosisHistory) {
     const runnerId = diagnostic?.runnerId || context.runnerId;
@@ -3142,6 +3150,7 @@ function renderAttemptDiagnosticHistory(context) {
     if (diagnostic?.error) { const error = document.createElement("p"); error.className = "field-error"; error.textContent = `分析未完成：${diagnostic.error}`; root.append(error); }
     if (context.running) { const pending = document.createElement("p"); pending.className = "diagnosis-chat-pending"; pending.textContent = "正在分析…"; root.append(pending); }
   }
+  renderAttemptDiagnosticControls(context);
   if (globalThis.tokenCouponAttemptDiagnosisComposer) {
     const composer = $("#attempt-diagnosis-composer-root"), input = $("#attempt-diagnosis-reply");
     globalThis.tokenCouponAttemptDiagnosisComposer.render(composer, { initialValue: context.unsentText ?? input.value, placeholder: input.placeholder }, value => { context.unsentText = value; }, () => $("#attempt-diagnosis-form").requestSubmit());
@@ -3149,7 +3158,42 @@ function renderAttemptDiagnosticHistory(context) {
   root.scrollTop = context.scrollAfterSend || atBottom ? root.scrollHeight : previousScroll; context.scrollAfterSend = false;
   $("#attempt-diagnosis-send").disabled = !!context.running;
   $("#attempt-diagnosis-send").textContent = context.running ? "分析中…" : context.pendingSubmission ? "检查本次发送" : "发送";
-  for (const id of ["attempt-diagnosis-runner", "attempt-diagnosis-model", "diagnosis-custom-model", "attempt-diagnosis-history-select"]) $("#" + id).disabled = !!context.running || !!context.pendingSubmission;
+  if (!globalThis.tokenCouponAttemptDiagnosisControls) for (const id of ["attempt-diagnosis-runner", "attempt-diagnosis-model", "diagnosis-custom-model", "attempt-diagnosis-history-select"]) $("#" + id).disabled = !!context.running || !!context.pendingSubmission;
+}
+function renderAttemptDiagnosticControls(context) {
+  if (!diagnosticContextIsCurrent(context)) return;
+  const records = context.data?.diagnostics || [], disabled = !!context.running || !!context.pendingSubmission;
+  const diagnostics = records.map((item, index) => ({ id: item.diagnosticId, label: `诊断 ${index + 1} · ${diagnosticStatuses[item.status] || item.status}` }));
+  const model = {
+    diagnostics,
+    selectedDiagnosticId: context.selectedId || "",
+    runnerId: context.diagnosisRunnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex"),
+    modelId: context.diagnosisModelId || "",
+    models: context.diagnosisModels || [],
+    customModelId: context.diagnosisCustomModelId || "",
+    disabled,
+  };
+  if (globalThis.tokenCouponAttemptDiagnosisControls) {
+    globalThis.tokenCouponAttemptDiagnosisControls.renderHistory($("#attempt-diagnosis-history-controls-root"), diagnostics, model.selectedDiagnosticId, disabled, id => {
+      context.selectedId = id;
+      renderAttemptDiagnosticHistory(context);
+    });
+    globalThis.tokenCouponAttemptDiagnosisControls.renderModels($("#attempt-diagnosis-model-controls-root"), model, {
+      onRunnerChange: runnerId => { context.diagnosisRunnerId = runnerId; context.diagnosisModelId = ""; void loadAttemptDiagnosticModels(context); },
+      onModelChange: modelId => { context.diagnosisModelId = modelId; renderAttemptDiagnosticControls(context); },
+      onCustomModelChange: modelId => { context.diagnosisCustomModelId = modelId; renderAttemptDiagnosticControls(context); },
+    });
+    return;
+  }
+  const history = $("#attempt-diagnosis-history-select");
+  history.replaceChildren(...diagnostics.map(item => new Option(item.label, item.id))); history.value = model.selectedDiagnosticId; show(history, diagnostics.length > 1); history.disabled = disabled;
+  const runner = $("#attempt-diagnosis-runner"), select = $("#attempt-diagnosis-model");
+  runner.value = model.runnerId;
+  select.replaceChildren(new Option("默认模型", ""), ...model.models.map(item => new Option(item.label, item.id)), new Option("自定义模型…", "__custom__"));
+  select.value = model.modelId;
+  $("#diagnosis-custom-model").value = model.customModelId;
+  show($("#diagnosis-custom-wrap"), model.modelId === "__custom__");
+  for (const control of [runner, select, $("#diagnosis-custom-model")]) control.disabled = disabled;
 }
 async function openAttemptDiagnosis() {
   ensureAttemptDiagnosticUI();
@@ -3173,8 +3217,8 @@ async function openLocalAttemptDiagnosis(context) {
     const saved = selectedAttemptDiagnostic(context);
     const policy = functionPolicy("diagnosis");
     const usePolicy = policy?.priority === "agent" && saved?.status !== "running";
-    $("#attempt-diagnosis-runner").value = usePolicy ? policy.agent.runnerId : saved?.runnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex");
-    await loadAttemptDiagnosticModels(context, usePolicy ? policy.agent.modelId || "" : saved ? saved.modelId || "" : (context.runnerId === $("#attempt-diagnosis-runner").value ? context.modelId : "") || "");
+    context.diagnosisRunnerId = usePolicy ? policy.agent.runnerId : saved?.runnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex");
+    await loadAttemptDiagnosticModels(context, usePolicy ? policy.agent.modelId || "" : saved ? saved.modelId || "" : (context.runnerId === context.diagnosisRunnerId ? context.modelId : "") || "");
     if (diagnosticContextIsCurrent(context)) { $("#attempt-diagnosis-status").textContent = saved ? "可继续讨论，或在下方切换模型后发送。" : "输入问题并发送后开始分析。"; $("#attempt-diagnosis-reply").value = context.unsentText || ""; }
   } catch (error) { if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = `暂时无法读取：${error.message}`; }
 }
@@ -3184,7 +3228,7 @@ async function sendAttemptDiagnosticMessage() {
   const text = $("#attempt-diagnosis-reply").value.trim();
   if (!context.pendingSubmission) {
     if (!text) { $("#attempt-diagnosis-status").textContent = "先输入一个问题，例如“请分析这次失败的原因”。"; return; }
-    const runnerId = $("#attempt-diagnosis-runner").value, value = $("#attempt-diagnosis-model").value, modelId = value === "__custom__" ? $("#diagnosis-custom-model").value.trim() : value;
+    const runnerId = context.diagnosisRunnerId || $("#attempt-diagnosis-runner").value, value = context.diagnosisModelId ?? $("#attempt-diagnosis-model").value, modelId = value === "__custom__" ? (context.diagnosisCustomModelId ?? $("#diagnosis-custom-model").value).trim() : value;
     if (value === "__custom__" && !modelId) { $("#attempt-diagnosis-status").textContent = "请填写模型 ID。"; return; }
     const diagnostic = selectedAttemptDiagnostic(context), isReply = diagnostic?.status === "completed";
     context.pendingSubmission = { path: attemptDiagnosticPath(context) + (isReply ? `/${diagnostic.diagnosticId}/replies` : ""), body: { requestKey: key(), message: text, runnerId, ...(modelId ? { modelId } : {}) } };
