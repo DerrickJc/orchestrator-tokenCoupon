@@ -1072,6 +1072,12 @@ npm run desktop:stage-resources -- --resources-dir "C:\release-build\electron\re
 
 组装器的目标布局、清单标记、重复运行保护和路径越界校验有单元覆盖。从 Node 官方 v22.12.0 归档下载 Linux x64 运行时并核对 `SHASUMS256.txt`（SHA-256：`22982235e1b71fa8850f82edd09cdae7e3f32df1764a9ec298c72d25ef2c164f`）后，运行 `desktop:stage-resources` 会自动用暂存目录内的 Node 启动 daemon smoke。审查/批准/执行、daemon 重启、旧 epoch 写入拒绝和 Attempt 记录读取均通过；命令最终输出 `runtimeReady=true`、`installerReady=false`。该证据只覆盖 Linux x64 资源闭环；没有安装 Electron 二进制，Windows Node 资源、安装包、GUI 与系统集成仍未验收。
 
+### 13.79 运行时目标平台保护与 Windows Node 兼容 smoke（2026-10-20）
+
+运行时暂存现在会读取随包 Node 的 `process.platform` 和 `process.arch`，必须与当前组装机一致才继续。Linux 的 `node_modules` 含 Linux 专用可选包；即使把 Windows `node.exe` 放入目录，也不能据此生成可发布的 Windows 资源。Windows extraResources 必须在原生 Windows 上安装依赖、构建并运行 `desktop:stage-resources`；平台或架构不匹配会明确报错，避免 manifest 与实际资源不一致。
+
+回归测试覆盖平台不匹配、架构不匹配和匹配通过。另在 WSL 实体暂存目录中使用官方校验过的原生 Windows Node 22.12.0 直接启动 daemon smoke，Mock 规划/审查/批准/执行、认证、重启恢复、旧 epoch 写入拒绝和 Attempt 读取全部通过。该交叉运行只证明 daemon Mock 流程可在 Windows Node 下工作；暂存依赖仍来自 Linux，不能替代 Windows 原生依赖安装、Windows extraResources 组装、Electron GUI 或安装器验收。
+
 ## 14. 剩余实施台账（2026-10-20）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
@@ -1080,7 +1086,7 @@ npm run desktop:stage-resources -- --resources-dir "C:\release-build\electron\re
 | --- | --- | --- |
 | C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份、空闲后台安全停止协议已完成；继续发布流水线身份核验 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
-| D：桌面预览 | 现有 daemon 附着、目录选择、托盘、窗口恢复、开发模式后台启动原型、持久提醒开关、通知点击任务定位、空闲时安全停止后台及 Linux x64 Node v22.12.0 extraResources 闭环已完成代码和自动化覆盖；继续 Windows 目标资源、其余宿主能力接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；通知、托盘、目录窗口与进程生命周期仍不能用 WSL 结果代替 |
+| D：桌面预览 | 现有 daemon 附着、目录选择、托盘、窗口恢复、开发模式后台启动原型、持久提醒开关、通知点击任务定位、空闲时安全停止后台、Linux x64 extraResources 闭环及 Windows Node Mock smoke 已完成；继续原生 Windows 依赖/资源组装、其余宿主能力接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；交叉 smoke 不等于 Windows 打包；通知、托盘、目录窗口与进程生命周期仍不能用 WSL 结果代替 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |
 | F：既有质量主线 | 关键任务产物 Review、成果追溯、可信用量、CLI daemon 模式 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
 | G：发布准备 | 用户资料、许可、安装升级与卸载、签名和渠道 | 干净 Windows、完整生产资源及兼容/回退报告 |

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 // @ts-expect-error The resource assembler is a maintainer ESM script.
 const { assembleDesktopRuntime, installDesktopRuntimeStage } = await import("../../../scripts/assemble-desktop-resources.mjs");
+// @ts-expect-error The staging helper is a maintainer ESM script.
+const { validateBundledNodeIdentity } = await import("../../../scripts/stage-desktop-runtime.mjs");
 const roots: string[] = [];
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "token-coupon-resource-")); roots.push(root); return root; }
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -18,6 +20,12 @@ async function runtimeStage(root: string) {
 }
 
 describe("Electron extraResources assembly", () => {
+  it("rejects bundled Node runtimes for another platform or architecture", () => {
+    expect(() => validateBundledNodeIdentity({ platform: "linux", arch: "x64" }, "win32", "x64")).toThrow("runtime_node_platform_invalid");
+    expect(() => validateBundledNodeIdentity({ platform: "win32", arch: "arm64" }, "win32", "x64")).toThrow("runtime_node_arch_invalid");
+    expect(() => validateBundledNodeIdentity({ platform: "win32", arch: "x64" }, "win32", "x64")).not.toThrow();
+  });
+
   it("installs a validated runtime stage and marks it as resources-only, not a release", async () => {
     const root = await fixture(), stage = await runtimeStage(root), resources = join(root, "electron", "resources");
     const result = await installDesktopRuntimeStage(stage, resources);

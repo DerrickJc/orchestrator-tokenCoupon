@@ -6,6 +6,15 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+export function validateBundledNodeIdentity(identity, platform = process.platform, arch = process.arch) {
+  if (!identity || identity.platform !== platform) {
+    throw new Error(`runtime_node_platform_invalid：随包 Node 平台必须为 ${platform}`);
+  }
+  if (identity.arch !== arch) {
+    throw new Error(`runtime_node_arch_invalid：随包 Node 架构必须为 ${arch}`);
+  }
+}
+
 export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", import.meta.url)), bundledNode = process.env.TOKEN_COUPON_BUNDLED_NODE) {
   source = await realpath(source);
   const root = await mkdtemp(join(tmpdir(), "token-coupon-runtime-"));
@@ -46,6 +55,11 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
       if (!(await lstat(nodePath)).isFile()) throw new Error("runtime_node_file_invalid：随包 Node.js 必须是普通文件");
       const version = execFileSync(nodePath, ["--version"], { encoding: "utf8", timeout: 10_000 }).trim();
       if (version !== "v22.12.0") throw new Error(`runtime_node_version_invalid：要求 v22.12.0，实际为 ${version || "未知"}`);
+      let identity;
+      try {
+        identity = JSON.parse(execFileSync(nodePath, ["-p", "JSON.stringify({platform:process.platform,arch:process.arch})"], { encoding: "utf8", timeout: 10_000 }).trim());
+      } catch { throw new Error("runtime_node_identity_invalid：无法读取随包 Node.js 的平台与架构"); }
+      validateBundledNodeIdentity(identity);
       nodeExecutable = `runtime/node${process.platform === "win32" ? ".exe" : ""}`;
       await mkdir(join(root, "runtime"), { recursive: true });
       await cp(nodePath, join(root, nodeExecutable));
