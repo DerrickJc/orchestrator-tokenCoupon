@@ -3110,19 +3110,36 @@ function renderAttemptDiagnosticHistory(context) {
   const root = $("#attempt-diagnosis-history"), previousScroll = root.scrollTop, atBottom = root.scrollHeight - root.clientHeight - root.scrollTop < 50;
   const records = context.data?.diagnostics || [], select = $("#attempt-diagnosis-history-select");
   select.replaceChildren(...records.map((item, index) => new Option(`诊断 ${index + 1} · ${diagnosticStatuses[item.status] || item.status}`, item.diagnosticId))); select.value = context.selectedId || ""; show(select, records.length > 1);
-  root.replaceChildren();
   const diagnostic = selectedAttemptDiagnostic(context);
-  if (!diagnostic) { const empty = document.createElement("p"); empty.className = "diagnosis-chat-empty"; empty.textContent = "从一个问题开始，例如：这次任务为什么中止？需要我确认什么？"; root.append(empty); }
-  for (const message of diagnostic?.messages || []) {
-    const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = `diagnosis-chat-message is-${message.role}`;
-    heading.textContent = message.role === "user" ? "你" : `${labels[message.runnerId || diagnostic.runnerId] || "诊断助手"}${message.modelId ? ` · ${message.modelId}` : ""}`;
-    body.className = "diagnosis-chat-body"; appendHighlightedReply(body, message.content); article.append(heading, body); root.append(article);
+  if (globalThis.tokenCouponAttemptDiagnosisHistory) {
+    const runnerId = diagnostic?.runnerId || context.runnerId;
+    globalThis.tokenCouponAttemptDiagnosisHistory.render(root, {
+      messages: (diagnostic?.messages || []).map((message, index) => ({
+        messageId: `${diagnostic?.diagnosticId || "empty"}:${index}`,
+        role: message.role === "user" ? "user" : "assistant",
+        heading: message.role === "user" ? "你" : `${labels[message.runnerId || runnerId] || "诊断助手"}${message.modelId ? ` · ${message.modelId}` : ""}`,
+        content: message.content,
+      })),
+      emptyMessage: "从一个问题开始，例如：这次任务为什么中止？需要我确认什么？",
+      showEmptyMessage: !diagnostic,
+      ...(context.pendingSubmission && context.running ? { pendingMessage: context.pendingSubmission.body.message } : {}),
+      ...(diagnostic?.error ? { errorMessage: `分析未完成：${diagnostic.error}` } : {}),
+      running: !!context.running,
+    });
+  } else {
+    root.replaceChildren();
+    if (!diagnostic) { const empty = document.createElement("p"); empty.className = "diagnosis-chat-empty"; empty.textContent = "从一个问题开始，例如：这次任务为什么中止？需要我确认什么？"; root.append(empty); }
+    for (const message of diagnostic?.messages || []) {
+      const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = `diagnosis-chat-message is-${message.role}`;
+      heading.textContent = message.role === "user" ? "你" : `${labels[message.runnerId || diagnostic.runnerId] || "诊断助手"}${message.modelId ? ` · ${message.modelId}` : ""}`;
+      body.className = "diagnosis-chat-body"; appendHighlightedReply(body, message.content); article.append(heading, body); root.append(article);
+    }
+    if (context.pendingSubmission && context.running) {
+      const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = "diagnosis-chat-message is-user"; heading.textContent = "你"; body.className = "diagnosis-chat-body"; body.textContent = context.pendingSubmission.body.message; article.append(heading, body); root.append(article);
+    }
+    if (diagnostic?.error) { const error = document.createElement("p"); error.className = "field-error"; error.textContent = `分析未完成：${diagnostic.error}`; root.append(error); }
+    if (context.running) { const pending = document.createElement("p"); pending.className = "diagnosis-chat-pending"; pending.textContent = "正在分析…"; root.append(pending); }
   }
-  if (context.pendingSubmission && context.running) {
-    const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = "diagnosis-chat-message is-user"; heading.textContent = "你"; body.className = "diagnosis-chat-body"; body.textContent = context.pendingSubmission.body.message; article.append(heading, body); root.append(article);
-  }
-  if (diagnostic?.error) { const error = document.createElement("p"); error.className = "field-error"; error.textContent = `分析未完成：${diagnostic.error}`; root.append(error); }
-  if (context.running) { const pending = document.createElement("p"); pending.className = "diagnosis-chat-pending"; pending.textContent = "正在分析…"; root.append(pending); }
   root.scrollTop = context.scrollAfterSend || atBottom ? root.scrollHeight : previousScroll; context.scrollAfterSend = false;
   $("#attempt-diagnosis-send").disabled = !!context.running;
   $("#attempt-diagnosis-send").textContent = context.running ? "分析中…" : context.pendingSubmission ? "检查本次发送" : "发送";

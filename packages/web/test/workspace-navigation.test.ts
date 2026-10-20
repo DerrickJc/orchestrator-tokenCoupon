@@ -2107,6 +2107,34 @@ it("publishes the filtered raw-event page to the React Attempt raw event view", 
   expect(h.element("attempt-raw-page").textContent).toContain("第 1 / 1 页");
 });
 
+it("publishes selected diagnosis history, pending submission, and status to the React conversation view", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let mount: HTMLElement | undefined;
+  h.w.tokenCouponAttemptDiagnosisHistory = { render(element: HTMLElement, model: any) { mount = element; received = model; }, unmountWithin() {} } as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    const context = {
+      identity: "project:first:attempt-diagnosis", workspaceId: "project", planningId: "first", attemptId: "attempt-diagnosis",
+      runnerId: "claude-code", selectedId: "diagnostic-1", running: true,
+      pendingSubmission: { body: { message: "再解释一下恢复条件" } },
+      data: { diagnostics: [{ diagnosticId: "diagnostic-1", status: "failed", runnerId: "claude-code", error: "provider unavailable", messages: [
+        { role: "user", content: "为什么失败？" },
+        { role: "assistant", runnerId: "codex", modelId: "gpt-6.1-sol", content: "完成结论：需要补充一次验证" },
+      ] }] },
+    };
+    __testState.attemptDiagnosticContext = context;
+    renderAttemptDiagnosticHistory(context);
+  `);
+  expect(mount?.id).toBe("attempt-diagnosis-history");
+  expect(received.messages).toEqual([
+    { messageId: "diagnostic-1:0", role: "user", heading: "你", content: "为什么失败？" },
+    { messageId: "diagnostic-1:1", role: "assistant", heading: "Codex · gpt-6.1-sol", content: "完成结论：需要补充一次验证" },
+  ]);
+  expect(received).toMatchObject({ pendingMessage: "再解释一下恢复条件", errorMessage: "分析未完成：provider unavailable", running: true, showEmptyMessage: false });
+  expect(h.element("attempt-diagnosis-history-select").value).toBe("diagnostic-1");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

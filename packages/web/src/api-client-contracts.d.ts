@@ -344,6 +344,19 @@ export type AttemptRawEventsModel = { lines: string[] };
 export type AttemptRawEventsBridge = {
   render(model: AttemptRawEventsModel): void;
 };
+export type AttemptDiagnosisMessageView = { messageId: string; role: "user" | "assistant"; heading: string; content: string };
+export type AttemptDiagnosisHistoryModel = {
+  messages: AttemptDiagnosisMessageView[];
+  emptyMessage: string;
+  showEmptyMessage: boolean;
+  pendingMessage?: string;
+  errorMessage?: string;
+  running: boolean;
+};
+export type AttemptDiagnosisHistoryBridge = {
+  render(mount: HTMLElement, model: AttemptDiagnosisHistoryModel): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -373,4 +386,5 @@ declare global {
   var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
+  var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
 }
