@@ -1727,8 +1727,14 @@ function renderRunConfiguration() {
   const config = state.runConfiguration;
   renderRunAgents(config, plan.draft.plan);
   const candidates = verificationCandidates(plan.draft.plan, plan.verificationTasks);
-  const radio = document.querySelector(`input[name="run-mode-choice"][value="${config.mode}"]`);
-  for (const item of document.querySelectorAll('input[name="run-mode-choice"]')) item.checked = item === radio;
+  if (globalThis.tokenCouponRunModeSelector) {
+    const radios = [...document.querySelectorAll('input[name="run-mode-choice"]')];
+    const options = radios.map(radio => ({ id: radio.value, title: radio.closest("label")?.querySelector("strong")?.textContent || radio.value, description: radio.closest("label")?.querySelector("small")?.textContent || "" }));
+    globalThis.tokenCouponRunModeSelector.render({ options, selectedMode: config.mode || "" }, mode => persistRunConfiguration(mode, true));
+  } else {
+    const radio = document.querySelector(`input[name="run-mode-choice"][value="${config.mode}"]`);
+    for (const item of document.querySelectorAll('input[name="run-mode-choice"]')) item.checked = item === radio;
+  }
   show($("#run-custom-fields"), config.mode === "custom");
   const verification = $("#run-verification");
   const previousVerification = config.verificationTaskId;
@@ -4392,18 +4398,20 @@ $("#run-button").addEventListener("click", async () => {
   if (!job) state.runRequestKey = null;
   state.runInFlight = false; renderRunConfiguration();
 });
-function persistRunConfiguration() {
+function persistRunConfiguration(modeOverride, deferReactRender = false) {
   if (!state.runConfiguration || !state.runConfigKey) return;
   state.runConfiguration.edited = true; state.runConfiguration.needsReconfirm = false;
-  state.runConfiguration.mode = document.querySelector('input[name="run-mode-choice"]:checked')?.value || state.runConfiguration.mode;
+  const selectedMode = modeOverride === "default" || modeOverride === "custom" ? modeOverride : undefined;
+  state.runConfiguration.mode = selectedMode ?? document.querySelector('input[name="run-mode-choice"]:checked')?.value ?? state.runConfiguration.mode;
   state.runConfiguration.maxParallel = Number($("#run-parallel").value);
   state.runConfiguration.isolation = $("#run-isolation").value;
   state.runConfiguration.verificationTaskId = $("#run-verification").value;
   if (state.runConfiguration.isolation === "shared") { state.runConfiguration.maxParallel = 1; $("#run-parallel").value = "1"; }
   try { localStorage.setItem(state.runConfigKey, JSON.stringify(state.runConfiguration)); } catch { /* Keep current selection in memory. */ }
-  renderRunConfiguration();
+  if (deferReactRender) queueMicrotask(renderRunConfiguration);
+  else renderRunConfiguration();
 }
-for (const input of document.querySelectorAll('input[name="run-mode-choice"]')) input.addEventListener("change", persistRunConfiguration);
+if (!globalThis.tokenCouponRunModeSelector) for (const input of document.querySelectorAll('input[name="run-mode-choice"]')) input.addEventListener("change", persistRunConfiguration);
 for (const id of ["run-parallel", "run-isolation", "run-verification"]) $("#" + id).addEventListener("change", persistRunConfiguration);
 $("#revise-run-tasks")?.remove();
 $("#configure-task-agents").addEventListener("click", openTaskAgentConfig);

@@ -372,13 +372,22 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
+  if (options.reactRunMode) Object.assign(w, { tokenCouponRunModeSelector: { render(model: { options: Array<{ id: string; title: string; description: string }>; selectedMode: string }, onChange: (mode: "default" | "custom") => void) {
+    const root = w.document.getElementById("run-mode-selector-root")!;
+    root.replaceChildren(...model.options.map(option => {
+      const label = w.document.createElement("label"); label.className = "run-config-choice";
+      const input = w.document.createElement("input"); input.type = "radio"; input.name = "run-mode-choice"; input.value = option.id; input.checked = model.selectedMode === option.id;
+      input.onchange = () => onChange(option.id as "default" | "custom");
+      const copy = w.document.createElement("span"), title = w.document.createElement("strong"), description = w.document.createElement("small"); title.textContent = option.title; description.textContent = option.description; copy.append(title, description); label.append(input, copy); return label;
+    }));
+  } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined; w.confirm = () => true;
   w.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); }; w.HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
   const workspaces = options.empty ? [] : [{ workspaceId: "project", label: "排课后端", path: "/projects/排课后端" }];
@@ -976,11 +985,12 @@ it("moves to execution setup after approval and never launches until the user co
 });
 
 it("preserves custom launch settings and protects them before opening a new OAuth request", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunMode: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const custom = h.w.document.querySelector<HTMLInputElement>('input[name="run-mode-choice"][value="custom"]')!;
   custom.checked = true; custom.dispatchEvent(new h.w.Event("change", { bubbles: true }));
   (h.element("run-isolation") as HTMLSelectElement).value = "shared"; h.element("run-isolation").dispatchEvent(new h.w.Event("change"));
+  expect(h.w.eval('__testState.runConfiguration.mode')).toBe("custom");
   expect((h.element("run-parallel") as HTMLSelectElement).value).toBe("1");
   h.setApprovals([{ requestId: "auth-during-edit", clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", requestedScopes: ["planning:read"], createdAt: Date.now(), expiresAt: Date.now() + 60000 }]);
   h.element("refresh").click(); await expect.poll(() => h.element("authorization-arrival").classList.contains("hidden")).toBe(false);

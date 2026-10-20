@@ -373,6 +373,11 @@ export type ReviewerModeSelectorModel = { options: ReviewerModeOption[]; selecte
 export type ReviewerModeSelectorBridge = {
   render(model: ReviewerModeSelectorModel, onChange: (mode: string) => void): void;
 };
+export type RunModeOption = { id: "default" | "custom"; title: string; description: string };
+export type RunModeSelectorModel = { options: RunModeOption[]; selectedMode: string };
+export type RunModeSelectorBridge = {
+  render(model: RunModeSelectorModel, onChange: (mode: "default" | "custom") => void): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -469,6 +474,7 @@ declare global {
   var tokenCouponRunnerSelector: RunnerSelectorBridge | undefined;
   var tokenCouponModelChoiceSelectors: ModelChoiceSelectorsBridge | undefined;
   var tokenCouponReviewerModeSelector: ReviewerModeSelectorBridge | undefined;
+  var tokenCouponRunModeSelector: RunModeSelectorBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
