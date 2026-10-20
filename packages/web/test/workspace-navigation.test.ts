@@ -1898,6 +1898,26 @@ it("publishes pending approval counts and guidance to the React overview bridge"
   expect(h.element("pending-approval-box").classList.contains("has-pending")).toBe(true);
 });
 
+it("sends approval reasons and commands to the React text bridge and releases roots before rerender", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  const rendered: any[] = [];
+  let unmounts = 0;
+  h.w.tokenCouponPendingApprovalText = {
+    render(mount: HTMLElement, model: any) { rendered.push(model); mount.textContent = model.text; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: "approval-text", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行测试", summary: "请核对该测试命令是否符合当前环境。", operation: { command: "npm test -- --runInBand" }, cwd: "/workspace" } }]);
+  h.element("refresh").click();
+  await expect.poll(() => rendered.length).toBe(2);
+  expect(rendered.map(item => item.title)).toEqual(["审批说明", "待审批命令"]);
+  expect(rendered[1]).toMatchObject({ className: "approval-command", code: true, text: "npm test -- --runInBand" });
+
+  h.setInteractions([{ requestId: "approval-text-next", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行构建", operation: { command: "npm run build" } } }]);
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+  await expect.poll(() => rendered.length).toBe(3);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

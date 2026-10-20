@@ -3388,6 +3388,7 @@ async function renderInteractions() {
   if (state.interactionSignature === signature) return;
   state.interactionSignature = signature;
   const answers = new Map([...root.querySelectorAll("input[data-question-id]")].map(input => [input.id, { value: input.value, checked: input.checked }]));
+  globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
     const card = document.createElement("div"); card.className = "interaction-card";
@@ -3432,6 +3433,11 @@ async function renderInteractions() {
   });
 }
 function appendApprovalText(parent, className, title, text, storageKey, maxLines, maxChars, code = false) {
+  if (globalThis.tokenCouponPendingApprovalText) {
+    const mount = document.createElement("div"); mount.className = "approval-text-react-root"; parent.append(mount);
+    globalThis.tokenCouponPendingApprovalText.render(mount, { className, title, text, storageKey, maxLines, maxChars, code });
+    return;
+  }
   const lines = text.split("\n");
   const makeBody = value => { const body = document.createElement(code ? "pre" : "p"); body.className = className; body.textContent = value; return body; };
   if (lines.length <= maxLines && text.length <= maxChars) {
