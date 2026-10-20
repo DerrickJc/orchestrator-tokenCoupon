@@ -3053,8 +3053,14 @@ function ensureAttemptDiagnosticUI() {
   }
   if ($("#diagnosis-choice-dialog")) return;
   const choice = document.createElement("dialog"); choice.id = "diagnosis-choice-dialog"; choice.className = "diagnosis-choice-dialog";
-  choice.innerHTML = `<div class="section-title"><h3>选择分析方式</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><div class="diagnosis-options"><button id="diagnosis-local" class="diagnosis-option" type="button"><strong>在此页面分析</strong><span>与 Codex 或 Claude Code 继续对话，可在下方选择模型。</span><small>会使用所选模型的调用额度</small></button><button id="diagnosis-web" class="diagnosis-option" type="button"><strong>复制提示到网页分析</strong><span>把证据保存在工作区，通过已连接的 GPT／Claude 网页读取分析。</span><small>使用网页额度，节省执行模型的诊断调用</small></button></div>`;
+  const choiceRoot = document.createElement("div"); choiceRoot.id = "diagnosis-choice-root"; choice.append(choiceRoot);
   document.body.append(choice);
+  if (!globalThis.tokenCouponAttemptDiagnosisChoice) {
+    choiceRoot.innerHTML = `<div class="section-title"><h3>选择分析方式</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><div class="diagnosis-options"><button id="diagnosis-local" class="diagnosis-option" type="button"><strong>在此页面分析</strong><span>与 Codex 或 Claude Code 继续对话，可在下方选择模型。</span><small>会使用所选模型的调用额度</small></button><button id="diagnosis-web" class="diagnosis-option" type="button"><strong>复制提示到网页分析</strong><span>把证据保存在工作区，通过已连接的 GPT／Claude 网页读取分析。</span><small>使用网页额度，节省执行模型的诊断调用</small></button></div>`;
+    choice.querySelector("[data-diagnosis-close]").addEventListener("click", () => choice.close());
+    $("#diagnosis-local").addEventListener("click", () => { choice.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); });
+    $("#diagnosis-web").addEventListener("click", () => { choice.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); });
+  }
   const chat = document.createElement("dialog"); chat.id = "attempt-diagnosis-dialog"; chat.className = "diagnosis-chat-dialog";
   chat.innerHTML = `<div class="section-title"><div><h3>任务诊断</h3><p id="attempt-diagnosis-context" class="hint"></p></div><button type="button" data-diagnosis-close class="text-button">关闭</button></div><select id="attempt-diagnosis-history-select" aria-label="历史诊断" class="hidden"></select><p id="attempt-diagnosis-status" class="diagnosis-chat-status" role="status"></p><section id="attempt-diagnosis-history" class="diagnosis-chat-history" aria-label="诊断对话"></section><form id="attempt-diagnosis-form" class="diagnosis-chat-composer"><label class="sr-only" for="attempt-diagnosis-reply">发送诊断问题</label><textarea id="attempt-diagnosis-reply" rows="3" maxlength="8192" placeholder="输入问题、补充事实，或讨论处理方案…"></textarea><div class="diagnosis-chat-footer"><div class="diagnosis-model-selectors"><label>助手<select id="attempt-diagnosis-runner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label><label id="diagnosis-custom-wrap" class="hidden">模型 ID<input id="diagnosis-custom-model" maxlength="200" placeholder="输入模型 ID"></label></div><button id="attempt-diagnosis-send" type="submit" class="button button-primary">发送</button></div><p class="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p></form>`;
   document.body.append(chat);
@@ -3067,13 +3073,11 @@ function ensureAttemptDiagnosticUI() {
   const exportRoot = document.createElement("div"); exportRoot.id = "diagnosis-export-root";
   while (exported.firstChild) exportRoot.append(exported.firstChild);
   exported.append(exportRoot);
-  for (const dialog of [choice, chat, exported]) dialog.querySelector("[data-diagnosis-close]").addEventListener("click", () => dialog.close());
+  for (const dialog of [chat, exported]) dialog.querySelector("[data-diagnosis-close]").addEventListener("click", () => dialog.close());
   for (const dialog of [chat, exported]) {
     const switchMode = document.createElement("button"); switchMode.type = "button"; switchMode.className = "text-button"; switchMode.textContent = "切换分析方式";
-    switchMode.addEventListener("click", () => { dialog.close(); choice.showModal(); }); dialog.querySelector(".section-title").append(switchMode);
+    switchMode.addEventListener("click", () => { dialog.close(); showAttemptDiagnosisChoice(); }); dialog.querySelector(".section-title").append(switchMode);
   }
-  $("#diagnosis-local").addEventListener("click", () => { choice.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); });
-  $("#diagnosis-web").addEventListener("click", () => { choice.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); });
   $("#attempt-diagnosis-runner").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) { context.diagnosisRunnerId = $("#attempt-diagnosis-runner").value; context.diagnosisModelId = ""; void loadAttemptDiagnosticModels(context); } });
   $("#attempt-diagnosis-model").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) context.diagnosisModelId = $("#attempt-diagnosis-model").value; show($("#diagnosis-custom-wrap"), $("#attempt-diagnosis-model").value === "__custom__"); });
   $("#diagnosis-custom-model").addEventListener("input", () => { if (state.attemptDiagnosticContext) state.attemptDiagnosticContext.diagnosisCustomModelId = $("#diagnosis-custom-model").value; });
@@ -3088,6 +3092,17 @@ function ensureAttemptDiagnosticUI() {
   diagnosisInput.before(diagnosisComposerRoot); diagnosisComposerRoot.append(diagnosisInput, diagnosisShortcut);
   bindTextareaEnterSubmit(diagnosisInput, () => $("#attempt-diagnosis-form").requestSubmit());
   $("#diagnosis-export-copy").addEventListener("click", () => void copyExportedDiagnosticPrompt());
+}
+function showAttemptDiagnosisChoice() {
+  const dialog = $("#diagnosis-choice-dialog"), mount = $("#diagnosis-choice-root");
+  if (globalThis.tokenCouponAttemptDiagnosisChoice) {
+    globalThis.tokenCouponAttemptDiagnosisChoice.render(mount, {
+      onClose: () => dialog.close(),
+      onLocal: () => { dialog.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); },
+      onWeb: () => { dialog.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); },
+    });
+  }
+  dialog.showModal();
 }
 function attemptDiagnosticPath(context) {
   return `/api/v1/workspaces/${context.workspaceId}/plannings/${context.planningId}/attempts/${context.attemptId}/diagnostics`;
@@ -3207,7 +3222,7 @@ async function openAttemptDiagnosis() {
   const policy = functionPolicy("diagnosis");
   if (policy?.priority === "agent") await openLocalAttemptDiagnosis(state.attemptDiagnosticContext);
   else if (policy?.priority === "web") await exportAttemptDiagnosis(state.attemptDiagnosticContext);
-  else $("#diagnosis-choice-dialog").showModal();
+  else showAttemptDiagnosisChoice();
 }
 async function openLocalAttemptDiagnosis(context) {
   if (!diagnosticContextIsCurrent(context)) return;
@@ -3275,7 +3290,7 @@ async function exportAttemptDiagnosis(context) {
 function renderAttemptDiagnosticExport(context) {
   const mount = $("#diagnosis-export-root"), model = context.exportState || { status: "正在保存证据…", path: "", copyLabel: "复制分析提示", copyDisabled: true };
   if (globalThis.tokenCouponAttemptDiagnosisExport) {
-    globalThis.tokenCouponAttemptDiagnosisExport.render(mount, model, { onClose: () => $("#diagnosis-export-dialog").close(), onCopy: () => void copyExportedDiagnosticPrompt(), onSwitch: () => { $("#diagnosis-export-dialog").close(); $("#diagnosis-choice-dialog").showModal(); } });
+    globalThis.tokenCouponAttemptDiagnosisExport.render(mount, model, { onClose: () => $("#diagnosis-export-dialog").close(), onCopy: () => void copyExportedDiagnosticPrompt(), onSwitch: () => { $("#diagnosis-export-dialog").close(); showAttemptDiagnosisChoice(); } });
     return;
   }
   $("#diagnosis-export-status").textContent = model.status; $("#diagnosis-export-path").value = model.path;

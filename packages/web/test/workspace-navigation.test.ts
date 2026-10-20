@@ -2325,6 +2325,27 @@ it("offers two diagnosis routes, uses a chat composer with model controls, and c
   expect(h.copied.at(-1)).not.toContain("完整日志"); expect(diagnosticPosts).toHaveLength(2); expect(exportCalls).toBe(1);
 });
 
+it("renders the diagnosis route selector through its React bridge and wires its callbacks", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  let callbacks: { onClose(): void; onLocal(): void; onWeb(): void } | undefined;
+  h.w.tokenCouponAttemptDiagnosisChoice = {
+    render(mount: HTMLElement, next: typeof callbacks) { callbacks = next; mount.textContent = "React 选择分析方式"; },
+    unmountWithin() {},
+  } as any;
+  h.w.eval('__testState.attemptView = {workspaceId:"project",planningId:"first",attemptId:"diagnostic-attempt",attempt:{runnerId:"codex"}}; void openAttemptDiagnosis()');
+  await expect.poll(() => h.visible("diagnosis-choice-dialog")).toBe(true);
+  expect(h.element("diagnosis-choice-root").textContent).toContain("React 选择分析方式");
+  expect(callbacks).toBeDefined();
+  callbacks!.onClose(); expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(false);
+
+  h.w.eval("void openAttemptDiagnosis()");
+  await expect.poll(() => h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(true);
+  callbacks!.onLocal();
+  await expect.poll(() => h.element("attempt-diagnosis-dialog").hasAttribute("open")).toBe(true);
+  expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(false);
+});
+
 it("creates a linked revision from the visible source version and opens the new planning record", async () => {
   const h = await page({ hash: "#/workspaces/project/plans/first" });
   await expect.poll(() => h.element("planning-title").textContent).toContain("计划 first");

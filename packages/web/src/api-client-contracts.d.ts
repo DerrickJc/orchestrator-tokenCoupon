@@ -382,6 +382,10 @@ export type AttemptDiagnosisExportBridge = {
   render(mount: HTMLElement, model: AttemptDiagnosisExportModel, callbacks: { onClose: () => void; onCopy: () => void; onSwitch: () => void }): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type AttemptDiagnosisChoiceBridge = {
+  render(mount: HTMLElement, callbacks: { onClose: () => void; onLocal: () => void; onWeb: () => void }): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -415,4 +419,5 @@ declare global {
   var tokenCouponAttemptDiagnosisComposer: AttemptDiagnosisComposerBridge | undefined;
   var tokenCouponAttemptDiagnosisControls: AttemptDiagnosisControlsBridge | undefined;
   var tokenCouponAttemptDiagnosisExport: AttemptDiagnosisExportBridge | undefined;
+  var tokenCouponAttemptDiagnosisChoice: AttemptDiagnosisChoiceBridge | undefined;
 }
