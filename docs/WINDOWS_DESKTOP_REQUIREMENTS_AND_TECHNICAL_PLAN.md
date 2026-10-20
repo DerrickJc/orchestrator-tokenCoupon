@@ -415,7 +415,7 @@ Node SEA/其他单文件打包方式另行验证动态依赖、资源文件、�
 | MIG-01 | 已实现 Windows Mutex 与 Linux flock 分派；竞争、大小写与崩溃释放实测见 13.60 | 完整后台、多客户端和恢复组合仍需支持矩阵验收；禁止不安全降级 | 部分完成 |
 | MIG-02 | 已实现 Windows 进程启动时间核验与 owner 平台标识，跨平台记录保持 unknown | 继续覆盖权限不足、历史数据及完整后台恢复；不能因 PID 相同而信任 owner | 部分完成 |
 | MIG-03 | 已统一 PATH/PATHEXT 发现与 Windows cmd 垫片启动，特殊参数实测见 13.61 | 继续真实 Runner 安装形式、登录与完整执行验收；进程树清理独立处理 | 部分完成 |
-| MIG-04 | Windows 取消目前主要作用于直接子进程 | 验证受控进程树清理，可评估 Job Object/平台执行器；区分原生中断与强制清理，仅处理本应用拥有的进程 | 阻塞 |
+| MIG-04 | 已接入受控 Job Object，取消/正常退出/宿主崩溃实测见 13.64 | 继续真实 Runner 与安装包组合验收；仅清理本应用所属进程，业务副作用不等于可回滚 | 部分完成 |
 | MIG-05 | 暂停、取消、退出与异常重启语义不同 | 根据真实退出与持久化结果显示状态；不因窗口关闭宣称任务取消，不因连接恢复宣称任务成功 | 必验 |
 | MIG-06 | `process.execPath` 被用于 supervisor 与协调辅助进程 | 明确执行用运行时路径，验证 Electron/Node/单文件模式下的含义；不能误启动第二个 GUI 或旧版本资源 | 阻塞 |
 | MIG-07 | Unix socket 与目录权限校验绑定当前隧道 | 设计 Windows 私有转发与控制端点、ACL 和身份校验；保持远程网关与本机 API 隔离 | 网页协作阻塞 |
@@ -962,6 +962,16 @@ SSE hello 返回保留范围及 epoch/cursor/window 重置原因。页面只在�
 实际 Chromium 页面验证通过：Vite 生产资源与 HttpOnly 授权、SSE 状态核对、两个真实 Mock Attempt 来回切换并读取对应日志、结构化步骤连续输入换行。已执行的计划不允许直接编辑；未批准草案可以编辑。1280、960、640 CSS px 三种宽度均无文档级横向溢出，测试交互没有 JavaScript pageerror。多行输入补充固定 aria-label，避免字段精确匹配混入已有正文；相关 Web 类型检查、构建与 3 项定向组件/应用回归通过。
 
 截图保存在本机 `/tmp/token-coupon-desktop-browser-editor.png`；这是临时测试证据，不随源码发布。浏览器自动请求未提供的 favicon 返回 404，与上述业务检查区分。此次是 Linux/WSL 后台＋Chromium 的实际页面回归，**不是** Windows Electron、原生文件选择、全部 UI-01 至 UI-15 或真实 Runner 的完整验收。
+
+### 13.64 Windows 受控进程树与 Claude SDK 清理（2026-10-20）
+
+原生 Windows 命令通过随包 PowerShell/C# 辅助层创建 Job Object：创建暂停的 Node 代理，只继承白名单中的 stdin/stdout/stderr 句柄，加入 Job 后才恢复；Job 句柄不传给任务，启用 kill-on-close。正常退出清理剩余成员并核对 active process 数量；取消或宿主崩溃时由内核关闭 Job 清理所属进程树。父进程通过已打开的句柄与创建时间校验，拒绝 PID 复用。辅助层不可用时明确失败，不回退 PID 扫描或任意 shell 字符串执行。参数通过私有启动环境传输，代理在启动 Runner 前移除控制配置；过长参数提示改用 stdin/文件。
+
+Codex、CLI 模式及目录/诊断复用该启动边界；Claude managed 通过 SDK 的自定义 spawn 接入，保留 SDK 的 EOF/中断机会，等待真实 close，辅助进程非零退出不能被模型成功回复掩盖。Linux 保持既有进程组策略。Electron 不能直接充当 Node 代理运行时，未完成运行时适配前明确拒绝，不启动额外 GUI。
+
+使用 Node 官方 ZIP 及同版本 SHA-256 清单核验，在独立临时目录运行 **原生 Windows Node 22.12.0**：命令/特殊参数防注入通过；`scripts/desktop-process-tree-smoke.mjs` 验证中文与二进制标准流字节一致、取消三层进程树、正常退出保留退出码并清理后台子孙、父进程强制退出后的清理、无关进程保留，全部通过。辅助资源已确认纳入 npm dry-run 包清单。
+
+完整类型检查、构建与回归：119 个测试文件通过、1 个 Windows 专用文件在 Linux 跳过；777 项通过、1 项跳过。Windows 专用场景已另用上述真实 Windows 运行时直接执行，不能把 Linux skip 当作 Windows 通过。真实 coding agent 的安装/认证、受限制 PowerShell 环境、Electron/安装包与私有转发仍需独立验收。实现依据：[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[创建进程与句柄白名单](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)、[Node 22.12 校验清单](https://nodejs.org/dist/v22.12.0/SHASUMS256.txt)。
 
 ## 14. 剩余实施台账（2026-10-20）
 

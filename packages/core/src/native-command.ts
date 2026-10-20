@@ -2,7 +2,11 @@ import crossSpawn from "cross-spawn";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { delimiter, extname, join, resolve } from "node:path";
-import type { spawn } from "node:child_process";
+import type { spawn, SpawnOptions } from "node:child_process";
+import { spawn as nodeSpawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { win32 } from "node:path";
 
 /** Resolve the command before using a workspace cwd; never implicitly search that cwd. */
 export async function resolveNativeExecutable(name: string, label = name, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
@@ -26,5 +30,18 @@ export async function resolveNativeExecutable(name: string, label = name, enviro
   throw new Error(`找不到 ${label} 可执行文件，请先安装并登录对应 Runner，或配置绝对路径`);
 }
 
-/** cross-spawn escapes cmd shims without opting into an unrestricted shell. */
-export const spawnNative = crossSpawn as typeof spawn;
+/** Windows children live in a kill-on-close Job; Unix keeps its existing process-group handling. */
+export const spawnNative = ((command: string, argumentsOrOptions: readonly string[] | SpawnOptions = [], suppliedOptions: SpawnOptions = {}) => {
+  const args = Array.isArray(argumentsOrOptions) ? argumentsOrOptions : [];
+  const options: SpawnOptions = Array.isArray(argumentsOrOptions) ? suppliedOptions : argumentsOrOptions as SpawnOptions;
+  if (process.platform !== "win32") return crossSpawn(command, [...args], options);
+  if (process.versions.electron) throw new Error("windows_job_runtime_unsupported：需明确配置随包 Node 运行时，不能把 Electron 当作 Node 启动");
+  if (options.shell) throw new Error("windows_job_shell_forbidden：请使用可执行入口与独立参数");
+  const config = Buffer.from(JSON.stringify({ command, args, parentPid: process.pid, runtime: process.execPath, proxy: fileURLToPath(new URL("../resources/windows-job-proxy.mjs", import.meta.url)) })).toString("base64");
+  if (config.length > 30000) throw new Error("windows_job_arguments_too_large：Windows 启动参数过长，请改用 stdin 或任务文件");
+  const script = readFileSync(new URL("../resources/windows-job.ps1", import.meta.url), "utf8");
+  const powershell = win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return nodeSpawn(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-InputFormat", "Text", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+    ...options, windowsHide: true, env: { ...(options.env ?? process.env), TOKEN_COUPON_CHILD_CONFIG: config },
+  });
+}) as typeof spawn;
