@@ -249,6 +249,30 @@ export type PendingApprovalDecisionBridge = {
   render(mount: HTMLElement, model: PendingApprovalDecisionModel): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type PendingRunnerQuestionOption = { id: string; label: string };
+export type PendingRunnerQuestion = {
+  id: string;
+  text: string;
+  required?: boolean;
+  allowFreeText?: boolean;
+  multiple?: boolean;
+  secret?: boolean;
+  options?: PendingRunnerQuestionOption[];
+};
+export type PendingRunnerQuestionAnswer =
+  | { questionId: string; text: string }
+  | { questionId: string; optionIds: string[] };
+export type PendingRunnerQuestionDraft = { value: string; checked: boolean };
+export type PendingRunnerQuestionsModel = {
+  requestId: string;
+  questions: PendingRunnerQuestion[];
+  drafts: Record<string, PendingRunnerQuestionDraft>;
+  onSubmit: (answers: PendingRunnerQuestionAnswer[]) => void;
+};
+export type PendingRunnerQuestionsBridge = {
+  render(mount: HTMLElement, model: PendingRunnerQuestionsModel): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -271,4 +295,5 @@ declare global {
   var tokenCouponPendingApprovalOverview: PendingApprovalOverviewBridge | undefined;
   var tokenCouponPendingApprovalText: PendingApprovalTextBridge | undefined;
   var tokenCouponPendingApprovalDecision: PendingApprovalDecisionBridge | undefined;
+  var tokenCouponPendingRunnerQuestions: PendingRunnerQuestionsBridge | undefined;
 }

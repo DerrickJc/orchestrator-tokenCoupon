@@ -1946,6 +1946,26 @@ it("routes React approval decisions through the existing interaction API", async
   await expect.poll(() => unmounts).toBe(1);
 });
 
+it("routes Runner question answers from React through the existing interaction API", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingRunnerQuestions = {
+    render(mount: HTMLElement, model: any) { received = model; mount.textContent = "React question form"; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: "react-question", owner: { runnerId: "codex", taskId: "design" }, request: { kind: "question", questions: [{ id: "approval", text: "4177 是否已批准？", required: true, allowFreeText: true, options: [{ id: "yes", label: "已批准" }] }] } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  expect(received).toMatchObject({ requestId: "react-question", questions: [{ id: "approval", text: "4177 是否已批准？" }] });
+  received.onSubmit([{ questionId: "approval", text: "已批准，恢复连接后继续" }]);
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-question", body: { kind: "question", answers: [{ questionId: "approval", text: "已批准，恢复连接后继续" }] } });
+  h.setInteractions([]);
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

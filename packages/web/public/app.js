@@ -3390,6 +3390,7 @@ async function renderInteractions() {
   const answers = new Map([...root.querySelectorAll("input[data-question-id]")].map(input => [input.id, { value: input.value, checked: input.checked }]));
   globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
   globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
+  globalThis.tokenCouponPendingRunnerQuestions?.unmountWithin(root);
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
     const card = document.createElement("div"); card.className = "interaction-card";
@@ -3463,6 +3464,16 @@ function appendApprovalText(parent, className, title, text, storageKey, maxLines
   parent.append(details);
 }
 function renderRunnerQuestions(card, interaction, drafts) {
+  if (globalThis.tokenCouponPendingRunnerQuestions) {
+    const mount = document.createElement("div"); mount.className = "runner-questions-react-root"; card.append(mount);
+    globalThis.tokenCouponPendingRunnerQuestions.render(mount, {
+      requestId: interaction.requestId,
+      questions: interaction.request.questions || [],
+      drafts: Object.fromEntries(drafts),
+      onSubmit: answers => void respondInteraction(interaction.requestId, { kind: "question", answers }),
+    });
+    return;
+  }
   const readers = [], questions = interaction.request.questions || [];
   const hint = document.createElement("p"); hint.className = "hint runner-question-help";
   const submit = document.createElement("button"); submit.type = "button"; submit.className = "button button-primary"; submit.textContent = "发送回答并继续";
