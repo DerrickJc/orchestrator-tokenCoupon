@@ -110,6 +110,27 @@ export type PlanDraftViewModel = {
 export type PlanDraftViewBridge = {
   render(model: PlanDraftViewModel): void;
 };
+export type PlanDraftEditorTask = {
+  id: string;
+  title: string;
+  schemaVersion?: number;
+  execution?: { runnerId?: string; modelId?: string };
+  objective?: string;
+  approach?: string;
+  steps?: string[];
+  deliverables?: string[];
+  acceptanceCriteria?: string[];
+  constraints?: string[];
+  notes?: string;
+  prompt?: string;
+  [key: string]: unknown;
+};
+export type PlanDraftEditorPlan = { title: string; tasks: Array<{ task: PlanDraftEditorTask; dependsOn: string[] }>; [key: string]: unknown };
+export type PlanDraftEditorBridge = {
+  render(mount: HTMLElement, model: { identity: string; plan: PlanDraftEditorPlan; disabled: boolean }, onChange: (plan: PlanDraftEditorPlan) => void): void;
+  setDisabled(mount: HTMLElement, disabled: boolean): void;
+  unmount(mount: HTMLElement): void;
+};
 export type PlanOverviewModel = {
   stage: string;
   stageTone: string;
@@ -543,6 +564,7 @@ declare global {
   var tokenCouponPlannerRequestComposer: PlannerRequestComposerBridge | undefined;
   var tokenCouponReplyComposer: ReplyComposerBridge | undefined;
   var tokenCouponPlanDraftView: PlanDraftViewBridge | undefined;
+  var tokenCouponPlanDraftEditor: PlanDraftEditorBridge | undefined;
   var tokenCouponPlanOverview: PlanOverviewBridge | undefined;
   var tokenCouponPlanTabs: PlanTabsBridge | undefined;
   var tokenCouponConversationView: ConversationViewBridge | undefined;

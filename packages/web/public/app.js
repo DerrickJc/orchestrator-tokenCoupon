@@ -2319,9 +2319,11 @@ function renderPlanEditControls() {
   $("#save-plan").disabled = state.savingPlan || !planHasChanges() || !!state.planning?.execution;
   $("#save-plan").textContent = state.savingPlan ? "正在校验并保存…" : "校验并保存";
   $("#plan-edit-status").textContent = state.savingPlan ? "正在校验并保存…" : state.editingPlan && state.editBase.hash !== state.planning?.draft?.planHash ? "当前草案已更新。未保存内容已保留；请放弃修改后重新编辑，避免覆盖新版本。" : planHasChanges() ? "已修改，尚未保存。" : "尚无修改。";
+  if (state.editingPlan && globalThis.tokenCouponPlanDraftEditor) globalThis.tokenCouponPlanDraftEditor.setDisabled($("#plan-text-editor"), state.savingPlan);
 }
 function closePlanEditor() {
   state.editingPlan = false; state.editBase = null; state.editedPlanHash = "";
+  globalThis.tokenCouponPlanDraftEditor?.unmount($("#plan-text-editor"));
   show($("#plan-diff"), false); renderPlanEditControls();
 }
 function openPlanEditor() {
@@ -2332,6 +2334,16 @@ function openPlanEditor() {
 }
 function renderTextEditor() {
   let plan; try { plan = JSON.parse($("#plan-editor").value); } catch { return; }
+  if (globalThis.tokenCouponPlanDraftEditor && state.editBase) {
+    globalThis.tokenCouponPlanDraftEditor.render($("#plan-text-editor"), {
+      identity: `${state.editBase.workspaceId}:${state.editBase.planningId}:${state.editBase.hash}`,
+      plan, disabled: state.savingPlan,
+    }, updated => {
+      $("#plan-editor").value = JSON.stringify(updated, null, 2);
+      previewPlanDiff(); renderPlanEditControls();
+    });
+    return;
+  }
   const root = $("#plan-text-editor"); root.replaceChildren();
   const field = (label, value, update, multiline = false, array = false) => {
     const wrapper = document.createElement("label"); wrapper.className = "draft-text-field"; wrapper.append(document.createTextNode(label));
