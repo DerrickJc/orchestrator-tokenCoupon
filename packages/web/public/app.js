@@ -3058,6 +3058,7 @@ async function readSelectedAttempt(force = false) {
   if (!view || view.loading || view.workspaceId !== state.workspace?.workspaceId || view.planningId !== state.planning?.planningId) return;
   if (view.hasMore && view.loaded && force !== true) return;
   view.loading = true;
+  renderAttemptControls();
   try {
     for (let page = 0; page < 3; page++) {
       const result = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/attempts/${view.attemptId}/events?offset=${view.cursor}${view.fileId ? `&fileId=${encodeURIComponent(view.fileId)}` : ""}`);
@@ -3070,9 +3071,23 @@ async function readSelectedAttempt(force = false) {
     }
     renderAttemptView();
   } catch (error) { if (state.attemptView === view) { view.notice = `记录暂不可读：${error.message}；可刷新重试。`; renderAttemptView(); } }
-  finally { view.loading = false; }
+  finally { view.loading = false; if (state.attemptView === view) renderAttemptControls(); }
 }
 function renderAttemptView() { preserveExecutionReading(renderAttemptContent); }
+function renderAttemptControls() {
+  const model = { hasMore: !!state.attemptView?.hasMore, loading: !!state.attemptView?.loading };
+  if (globalThis.tokenCouponAttemptRecordControls) {
+    globalThis.tokenCouponAttemptRecordControls.render(model, {
+      onRefresh: () => void readSelectedAttempt(true),
+      onMore: () => void readSelectedAttempt(true),
+    });
+    return;
+  }
+  $("#attempt-refresh").disabled = model.loading;
+  $("#attempt-more").disabled = model.loading;
+  $("#attempt-more").textContent = model.loading ? "正在读取历史记录…" : "继续加载历史记录";
+  show($("#attempt-more"), model.hasMore);
+}
 function ensureAttemptDiagnosticUI() {
   if (!globalThis.tokenCouponAttemptOverview && !$("#attempt-diagnose")) {
     const button = document.createElement("button"); button.id = "attempt-diagnose"; button.type = "button"; button.className = "button button-primary hidden"; button.textContent = "分析原因";
@@ -3468,7 +3483,7 @@ function renderAttemptContent() {
   });
   else $("#attempt-raw").textContent = rawLines.join("\n");
   tools.scrollTop = toolScroll; $("#attempt-raw").scrollTop = rawScroll;
-  show($("#attempt-more"), !!view.hasMore);
+  renderAttemptControls();
 }
 function appendHighlightedReply(root, text) {
   let fenced = false;
@@ -4625,8 +4640,10 @@ if (!globalThis.tokenCouponAttemptSelection) {
 }
 $("#execution-latest-details").addEventListener("click", () => void openTaskDetails());
 $("#copy-execution-clarification").addEventListener("click", () => void openRevisionPlanning());
-$("#attempt-refresh").addEventListener("click", () => readSelectedAttempt(true));
-$("#attempt-more").addEventListener("click", () => readSelectedAttempt(true));
+if (!globalThis.tokenCouponAttemptRecordControls) {
+  $("#attempt-refresh").addEventListener("click", () => readSelectedAttempt(true));
+  $("#attempt-more").addEventListener("click", () => readSelectedAttempt(true));
+}
 if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-event-filter").addEventListener("input", () => { if (state.attemptView) { state.attemptView.rawFilter = $("#attempt-event-filter").value; state.attemptView.rawPage = 0; } renderAttemptView(); });
 
 $("#composer-back").addEventListener("click", () => state.workspace && selectWorkspace(state.workspace.workspaceId));

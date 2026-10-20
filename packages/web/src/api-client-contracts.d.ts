@@ -344,6 +344,10 @@ export type AttemptToolsPaginationModel = { pageLabel: string; previousDisabled:
 export type AttemptToolsPaginationBridge = {
   render(model: AttemptToolsPaginationModel, callbacks: { onPrevious: () => void; onNext: () => void }): void;
 };
+export type AttemptRecordControlsModel = { hasMore: boolean; loading: boolean };
+export type AttemptRecordControlsBridge = {
+  render(model: AttemptRecordControlsModel, callbacks: { onRefresh: () => void; onMore: () => void }): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -435,6 +439,7 @@ declare global {
   var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
   var tokenCouponAttemptToolsPagination: AttemptToolsPaginationBridge | undefined;
+  var tokenCouponAttemptRecordControls: AttemptRecordControlsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
