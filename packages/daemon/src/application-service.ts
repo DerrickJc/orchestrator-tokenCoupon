@@ -639,6 +639,12 @@ export class ApplicationService {
     await Promise.allSettled([...this.workers]);
   }
 
+  daemonStopAssessment(): { canStop: boolean; activeJobs: Array<{ jobId: string; kind: string; planningId?: string }> } {
+    const activeJobs = [...this.jobs.values()].filter(job => job.status === "running")
+      .map(({ jobId, kind, planningId }) => ({ jobId, kind, ...(planningId ? { planningId } : {}) }));
+    return { canStop: activeJobs.length === 0, activeJobs };
+  }
+
   async getJob(jobId: string): Promise<JobRecord> {
     if (!/^[0-9a-f-]{36}$/i.test(jobId)) throw new Error("job_not_found：操作 ID 无效");
     const value = this.jobs.get(jobId);

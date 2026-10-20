@@ -59,7 +59,7 @@ function webAssetContentType(path: string): string {
   return types[extname(path).toLowerCase()] || "application/octet-stream";
 }
 
-export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; ownerToken?: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
+export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; ownerToken?: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult>; requestShutdown?: () => void }): Promise<Server> {
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") throw new Error("daemon_bind_forbidden：本阶段服务只允许监听 loopback");
   const tokenPath = join(options.dataDirectory, "browser-session-token");
   let token: string;
@@ -77,6 +77,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
   const expectedOrigin = `http://${expectedHost}`;
   const origins = new Set([expectedOrigin, ...(options.host === "127.0.0.1" || options.host === "localhost" ? [`http://127.0.0.1:${options.port}`, `http://localhost:${options.port}`] : [])]);
   let discoveryReady = false;
+  let stopRequested = false, activeMutations = 0;
   if (options.ownerToken) {
     try {
       const [credential, owner] = await Promise.all([readDaemonOwnerCredential(options.dataDirectory), currentOwner()]);
@@ -85,7 +86,12 @@ export async function createLocalServer(service: ApplicationService, options: { 
   }
 
   const server = createServer((request, response) => {
-    void dispatch(request, response).catch((error: unknown) => sendError(response, error));
+    const path = new URL(request.url ?? "/", expectedOrigin).pathname;
+    const countedMutation = request.method !== "GET" && path !== "/api/v1/daemon/stop";
+    if (countedMutation) activeMutations++;
+    void dispatch(request, response).catch((error: unknown) => sendError(response, error)).finally(() => {
+      if (countedMutation) activeMutations--;
+    });
   });
 
   async function dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -141,7 +147,23 @@ export async function createLocalServer(service: ApplicationService, options: { 
         sendJson(response, 409, { error: "daemon_epoch_changed：后台已重启或尚未核对，请刷新状态后检查操作回执，再决定是否重新提交" }); return;
       }
     }
+    if (stopRequested && request.method !== "GET" && url.pathname !== "/api/v1/daemon/stop") {
+      sendJson(response, 503, { error: "daemon_stopping：后台已接受停止请求，不再接收新操作" }); return;
+    }
     const parts = url.pathname.split("/").filter(Boolean).slice(2);
+    if (request.method === "POST" && url.pathname === "/api/v1/daemon/stop") {
+      const body = await readJsonBody(request);
+      if (body.confirmed !== true) { sendJson(response, 400, { error: "daemon_stop_confirmation_required：停止后台需要明确确认" }); return; }
+      if (body.expectedEpoch !== service.epoch) { sendJson(response, 409, { error: "daemon_epoch_changed：后台实例已变化，请刷新状态后重新确认" }); return; }
+      if (stopRequested) { sendJson(response, 409, { error: "daemon_stopping：后台已接受停止请求" }); return; }
+      if (activeMutations > 0) { sendJson(response, 409, { error: "daemon_busy：仍有写操作正在处理；请稍后重试", activeMutations }); return; }
+      const assessment = service.daemonStopAssessment();
+      if (!assessment.canStop) { sendJson(response, 409, { error: "daemon_busy：仍有运行中的操作；请等待完成或先处理任务", ...assessment }); return; }
+      stopRequested = true;
+      sendJson(response, 202, { accepted: true, status: "stopping", epoch: service.epoch });
+      response.once("finish", () => options.requestShutdown?.());
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/v1/native-picker") {
       const body = await readJsonBody(request);
       if (body.kind !== "directory" && body.kind !== "files") throw new Error("native_picker_kind_invalid");
