@@ -2082,6 +2082,31 @@ it("publishes the current tool page and open foldout state to the React Attempt 
   expect(h.element("attempt-tools-page").textContent).toContain("第 2 / 2 页");
 });
 
+it("publishes the filtered raw-event page to the React Attempt raw event view", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  h.w.tokenCouponAttemptRawEvents = { render(model: any) { received = model; } } as any;
+  h.element("attempt-raw").scrollTop = 37;
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-raw",
+      attempt: { runnerId: "codex", status: "succeeded" },
+      messages: new Map(), finalText: "", textStream: "", semanticMessages: false,
+      tools: [], raw: Array.from({ length: 16 }, (_, index) => ({ sequence: index + 1, type: index === 15 ? "runner.output" : "tool.completed", payload: index === 15 ? { stream: "stderr", text: "diagnostic" } : { summary: "event-" + (index + 1) } })),
+      toolsPage: 0, rawPage: 1, notice: "", hasMore: false,
+    };
+    renderAttemptContent();
+  `);
+  expect(received.lines).toEqual(['{"sequence":16,"type":"runner.output","payload":{"stream":"stderr","text":"diagnostic"}}']);
+  expect(h.element("attempt-raw-page").textContent).toContain("第 2 / 2 页");
+  expect(h.element("attempt-raw").scrollTop).toBe(37);
+
+  h.element("attempt-event-filter").value = "stderr";
+  h.w.eval("renderAttemptContent()");
+  expect(received.lines).toHaveLength(1);
+  expect(h.element("attempt-raw-page").textContent).toContain("第 1 / 1 页");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

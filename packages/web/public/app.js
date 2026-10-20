@@ -3290,7 +3290,9 @@ function renderAttemptContent() {
   }
   const filter = $("#attempt-event-filter").value.trim();
   const raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
-  $("#attempt-raw").textContent = activityPage(view, "raw", raw).map(event => JSON.stringify(event)).join("\n");
+  const rawLines = activityPage(view, "raw", raw).map(event => JSON.stringify(event));
+  if (globalThis.tokenCouponAttemptRawEvents) globalThis.tokenCouponAttemptRawEvents.render({ lines: rawLines });
+  else $("#attempt-raw").textContent = rawLines.join("\n");
   tools.scrollTop = toolScroll; $("#attempt-raw").scrollTop = rawScroll;
   show($("#attempt-more"), !!view.hasMore);
 }

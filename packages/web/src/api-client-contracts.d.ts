@@ -340,6 +340,10 @@ export type AttemptToolsModel = { tools: AttemptToolView[]; openEventKeys: strin
 export type AttemptToolsBridge = {
   render(model: AttemptToolsModel): void;
 };
+export type AttemptRawEventsModel = { lines: string[] };
+export type AttemptRawEventsBridge = {
+  render(model: AttemptRawEventsModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -368,4 +372,5 @@ declare global {
   var tokenCouponAttemptOverview: AttemptOverviewBridge | undefined;
   var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
+  var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
 }
