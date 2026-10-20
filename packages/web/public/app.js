@@ -2324,6 +2324,7 @@ function renderPlanEditControls() {
 function closePlanEditor() {
   state.editingPlan = false; state.editBase = null; state.editedPlanHash = "";
   globalThis.tokenCouponPlanDraftEditor?.unmount($("#plan-text-editor"));
+  globalThis.tokenCouponPlanDiff?.unmount($("#plan-diff"));
   show($("#plan-diff"), false); renderPlanEditControls();
 }
 function openPlanEditor() {
@@ -2420,10 +2421,15 @@ function previewPlanDiff() {
     const changed = [];
     for (const [id, entry] of newMap) {
       const before = oldMap.get(id); if (!before) continue;
-      for (const key of Object.keys(names)) if (JSON.stringify(entry.task[key] ?? null) !== JSON.stringify(before.task[key] ?? null)) changed.push(`任务 ${id} · ${names[key]}`);
+      for (const key of Object.keys(names)) if (JSON.stringify(entry.task[key] ?? null) !== JSON.stringify(before.task[key] ?? null)) changed.push({ taskId: id, label: names[key] });
     }
-    box.textContent = `草案差异 · ${edited.title !== old.title ? `计划标题：${old.title} → ${edited.title}\n` : ""}修改 ${changed.length} 项 / 新增 ${added.length} 项 / 删除 ${removed.length} 项\n${changed.length ? changed.map(item => `• ${item}`).join("\n") : "正文无字段修改"}${added.length ? `\n新增任务：${added.join("、")}` : ""}${removed.length ? `\n删除任务：${removed.join("、")}` : ""}`;
-  } catch (error) { box.textContent = `JSON 校验失败：${error.message}`; }
+    const model = { titleChange: edited.title !== old.title ? { from: old.title, to: edited.title } : undefined, changed, addedTasks: added, removedTasks: removed };
+    if (globalThis.tokenCouponPlanDiff) { globalThis.tokenCouponPlanDiff.render(box, model); return; }
+    box.textContent = `草案差异 · ${edited.title !== old.title ? `计划标题：${old.title} → ${edited.title}\n` : ""}修改 ${changed.length} 项 / 新增 ${added.length} 项 / 删除 ${removed.length} 项\n${changed.length ? changed.map(item => `• 任务 ${item.taskId} · ${item.label}`).join("\n") : "正文无字段修改"}${added.length ? `\n新增任务：${added.join("、")}` : ""}${removed.length ? `\n删除任务：${removed.join("、")}` : ""}`;
+  } catch (error) {
+    if (globalThis.tokenCouponPlanDiff) globalThis.tokenCouponPlanDiff.render(box, { changed: [], addedTasks: [], removedTasks: [], error: error.message });
+    else box.textContent = `JSON 校验失败：${error.message}`;
+  }
 }
 function renderReview() {
   const plan = state.planning, review = plan.review, box = $("#review-view");

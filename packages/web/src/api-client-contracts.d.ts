@@ -131,6 +131,14 @@ export type PlanDraftEditorBridge = {
   setDisabled(mount: HTMLElement, disabled: boolean): void;
   unmount(mount: HTMLElement): void;
 };
+export type PlanDiffModel = {
+  titleChange?: { from: string; to: string };
+  changed: { taskId: string; label: string }[];
+  addedTasks: string[];
+  removedTasks: string[];
+  error?: string;
+};
+export type PlanDiffBridge = { render(mount: HTMLElement, model: PlanDiffModel): void; unmount(mount: HTMLElement): void };
 export type PlanOverviewModel = {
   stage: string;
   stageTone: string;
@@ -565,6 +573,7 @@ declare global {
   var tokenCouponReplyComposer: ReplyComposerBridge | undefined;
   var tokenCouponPlanDraftView: PlanDraftViewBridge | undefined;
   var tokenCouponPlanDraftEditor: PlanDraftEditorBridge | undefined;
+  var tokenCouponPlanDiff: PlanDiffBridge | undefined;
   var tokenCouponPlanOverview: PlanOverviewBridge | undefined;
   var tokenCouponPlanTabs: PlanTabsBridge | undefined;
   var tokenCouponConversationView: ConversationViewBridge | undefined;
