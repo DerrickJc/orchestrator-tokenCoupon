@@ -2644,9 +2644,17 @@ function updateTaskDag(recenter = false) {
   const viewport = $("#dag-viewport"), x = viewport.scrollLeft, y = viewport.scrollTop;
   Object.assign(view, { focusId: graph.focusId, width: graph.width, height: graph.height, focusX: graph.focusX, focusY: graph.focusY });
   viewport.replaceChildren(graph.svg); setTaskDagZoom(view.zoom);
-  const select = $("#dag-focus"); const optionsSignature = JSON.stringify(state.dagNodes);
-  if (select.dataset.signature !== optionsSignature) { select.dataset.signature = optionsSignature; select.replaceChildren(...state.dagNodes.map(node => new Option(`${dagStatusIcon(node.status)} ${node.title} · ${statuses[node.status] || node.status}`, node.id))); }
-  select.value = graph.focusId;
+  const focusOptions = state.dagNodes.map(node => ({ id: node.id, label: `${dagStatusIcon(node.status)} ${node.title} · ${statuses[node.status] || node.status}` }));
+  if (globalThis.tokenCouponDagFocusSelector) {
+    globalThis.tokenCouponDagFocusSelector.render(focusOptions, graph.focusId, taskId => {
+      if (!state.dagView) return;
+      state.dagView.focusId = taskId; state.dagView.autoFocus = false; updateTaskDag(true);
+    });
+  } else {
+    const select = $("#dag-focus"); const optionsSignature = JSON.stringify(state.dagNodes);
+    if (select.dataset.signature !== optionsSignature) { select.dataset.signature = optionsSignature; select.replaceChildren(...focusOptions.map(option => new Option(option.label, option.id))); }
+    select.value = graph.focusId;
+  }
   $("#dag-scope").textContent = `聚焦：${byTitle(state.dagNodes, graph.focusId)} · 前后 ${view.depth} 层 · 显示 ${graph.shown}/${state.dagNodes.length} 项；远端任务已折叠。${graph.shown >= 21 ? "已达到单视图 21 项上限，请切换聚焦任务查看其他分支。" : ""}${graph.invalid ? "依赖记录不完整或存在环，请核对草案。" : ""}`;
   $("#dag-expand").disabled = graph.shown === state.dagNodes.length || graph.shown >= 21 || view.depth >= 8;
   $("#dag-collapse").disabled = view.depth <= 1;
@@ -4587,7 +4595,7 @@ $("#confirm-action-dialog").addEventListener("cancel", event => { event.preventD
 if (!globalThis.tokenCouponSessionContinue) $("#session-continue").addEventListener("click", openSessionContinue);
 $("#session-continue-confirm").addEventListener("click", () => void confirmSessionContinue());
 $("#session-continue-cancel").addEventListener("click", () => { $("#session-continue-dialog").close(); state.continueContext = null; });
-$("#dag-focus").addEventListener("change", () => { if (!state.dagView) return; state.dagView.focusId = $("#dag-focus").value; state.dagView.autoFocus = false; updateTaskDag(true); });
+if (!globalThis.tokenCouponDagFocusSelector) $("#dag-focus").addEventListener("change", () => { if (!state.dagView) return; state.dagView.focusId = $("#dag-focus").value; state.dagView.autoFocus = false; updateTaskDag(true); });
 $("#dag-current").addEventListener("click", () => { if (!state.dagView) return; state.dagView.autoFocus = true; state.dagView.depth = 2; updateTaskDag(true); });
 $("#dag-expand").addEventListener("click", () => { if (!state.dagView) return; state.dagView.depth++; updateTaskDag(true); fitTaskDag(); });
 $("#dag-collapse").addEventListener("click", () => { if (!state.dagView) return; state.dagView.depth = Math.max(1, state.dagView.depth - 1); updateTaskDag(true); fitTaskDag(); });

@@ -442,6 +442,10 @@ export type SystemPolicyRoutingBridge = {
   render(mount: HTMLElement, model: SystemPolicyRoutingModel, callbacks: SystemPolicyRoutingCallbacks): void;
   unmount(mount: HTMLElement): void;
 };
+export type DagFocusOption = { id: string; label: string };
+export type DagFocusSelectorBridge = {
+  render(options: DagFocusOption[], selectedId: string, onChange: (taskId: string) => void): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -544,6 +548,7 @@ declare global {
   var tokenCouponAgentSelectionControls: AgentSelectionControlsBridge | undefined;
   var tokenCouponRuntimeModelControls: RuntimeModelControlsBridge | undefined;
   var tokenCouponSystemPolicyRouting: SystemPolicyRoutingBridge | undefined;
+  var tokenCouponDagFocusSelector: DagFocusSelectorBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;

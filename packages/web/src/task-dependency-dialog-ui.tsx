@@ -8,7 +8,7 @@ export function TaskDependencyDialog() {
       <button id="dag-fit" type="button" className="button button-quiet">适应窗口</button>
       <button id="dag-reset" type="button" className="button button-quiet">原始大小</button>
       <button id="dag-current" type="button" className="button button-quiet">定位运行任务</button>
-      <label className="dag-focus-label">聚焦任务<select id="dag-focus" aria-label="聚焦任务"></select></label>
+      <div id="dag-focus-root"></div>
       <button id="dag-expand" type="button" className="button button-quiet">展开一层</button>
       <button id="dag-collapse" type="button" className="button button-quiet">收起远端</button>
     </div>

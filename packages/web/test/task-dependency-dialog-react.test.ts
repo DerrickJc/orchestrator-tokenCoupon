@@ -21,7 +21,7 @@ it("renders the full DAG dialog controls and its native DOM integration points",
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   act(() => root?.render(createElement(TaskDependencyDialog)));
 
-  for (const id of ["dag-title", "dag-close", "dag-zoom-out", "dag-zoom-value", "dag-zoom-in", "dag-fit", "dag-reset", "dag-current", "dag-focus", "dag-expand", "dag-collapse", "dag-scope", "dag-viewport"]) {
+  for (const id of ["dag-title", "dag-close", "dag-zoom-out", "dag-zoom-value", "dag-zoom-in", "dag-fit", "dag-reset", "dag-current", "dag-focus-root", "dag-expand", "dag-collapse", "dag-scope", "dag-viewport"]) {
     expect(host.querySelector(`#${id}`)).not.toBeNull();
   }
   expect(host.querySelector(".dag-legend")?.textContent).toContain("前置任务 → 当前任务");
