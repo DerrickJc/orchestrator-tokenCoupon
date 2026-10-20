@@ -359,7 +359,7 @@ packages/
 
 既有 `/api/v1` 兼容演进。当前 health 也受本机 Cookie 保护，桌面发现不能假设已有匿名版本接口。拟新增或扩展的握手信息包括：应用版本、构建标识、协议版本、能力版本、实例身份、epoch、运行 profile 和环境；敏感信息与业务状态在认证后读取。
 
-健康应答只用于定位候选服务，桌面发现还会请求 `/api/v1/daemon-challenge` 并核验受保护的 owner 身份。challenge 使用 256 位随机 nonce，HMAC 覆盖请求地址/端口、进程 PID/启动时间、profile、协议与 daemon epoch；Node 主进程通过 Node 专用 client 入口读取 `daemon-owner.json`，检查当前进程身份和 owner 文件访问边界，再验证签名。Linux/macOS 检查文件所有者、0600 权限和目录链；Windows 检查 owner 文件 ACL 及可替换它的父目录 ACL。权限无法确认时 capability 为 0，挑战端点不可用，调用方不得附着。challenge 是只读身份核验，不接受命令；它不替代 Cookie/Origin API 认证。不能因某个 4177 端口返回 200 就信任它，也不能因连接失败就杀进程或创建第二个 owner。
+健康应答只用于定位候选服务，桌面发现还会请求 `/api/v1/daemon-challenge` 并核验受保护的 owner 身份。challenge 使用 256 位随机 nonce，HMAC 覆盖请求地址/端口、进程 PID/启动时间、profile、协议与 daemon epoch；Node 主进程通过 Node 专用 client 入口读取 `daemon-owner.json`，检查当前进程身份和 owner 文件访问边界，再验证签名。Linux 检查文件所有者、0600 权限和目录链；Windows 检查 owner 文件 ACL 及可替换它的父目录 ACL。权限无法确认时 capability 为 0，挑战端点不可用，调用方不得附着。challenge 是只读身份核验，不接受命令；它不替代 Cookie/Origin API 认证。不能因某个 4177 端口返回 200 就信任它，也不能因连接失败就杀进程或创建第二个 owner。
 
 业务命令沿用版本/哈希、请求身份和已有幂等键；接口包只对有明确幂等契约的操作使用该能力。写请求响应丢失时先查询 job/操作回执，不自动重放批准、重试、整合或回答。
 
@@ -953,7 +953,7 @@ Linux 定向 Runner/诊断/目录回归 48 项通过。原生 Windows Node v20.2
 
 SSE hello 返回保留范围及 epoch/cursor/window 重置原因。页面只在初始路由完成后建立订阅；重连重新读取能力、目录、当前计划和 Attempt，保留本地草案/回答/模型输入，不自动重放批准、重试、启动或回答。客户端阻止旧 health 响应覆盖新实例身份。新增 HTTP、客户端和页面回归，覆盖未经授权拒绝、协议/实例不匹配、事件窗口丢失、旧后台兼容、响应丢失只提交一次及重启后未保存编辑保留。
 
-类型检查、生产构建及完整仓库回归通过：118 个文件、775 项测试。此处不代替 Electron 发现挑战、完整领域 DTO、安装升级或 Windows 完整后台验收。
+类型检查、生产构建及完整仓库回归通过：118 个文件、775 项测试。此处不代替 Electron main 附着流程、完整写命令 DTO、安装升级或 Windows 完整后台验收。
 
 ### 13.63 真实浏览器回归与固定字段名称（2026-10-20）
 
@@ -991,13 +991,25 @@ Codex、CLI 模式及目录/诊断复用该启动边界；Claude managed 通过 
 
 Linux 定向测试覆盖成功签名、nonce/origin 混淆、宽权限文件和可写 profile 拒绝；原生 Windows Node 22.12.0 在用户私有目录下完成同一完整 Mock HTTP 闭环，`discoveryProof` 通过。共享目录 ACL 被拒绝的测试也验证了失败时 capability 关闭。Vitest 默认并发限制为 4，避免在高核数宿主上同时启动 122 个 worker 导致测试超时；完整回归通过 122 个测试文件（779 项通过、1 项跳过）。测试不接真实模型，不代替不同 Windows 账户、受限组织策略及安装版 ACL 矩阵验收。
 
+### 13.67 共享领域读取 DTO 与客户端门面（2026-10-20）
+
+`packages/client/src/contracts.ts` 增加浏览器可用的 JSON 契约，覆盖工作区、规划草案/需求/决策、审查、Session/Task/Attempt、Job、SSE 事件、待处理交互、设置、模型目录、任务产物与 Session 诊断。`createClient().api<T>()` 保留原有低层调用，并新增 `client.domain` 类型化读取门面，统一生成经过编码的相对 API 路径，沿用原握手、epoch、Cookie 和禁止自动重放写操作的 HTTP transport。
+
+daemon 的 `planningView` 和 `listPlannings` 现在声明 `PlanningViewDto` 返回类型，MCP planning/session 查询直接消费字段契约，不再把该响应整体当作 `Record<string, unknown>`。契约仅用于 TypeScript 编译期检查，不引入运行时校验器，也没有 Node/core 运行时依赖；写命令请求 DTO、Electron main/preload 发现与附着仍待实现。新增客户端回归验证握手状态共用、领域读取与路径编码。完整类型检查与构建通过；全量回归通过 123 个测试文件（781 项通过、1 项跳过）。
+
+### 13.68 共享读取契约与 Session 恢复诊断脱敏（2026-10-20）
+
+Session 诊断与恢复回执通过 allowlist 映射到浏览器 DTO，不再输出锁记录中的 owner token、token 派生 identity、主机名或进程启动标识。恢复 Job 的新结果会在保存前使用安全形状；内存查询、磁盘历史记录和幂等重放也在返回边界再次脱敏，避免升级前落盘的旧记录泄漏内部身份字段。新增回归覆盖诊断、恢复回执和历史 Job 结果。
+
+类型检查、生产构建、定向回归通过；全量仓库回归通过 123 个测试文件（783 项通过、1 项跳过）。沙箱内的首次全量测试因禁止 Git/Runner 子进程和 loopback 监听而出现 EPERM，未作为产品失败结论；在获批的非沙箱环境重跑后全部通过。
+
 ## 14. 剩余实施台账（2026-10-20）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
 
 | 范围 | 后续工作 | 验证边界 |
 | --- | --- | --- |
-| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局和受保护 daemon 挑战协议已完成；继续完整领域 DTO、Electron main 的发现/附着流程和发布构建身份 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
+| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、主要只读 DTO 与 Session 诊断脱敏已完成；继续写命令 DTO、Electron main 的发现/附着流程和发布构建身份 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
 | D：桌面预览 | Electron main/preload、后台发现、托盘、选择器、安装资源 | 支持矩阵内真实 Windows 无开发环境闭环；不能用 WSL 结果代替 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |

@@ -11,6 +11,7 @@ import { readAttemptInfo, readAttemptEvents, readAttemptDiagnosticEvidence } fro
 import { AttemptDiagnosticStore, type AttemptDiagnosticRecord } from "./attempt-diagnostics.js";
 import { readTaskResults } from "./task-results.js";
 import { observeSession } from "./session-observation.js";
+import { publicJobRecord, publicSessionDiagnosis, publicSessionRecovery } from "./session-diagnosis.js";
 import { ExternalPlanningService } from "./external-planning.js";
 import { ModelCatalog, discoverPlannerModels, type ModelCatalogResult } from "./model-catalog.js";
 import { planningWorkflow } from "./planning-workflow.js";
@@ -29,6 +30,7 @@ import type {
   ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
   RunnerOutput, TaskDefinition, TaskRunnerFactory, TaskRunnerFactoryOptions,
 } from "@token-coupon/core";
+import type { ExternalOperationSummaryDto, HandoffSummaryDto, PlanningViewDto, SessionDiagnosisDto } from "@token-coupon/client";
 
 export interface WorkspaceEntry { workspaceId: string; path: string; label: string; addedAt: string; }
 export interface JobRecord {
@@ -497,64 +499,69 @@ export class ApplicationService {
     return value;
   }
 
-  async listPlannings(workspaceId: string): Promise<unknown[]> {
+  async listPlannings(workspaceId: string): Promise<PlanningViewDto[]> {
     const workspace = await this.getWorkspace(workspaceId);
     const snapshots = await new PlannerStore(workspace.path).list();
     return Promise.all(snapshots.map((snapshot) => this.planningView(workspace, snapshot.planningId)));
   }
 
-  async planningView(workspace: WorkspaceEntry, planningId: string): Promise<unknown> {
+  async planningView(workspace: WorkspaceEntry, planningId: string): Promise<PlanningViewDto> {
     const loaded = await loadPlannerConversation(planningId, workspace.path);
-    let session: unknown;
+    let session: PlanningViewDto["session"];
     if (loaded.snapshot.execution) {
       try {
         const record = await new SessionStore(workspace.path).load(loaded.snapshot.execution.sessionId);
         const observation = await observeSession(workspace.path, record.snapshot);
         const request = await new SessionStore(workspace.path).readControlRequest(record.snapshot.sessionId);
         const pendingControl = request && request.executionId === record.snapshot.executionId && ["running", "pausing"].includes(record.snapshot.status) && !(record.snapshot.controlState?.requestId === request.requestId && record.snapshot.controlState.acknowledgedAt) ? request : undefined;
-        session = { ...record.snapshot, ...(pendingControl ? { pendingControl } : {}), models: await readSessionModels(workspace.path, record.snapshot.sessionId), savedStatus: record.snapshot.status, status: observation.status, health: observation.health, tasks: await Promise.all(record.snapshot.tasks.map(async task => {
+        const sessionValue = { ...record.snapshot, ...(pendingControl ? { pendingControl } : {}), models: await readSessionModels(workspace.path, record.snapshot.sessionId), savedStatus: record.snapshot.status, status: observation.status, health: observation.health, tasks: await Promise.all(record.snapshot.tasks.map(async task => {
           const latestId = task.activeAttemptId ?? task.attempts.at(-1)?.attemptId;
           const currentAttempt = latestId ? await readAttemptInfo(workspace.path, latestId).catch(() => null) : null;
           const definition = record.plan.tasks.find(entry => entry.task.id === task.taskId);
           const status = observation.tasks.get(task.taskId) ?? task.status;
-          return { ...task, savedStatus: task.status, status, title: definition?.task.title, dependsOn: definition?.dependsOn, execution: definition ? taskWithExecutionSelection(definition.task, record.snapshot.executionSelection).execution : undefined,
+          return { ...task, savedStatus: task.status, status,
+            ...(definition ? { title: definition.task.title, dependsOn: definition.dependsOn, execution: taskWithExecutionSelection(definition.task, record.snapshot.executionSelection).execution } : {}),
             currentAttempt: currentAttempt && status !== task.status && ["created", "running"].includes(currentAttempt.status) ? { ...currentAttempt, savedStatus: currentAttempt.status, status, reason: observation.health.message } : currentAttempt };
         })) };
-        session = JSON.parse(sanitizeOutput(JSON.stringify(session)));
+        session = JSON.parse(sanitizeOutput(JSON.stringify(sessionValue))) as PlanningViewDto["session"];
       }
       catch (error) { session = { status: "unavailable", error: safeError(error) }; }
     }
     const review = loaded.review ? { reviewId: loaded.review.reviewId, draftRevision: loaded.review.draftRevision, status: loaded.review.status, summary: loaded.review.summary,
-      findings: loaded.review.findings, resolutions: loaded.review.resolutions, ...(loaded.review.reviewerConfig ? { reviewerConfig: loaded.review.reviewerConfig } : {}), ...(loaded.review.reviewerReportedModel ? { reviewerReportedModel: loaded.review.reviewerReportedModel } : {}), current: !!loaded.reviewIsCurrent } : undefined;
-    const handoffs = await this.external.queryHandoffs(workspace.workspaceId, planningId);
-    const externalOperations = await this.external.list(workspace.workspaceId, planningId);
+      findings: loaded.review.findings, ...(loaded.review.resolutions ? { resolutions: loaded.review.resolutions } : {}), ...(loaded.review.reviewerConfig ? { reviewerConfig: loaded.review.reviewerConfig } : {}), ...(loaded.review.reviewerReportedModel ? { reviewerReportedModel: loaded.review.reviewerReportedModel } : {}), current: !!loaded.reviewIsCurrent } : undefined;
+    const handoffs = await this.external.queryHandoffs(workspace.workspaceId, planningId) as HandoffSummaryDto[];
+    const externalOperations = await this.external.list(workspace.workspaceId, planningId) as ExternalOperationSummaryDto[];
     const history = (await new ReviewStore(workspace.path).list(planningId)).filter(item => item.status === "succeeded" && item.reviewId !== review?.reviewId).slice(-3)
-      .map(item => ({ reviewId: item.reviewId, draftRevision: item.draftRevision, summary: item.summary, findings: item.findings, current: false }));
+      .map(item => ({ reviewId: item.reviewId, draftRevision: item.draftRevision, summary: item.summary, findings: item.findings, current: false as const }));
     const approvalHistory = [...this.jobs.values()].filter(job => job.workspaceId === workspace.workspaceId && job.kind === "planning.approve" && job.status === "succeeded" && (job.result as { planningId?: string } | undefined)?.planningId === planningId)
-      .slice(-3).map(job => ({ ...(job.result as { draftRevision: number }), recordedAt: job.updatedAt, historical: true }));
+      .slice(-3).map(job => ({ ...(job.result as { draftRevision: number }), recordedAt: job.updatedAt, historical: true as const }));
+    const localOperation = [...this.jobs.values()].filter(job => job.workspaceId === workspace.workspaceId && job.planningId === planningId && job.progress).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    const title = loaded.draft?.plan.title ?? loaded.snapshot.messages.find(item => item.role === "user")?.content.slice(0, 80);
     const workflow = planningWorkflow({ revision: loaded.snapshot.revision, status: loaded.snapshot.status,
       ...(loaded.draft ? { draft: loaded.draft } : {}), approval: loaded.snapshot.approval,
       ...(review ? { review } : {}), ...(loaded.reviewReadError ? { reviewReadError: loaded.reviewReadError } : {}),
-      ...(session ? { session: session as { status: string } } : {}), interactions: this.listInteractions(workspace.workspaceId, planningId),
+      ...(session ? { session: { status: session.status } } : {}), interactions: this.listInteractions(workspace.workspaceId, planningId),
       handoffs: handoffs as Parameters<typeof planningWorkflow>[0]["handoffs"], externalOperations: externalOperations as Parameters<typeof planningWorkflow>[0]["externalOperations"] });
     return {
       planningId: loaded.snapshot.planningId, status: loaded.snapshot.status, revision: loaded.snapshot.revision,
       createdAt: loaded.snapshot.createdAt,
-      localOperation: [...this.jobs.values()].filter(job => job.workspaceId === workspace.workspaceId && job.planningId === planningId && job.progress).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0],
+      ...(localOperation ? { localOperation } : {}),
       ...(loaded.snapshot.sourcePlanning ? { sourcePlanning: loaded.snapshot.sourcePlanning } : {}),
       workspace: { workspaceId: workspace.workspaceId, label: workspace.label },
       config: { provider: loaded.snapshot.config.provider, model: loaded.snapshot.config.model },
-      executionDefaults: loaded.snapshot.executionDefaults, planningAssessment: loaded.snapshot.planningAssessment,
-      requirements: loaded.snapshot.requirements, confirmationState: loaded.snapshot.confirmationState,
+      executionDefaults: loaded.snapshot.executionDefaults,
+      ...(loaded.snapshot.planningAssessment ? { planningAssessment: loaded.snapshot.planningAssessment } : {}),
+      ...(loaded.snapshot.requirements ? { requirements: loaded.snapshot.requirements } : {}), ...(loaded.snapshot.confirmationState ? { confirmationState: loaded.snapshot.confirmationState } : {}),
       messages: loaded.snapshot.messages.slice(-40), turns: loaded.snapshot.turns.slice(-20),
-      draft: loaded.draft, draftChanged: loaded.draft ? loaded.draft.draftRevision : null,
+      ...(loaded.draft ? { draft: loaded.draft } : {}), draftChanged: loaded.draft ? loaded.draft.draftRevision : null,
       verificationTasks: loaded.draft?.plan.tasks.map(entry => {
         try { validateVerificationTask(loaded.draft!.plan, entry.task.id); return { taskId: entry.task.id, title: entry.task.title, valid: true }; }
         catch (error) { return { taskId: entry.task.id, title: entry.task.title, valid: false, reason: safeError(error) }; }
       }) ?? [],
-      review, reviewReadError: loaded.reviewReadError, reviewHistory: history, approval: loaded.snapshot.approval, approvalHistory, workflow, execution: loaded.snapshot.execution, session,
+      ...(review ? { review } : {}), ...(loaded.reviewReadError ? { reviewReadError: loaded.reviewReadError } : {}), reviewHistory: history, approval: loaded.snapshot.approval, approvalHistory, workflow, execution: loaded.snapshot.execution,
+      ...(session ? { session } : {}),
       interactions: this.listInteractions(workspace.workspaceId, loaded.snapshot.planningId),
-      title: loaded.draft?.plan.title ?? loaded.snapshot.messages.find((item) => item.role === "user")?.content.slice(0, 80),
+      ...(title ? { title } : {}),
       handoffs, externalOperations,
     };
   }
@@ -574,7 +581,7 @@ export class ApplicationService {
       const existing = JSON.parse(await readFile(idempotencyPath, "utf8")) as { jobId: string; requestHash: string };
       if (existing.requestHash !== requestHash) throw new Error("idempotency_conflict：相同 requestKey 已用于不同请求");
       const prior = this.jobs.get(existing.jobId) ?? JSON.parse(await readFile(join(this.jobsDirectory, `${existing.jobId}.json`), "utf8")) as JobRecord;
-      return prior;
+      return publicJobRecord(prior);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -588,7 +595,7 @@ export class ApplicationService {
       const existing = JSON.parse(await readFile(idempotencyPath, "utf8")) as { jobId: string; requestHash: string };
       if (existing.requestHash !== requestHash) throw new Error("idempotency_conflict：同一个 requestKey 已用于不同请求");
       const concurrent = this.jobs.get(existing.jobId);
-      if (concurrent) return concurrent;
+      if (concurrent) return publicJobRecord(concurrent);
       throw new Error("idempotency_in_progress：相同请求正在另一个请求处理中，请稍后查询");
     }
     this.jobs.set(job.jobId, job);
@@ -635,9 +642,9 @@ export class ApplicationService {
   async getJob(jobId: string): Promise<JobRecord> {
     if (!/^[0-9a-f-]{36}$/i.test(jobId)) throw new Error("job_not_found：操作 ID 无效");
     const value = this.jobs.get(jobId);
-    if (value) return value;
+    if (value) return publicJobRecord(value);
     const path = join(this.jobsDirectory, `${jobId}.json`);
-    return JSON.parse(await readFile(path, "utf8")) as JobRecord;
+    return publicJobRecord(JSON.parse(await readFile(path, "utf8")) as JobRecord);
   }
 
   async cancelJob(jobId: string, workspaceId: string): Promise<JobRecord> {
@@ -874,11 +881,11 @@ export class ApplicationService {
     });
   }
 
-  async sessionDiagnosis(workspaceId: string, planningId: string): Promise<unknown> {
+  async sessionDiagnosis(workspaceId: string, planningId: string): Promise<SessionDiagnosisDto> {
     const workspace = await this.getWorkspace(workspaceId);
     const loaded = await loadPlannerConversation(planningId, workspace.path);
     if (!loaded.snapshot.execution) throw new Error("session_not_found：规划尚未创建执行 Session");
-    return diagnoseSession(workspace.path, loaded.snapshot.execution.sessionId);
+    return publicSessionDiagnosis(await diagnoseSession(workspace.path, loaded.snapshot.execution.sessionId));
   }
 
   async controlSession(workspaceId: string, planningId: string, requestKey: string, kind: "pause" | "cancel"): Promise<JobRecord> {
@@ -901,7 +908,7 @@ export class ApplicationService {
     return this.submit(workspaceId, "session.recover", requestKey, { planningId, sessionId: loaded.snapshot.execution.sessionId, confirmedStopped }, async () => {
       const result = await recoverSession({ workspace: workspace.path, sessionId: loaded.snapshot.execution!.sessionId, confirmedStopped });
       await this.publish({ type: "session.recovered", workspaceId, planningId, payload: { recoveryId: result.recoveryId, recovered: result.recovered, diagnosis: result.diagnosis.state } });
-      return result;
+      return publicSessionRecovery(result);
     });
   }
 
@@ -1072,6 +1079,7 @@ function compactResult(value: unknown): unknown {
   return Object.fromEntries(Object.entries(item).filter(([key]) => !["snapshot", "draft", "review", "messages", "context"].includes(key)));
 }
 function safeError(error: unknown): string { return sanitizeOutput(error instanceof Error ? error.message : String(error)).slice(0, 2048); }
+
 function diagnosticModelChoice(runnerId: string, modelId?: string): { runnerId: "codex" | "claude-code"; modelId?: string } {
   if (runnerId !== "codex" && runnerId !== "claude-code") throw new Error("diagnostic_runner_invalid：请选择 Codex 或 Claude Code");
   if (modelId !== undefined && (!modelId.trim() || modelId.length > 200)) throw new Error("diagnostic_model_invalid");
