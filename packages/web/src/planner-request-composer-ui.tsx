@@ -1,12 +1,19 @@
 import { useRef, type KeyboardEvent } from "react";
 
-export type PlannerRequestComposerProps = {
+export type SubmitTextareaProps = {
+  id: string;
+  rows: number;
+  maxLength: number;
+  placeholder: string;
+  ariaLabel: string;
+  ariaDescribedBy?: string;
+  className?: string;
   initialValue: string;
   onValueChange(value: string): void;
   onSubmit(): void;
 };
 
-export function PlannerRequestComposer({ initialValue, onValueChange, onSubmit }: PlannerRequestComposerProps) {
+export function SubmitTextarea({ id, rows, maxLength, placeholder, ariaLabel, ariaDescribedBy, className, initialValue, onValueChange, onSubmit }: SubmitTextareaProps) {
   const composing = useRef(false);
   const recentCompositionEnd = useRef(0);
 
@@ -21,14 +28,14 @@ export function PlannerRequestComposer({ initialValue, onValueChange, onSubmit }
 
   return (
     <textarea
-      id="planner-request-input"
-      className="planner-request-input"
-      rows={4}
-      maxLength={8192}
+      id={id}
+      className={className}
+      rows={rows}
+      maxLength={maxLength}
       defaultValue={initialValue}
-      placeholder="例如：给现有服务增加课程查询接口，先检查项目约定，再补充测试。"
-      aria-label="需求描述"
-      aria-describedby="request-shortcuts"
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
       onChange={event => onValueChange(event.currentTarget.value)}
       onCompositionStart={() => { composing.current = true; }}
       onCompositionEnd={() => {

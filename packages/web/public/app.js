@@ -1942,7 +1942,9 @@ async function confirmBudgetExtension() {
 }
 function renderRequirements() {
   const pending = (state.planning.requirements?.items || []).filter((item) => item.status === "pending");
-  $("#reply-text").placeholder = pending.length ? `还有 ${pending.length} 项需求待澄清，请回答 Planner 的问题` : "回答澄清问题，或补充需求";
+  const replyPlaceholder = pending.length ? `还有 ${pending.length} 项需求待澄清，请回答 Planner 的问题` : "回答澄清问题，或补充需求";
+  $("#reply-text").placeholder = replyPlaceholder;
+  globalThis.tokenCouponReplyComposer?.setPlaceholder(replyPlaceholder);
   const mcp = selectedOperationIsWeb("planning");
   let prepare = $("#prepare-web-planning");
   if (!prepare) {
@@ -3818,14 +3820,14 @@ $("#reply-form").addEventListener("submit", async (event) => {
   if (functionPolicy("planning") && !state.operationRoutingSupported) { showToast("请重启后台并刷新页面，以按设置继续规划。", true); return; }
   if (!await confirmPlanChanges()) return;
   const path = `/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/replies`;
-  state.replying = true; $("#reply-text").disabled = true; renderRequirements();
+  state.replying = true; $("#reply-text").disabled = true; globalThis.tokenCouponReplyComposer?.setDisabled(true); renderRequirements();
   try {
     const planner = policySelection("planning");
     const job = await startJob("提交回复", (requestKey) => api(path, { method: "POST", body: JSON.stringify({ requestKey, message, ...(planner ? { planner } : {}) }) }), true);
-    if (job?.status === "succeeded") $("#reply-text").value = "";
-  } finally { state.replying = false; $("#reply-text").disabled = false; if (state.planning) renderRequirements(); }
+    if (job?.status === "succeeded") { $("#reply-text").value = ""; globalThis.tokenCouponReplyComposer?.setValue(""); }
+  } finally { state.replying = false; $("#reply-text").disabled = false; globalThis.tokenCouponReplyComposer?.setDisabled(false); if (state.planning) renderRequirements(); }
 });
-bindTextareaEnterSubmit($("#reply-text"), () => $("#reply-form").requestSubmit());
+if (!globalThis.tokenCouponReplyComposer) bindTextareaEnterSubmit($("#reply-text"), () => $("#reply-form").requestSubmit());
 $("#review-button").addEventListener("click", async () => {
   if (!state.planning || !await confirmPlanChanges()) return;
   const mode = $("#reviewer-mode")?.value || "planning";

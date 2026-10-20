@@ -2,7 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
-import { PlannerRequestComposer } from "../src/planner-request-composer-ui.js";
+import { SubmitTextarea } from "../src/planner-request-composer-ui.js";
 
 const testGlobals = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 testGlobals.IS_REACT_ACT_ENVIRONMENT = true;
@@ -14,7 +14,16 @@ function mount(onSubmit: () => void, onValueChange: (value: string) => void = ()
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
-  act(() => root?.render(createElement(PlannerRequestComposer, { initialValue: "", onSubmit, onValueChange })));
+  act(() => root?.render(createElement(SubmitTextarea, {
+    id: "planner-request-input",
+    rows: 4,
+    maxLength: 8192,
+    placeholder: "需求描述",
+    ariaLabel: "需求描述",
+    initialValue: "",
+    onSubmit,
+    onValueChange,
+  })));
   return host.querySelector<HTMLTextAreaElement>("#planner-request-input")!;
 }
 

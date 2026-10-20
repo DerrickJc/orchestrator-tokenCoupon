@@ -88,6 +88,11 @@ export type PlannerRequestComposerBridge = {
   focus(): void;
 };
 
+export type ReplyComposerBridge = PlannerRequestComposerBridge & {
+  setPlaceholder(value: string): void;
+  setDisabled(value: boolean): void;
+};
+
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
   var tokenCouponCommandPalette: CommandPaletteBridge | undefined;
@@ -95,4 +100,5 @@ declare global {
   var tokenCouponPlanningSwitcher: PlanningSwitcherBridge | undefined;
   var tokenCouponReviewView: ReviewViewBridge | undefined;
   var tokenCouponPlannerRequestComposer: PlannerRequestComposerBridge | undefined;
+  var tokenCouponReplyComposer: ReplyComposerBridge | undefined;
 }
