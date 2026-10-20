@@ -989,7 +989,7 @@ Codex、CLI 模式及目录/诊断复用该启动边界；Claude managed 通过 
 
 共享 client 增加 Node 专用子路径 `@token-coupon/client/node`：读取 owner 文件前拒绝符号链接/非普通文件；Linux 核验当前用户所有权、0600 模式及目录链；Windows 通过 PowerShell ACL 检查 owner 文件只允许当前用户、SYSTEM 和管理员读取，并检查可替换 profile 的父目录。验证器对比本机 owner 文件、nonce、origin、port、profile、时间窗和 HMAC，再复核 PID 启动时间，PID 重用或未知状态一律拒绝。桌面 main 尚未接入该模块；这完成的是发现协议与 daemon/client 能力，尚不是 Electron 发现 UI。
 
-Linux 定向测试覆盖成功签名、nonce/origin 混淆、宽权限文件和可写 profile 拒绝；原生 Windows Node 22.12.0 在用户私有目录下完成同一完整 Mock HTTP 闭环，`discoveryProof` 通过。共享目录 ACL 被拒绝的测试也验证了失败时 capability 关闭。测试不接真实模型，不代替不同 Windows 账户、受限组织策略及安装版 ACL 矩阵验收。
+Linux 定向测试覆盖成功签名、nonce/origin 混淆、宽权限文件和可写 profile 拒绝；原生 Windows Node 22.12.0 在用户私有目录下完成同一完整 Mock HTTP 闭环，`discoveryProof` 通过。共享目录 ACL 被拒绝的测试也验证了失败时 capability 关闭。Vitest 默认并发限制为 4，避免在高核数宿主上同时启动 122 个 worker 导致测试超时；完整回归通过 122 个测试文件（779 项通过、1 项跳过）。测试不接真实模型，不代替不同 Windows 账户、受限组织策略及安装版 ACL 矩阵验收。
 
 ## 14. 剩余实施台账（2026-10-20）
 
