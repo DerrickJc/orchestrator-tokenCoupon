@@ -3392,6 +3392,7 @@ async function renderInteractions() {
   globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
   globalThis.tokenCouponPendingRunnerQuestions?.unmountWithin(root);
   globalThis.tokenCouponPendingInteractionGuidance?.unmountWithin(root);
+  globalThis.tokenCouponPendingElicitation?.unmountWithin(root);
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
     const card = document.createElement("div"); card.className = "interaction-card";
@@ -3556,6 +3557,21 @@ function appendInteractionGuidance(card, interaction) {
 }
 function renderCodexElicitation(card, interaction) {
   const request = interaction.request, elicitation = request.elicitation || {};
+  if (globalThis.tokenCouponPendingElicitation) {
+    const schema = elicitation.requestedSchema;
+    const mode = elicitation.mode === "url" ? "url" : elicitation.mode === "form" && schema?.properties ? "form" : "unsupported";
+    const mount = document.createElement("div"); mount.className = "elicitation-react-root"; card.append(mount);
+    globalThis.tokenCouponPendingElicitation.render(mount, {
+      mode,
+      url: elicitation.url,
+      schema,
+      onAcceptUrl: () => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "accept" }),
+      onSubmit: content => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "accept", content }),
+      onDecline: () => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "decline" }),
+      onCancel: () => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "cancel" }),
+    });
+    return;
+  }
   if (elicitation.mode === "url") {
     const destination = document.createElement("p"); destination.className = "elicitation-destination";
     let host = "目标网站";

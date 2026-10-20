@@ -722,3 +722,9 @@ React 管理审查摘要、来源/模型信息、问题卡片、依据折叠、�
 将 Codex/Claude Code 请求卡片中的“NO, tell what to do”展开、指导文本输入、空值提示、关闭和提交按钮迁入 React。原应用仍根据请求类型把指导转换为工具拒绝、elicitation 拒绝或 Runner 问题指导，并使用既有交互 API；空指导仍会阻止提交，取消编辑保留已输入文本。刷新卡片时卸载对应 React root。
 
 本次 Web 类型检查、生产构建和 `git diff --check` 通过；指导面板组件、三种请求协议映射、问题回答草稿恢复、审批按钮/文本/摘要、Session 控件及执行页回归共 154 项通过。尚未运行真实浏览器或 Windows 桌面验收；MCP elicitation 表单本身仍由原生 JavaScript 管理。
+
+### 13.24 MCP elicitation 表单迁入 React（2026-10-20）
+
+将 MCP elicitation 的 schema 表单、URL 授权确认和不支持格式提示迁入 React。继续支持枚举/oneOf 下拉框、多选数组、布尔/数字/整数/格式化字符串、必填与范围约束、默认值及原来的 content 类型转换；URL 页面仍使用新标签页并保留 `noopener noreferrer`。原应用只负责将接受/拒绝/取消回调映射到既有 interaction API；交互列表刷新时显式卸载表单 root。
+
+本次 Web 类型检查、生产构建和 `git diff --check` 通过；elicitation schema/URL 组件、三种 action 回调、指导面板、Runner 问题草稿、审批区域和执行页回归共 158 项通过。尚未运行真实浏览器或 Windows 桌面验收。

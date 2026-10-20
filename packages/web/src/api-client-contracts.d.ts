@@ -283,6 +283,41 @@ export type PendingInteractionGuidanceBridge = {
   render(mount: HTMLElement, model: PendingInteractionGuidanceModel): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type PendingElicitationChoice = { value: string; label: string };
+export type PendingElicitationField = {
+  type?: string;
+  title?: string;
+  description?: string;
+  format?: string;
+  enum?: unknown[];
+  enumNames?: string[];
+  oneOf?: { const?: unknown; title?: string }[];
+  items?: { enum?: unknown[]; anyOf?: { const?: unknown; title?: string }[] };
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  minItems?: number;
+  default?: unknown;
+};
+export type PendingElicitationSchema = {
+  required?: string[];
+  properties?: Record<string, PendingElicitationField>;
+};
+export type PendingElicitationMode = "form" | "url" | "unsupported";
+export type PendingElicitationModel = {
+  mode: PendingElicitationMode;
+  url?: string;
+  schema?: PendingElicitationSchema;
+  onAcceptUrl: () => void;
+  onSubmit: (content: Record<string, unknown>) => void;
+  onDecline: () => void;
+  onCancel: () => void;
+};
+export type PendingElicitationBridge = {
+  render(mount: HTMLElement, model: PendingElicitationModel): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -307,4 +342,5 @@ declare global {
   var tokenCouponPendingApprovalDecision: PendingApprovalDecisionBridge | undefined;
   var tokenCouponPendingRunnerQuestions: PendingRunnerQuestionsBridge | undefined;
   var tokenCouponPendingInteractionGuidance: PendingInteractionGuidanceBridge | undefined;
+  var tokenCouponPendingElicitation: PendingElicitationBridge | undefined;
 }

@@ -1990,6 +1990,30 @@ it.each([
   await expect.poll(() => unmounts).toBe(1);
 });
 
+it("routes React elicitation forms and URL confirmation through the existing interaction API", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingElicitation = {
+    render(mount: HTMLElement, model: any) { received = model; mount.textContent = `React ${model.mode}`; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: "react-form", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "elicitation", elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string" } } } } } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received?.mode).toBe("form");
+  received.onSubmit({ token: "local-only" });
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-form", body: { kind: "elicitation", action: "accept", content: { token: "local-only" } } });
+
+  h.setInteractions([{ requestId: "react-url", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "elicitation", elicitation: { mode: "url", url: "https://login.example.test/" } } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received?.mode).toBe("url");
+  received.onAcceptUrl();
+  await expect.poll(() => h.posts.length).toBe(2);
+  expect(h.posts[1]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-url", body: { kind: "elicitation", action: "accept" } });
+  expect(unmounts).toBeGreaterThan(0);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };
