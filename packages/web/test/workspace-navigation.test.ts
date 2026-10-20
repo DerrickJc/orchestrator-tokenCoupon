@@ -2014,6 +2014,32 @@ it("routes React elicitation forms and URL confirmation through the existing int
   expect(unmounts).toBeGreaterThan(0);
 });
 
+it("publishes the current Attempt status and diagnosis callback to the React overview", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let onDiagnose: (() => void) | undefined;
+  h.w.tokenCouponAttemptOverview = { render(model: any, diagnose: () => void) { received = model; onDiagnose = diagnose; } } as any;
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-overview",
+      attempt: { runnerId: "codex", status: "failed", reason: "缺少完成标记", exitCode: 0, reportedModel: "gpt-6.1-sol", reportedModelSource: "codex" },
+      messages: new Map(), textStream: "", finalText: "", semanticMessages: false,
+      tools: [], raw: [], toolsPage: 0, rawPage: 0, notice: "历史日志尚未加载完成。", hasMore: true,
+    };
+    renderAttemptContent();
+  `);
+  expect(received).toMatchObject({
+    state: expect.stringContaining("gpt-6.1-sol"),
+    notice: expect.stringContaining("历史日志尚未加载完成"),
+    outcome: expect.stringContaining("缺少完成标记"),
+    outcomeVisible: true,
+    replyHeading: "模型回复",
+    diagnoseVisible: true,
+  });
+  onDiagnose?.();
+  await expect.poll(() => h.visible("diagnosis-choice-dialog")).toBe(true);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

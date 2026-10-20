@@ -318,6 +318,18 @@ export type PendingElicitationBridge = {
   render(mount: HTMLElement, model: PendingElicitationModel): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type AttemptOverviewModel = {
+  state: string;
+  notice: string;
+  outcome: string;
+  outcomeClass: string;
+  outcomeVisible: boolean;
+  replyHeading: string;
+  diagnoseVisible: boolean;
+};
+export type AttemptOverviewBridge = {
+  render(model: AttemptOverviewModel, onDiagnose: () => void): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -343,4 +355,5 @@ declare global {
   var tokenCouponPendingRunnerQuestions: PendingRunnerQuestionsBridge | undefined;
   var tokenCouponPendingInteractionGuidance: PendingInteractionGuidanceBridge | undefined;
   var tokenCouponPendingElicitation: PendingElicitationBridge | undefined;
+  var tokenCouponAttemptOverview: AttemptOverviewBridge | undefined;
 }

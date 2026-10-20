@@ -3047,7 +3047,7 @@ async function readSelectedAttempt(force = false) {
 }
 function renderAttemptView() { preserveExecutionReading(renderAttemptContent); }
 function ensureAttemptDiagnosticUI() {
-  if (!$("#attempt-diagnose")) {
+  if (!globalThis.tokenCouponAttemptOverview && !$("#attempt-diagnose")) {
     const button = document.createElement("button"); button.id = "attempt-diagnose"; button.type = "button"; button.className = "button button-primary hidden"; button.textContent = "分析原因";
     $("#attempt-diagnostic-actions").append(button); button.addEventListener("click", () => void openAttemptDiagnosis());
   }
@@ -3214,8 +3214,8 @@ function renderAttemptContent() {
   const view = state.attemptView; if (!view) return;
   const a = view.attempt || {}, box = $("#attempt-messages"), scrollTop = box.scrollTop;
   const model = a.reportedModel || view.reportedModel;
-  $("#attempt-state").textContent = `${a.runnerId || "Runner"} / ${model ? reportedModelLabel(model, a.reportedModelSource || view.reportedModelSource) : a.execution?.modelId ? `${a.execution.modelId}（配置模型）` : "实际模型未报告"} · ${statuses[a.status] || a.status || "读取中"}${a.reason ? ` · ${a.reason}` : ""}${a.exitCode === null || a.exitCode === undefined ? "" : ` · 退出码 ${a.exitCode}`}`;
-  $("#attempt-notice").textContent = `${view.notice || ""}${view.hasMore ? " 还有历史内容待加载，当前不是完整记录。" : ""} 有更新时保留当前阅读位置。`;
+  const attemptState = `${a.runnerId || "Runner"} / ${model ? reportedModelLabel(model, a.reportedModelSource || view.reportedModelSource) : a.execution?.modelId ? `${a.execution.modelId}（配置模型）` : "实际模型未报告"} · ${statuses[a.status] || a.status || "读取中"}${a.reason ? ` · ${a.reason}` : ""}${a.exitCode === null || a.exitCode === undefined ? "" : ` · 退出码 ${a.exitCode}`}`;
+  const attemptNotice = `${view.notice || ""}${view.hasMore ? " 还有历史内容待加载，当前不是完整记录。" : ""} 有更新时保留当前阅读位置。`;
   const oldMessages = new Map([...box.querySelectorAll(".attempt-message")].map(message => [message.dataset.messageId, message]));
   const messageAnchor = [...oldMessages.values()].find(message => message.offsetTop + message.offsetHeight > box.scrollTop), anchorOffset = messageAnchor ? messageAnchor.offsetTop - box.scrollTop : 0;
   const messages = [...view.messages].map(([messageId, message]) => ({ ...message, messageId }));
@@ -3229,12 +3229,20 @@ function renderAttemptContent() {
     if (matching >= 0) messages[matching] = { ...messages[matching], text: view.finalText, completed: true, final: true };
     else messages.push({ messageId: "final-result", text: view.finalText, completed: true, final: true });
   }
-  $("#attempt-reply-heading").textContent = ["created", "running"].includes(a.status) ? "模型回复 · 接收中" : "模型回复";
+  const replyHeading = ["created", "running"].includes(a.status) ? "模型回复 · 接收中" : "模型回复";
   const conclusion = executionConclusion(a.status);
-  $("#attempt-outcome").textContent = [conclusion, a.reason, a.exitCode !== undefined && a.exitCode !== null ? `退出码 ${a.exitCode}` : ""].filter(Boolean).join(" · ");
-  $("#attempt-outcome").className = `attempt-outcome ${statusClass(a.status)}`; show($("#attempt-outcome"), !!conclusion);
   const diagnosable = ["failed", "timed_out", "cancelled", "interrupted", "needs_input"].includes(a.status);
-  show($("#attempt-diagnose"), diagnosable);
+  const outcome = [conclusion, a.reason, a.exitCode !== undefined && a.exitCode !== null ? `退出码 ${a.exitCode}` : ""].filter(Boolean).join(" · ");
+  if (globalThis.tokenCouponAttemptOverview) {
+    globalThis.tokenCouponAttemptOverview.render({ state: attemptState, notice: attemptNotice, outcome, outcomeClass: statusClass(a.status), outcomeVisible: !!conclusion, replyHeading, diagnoseVisible: diagnosable }, () => void openAttemptDiagnosis());
+  } else {
+    $("#attempt-state").textContent = attemptState;
+    $("#attempt-notice").textContent = attemptNotice;
+    $("#attempt-reply-heading").textContent = replyHeading;
+    $("#attempt-outcome").textContent = outcome;
+    $("#attempt-outcome").className = `attempt-outcome ${statusClass(a.status)}`; show($("#attempt-outcome"), !!conclusion);
+    show($("#attempt-diagnose"), diagnosable);
+  }
   const orderedMessages = messages.filter(item => item.text.trim()).reverse();
   const retained = new Set(orderedMessages.map(message => message.messageId));
   for (const [id, element] of oldMessages) if (!retained.has(id)) element.remove();
