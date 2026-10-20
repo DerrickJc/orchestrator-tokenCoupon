@@ -9,8 +9,9 @@ import { createMcpHttpHandler } from "./mcp-server.js";
 import type { RemoteMcpConnection } from "./oauth-gateway.js";
 import { browseDirectories } from "./workspace-tools.js";
 import { pickNativePath, nativePickerCapability, normalizePickedPaths, type NativePickerKind, type NativePickerResult } from "./native-picker.js";
-import { APPLICATION_VERSION, API_PROTOCOL, daemonChallengePayload, EPOCH_HEADER, PROTOCOL_HEADER, type DaemonChallenge } from "@token-coupon/client";
+import { API_PROTOCOL, daemonChallengePayload, EPOCH_HEADER, PROTOCOL_HEADER, type DaemonChallenge } from "@token-coupon/client";
 import { readDaemonOwnerCredential } from "@token-coupon/client/node";
+import { DAEMON_BUILD_INFO } from "./build-info.js";
 
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
@@ -120,7 +121,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const origin = `http://${host!.toLowerCase()}`;
       const unsigned: Omit<DaemonChallenge, "proof"> = { format: 1, nonce, origin, host: new URL(origin).host, port: options.port,
         issuedAt: new Date().toISOString(), owner: { pid: discoveryOwner.pid, hostname: discoveryOwner.hostname, platform: discoveryOwner.platform, processStart: discoveryOwner.processStart },
-        epoch: service.epoch, profileId, protocol: API_PROTOCOL, applicationVersion: APPLICATION_VERSION, buildId: "development" };
+        epoch: service.epoch, profileId, protocol: API_PROTOCOL, applicationVersion: DAEMON_BUILD_INFO.applicationVersion, buildId: DAEMON_BUILD_INFO.buildId };
       const proof = createHmac("sha256", options.ownerToken).update(daemonChallengePayload(unsigned)).digest("hex");
       response.setHeader("Cache-Control", "no-store"); response.setHeader("X-Content-Type-Options", "nosniff"); sendJson(response, 200, { ...unsigned, proof }); return;
     }
@@ -193,7 +194,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
       if (request.method === "POST") { sendJson(response, 200, await service.saveSystemSettings(await readJsonBody(request))); return; }
     }
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: APPLICATION_VERSION, buildId: "development", protocol: API_PROTOCOL,
+      sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: DAEMON_BUILD_INFO.applicationVersion, buildId: DAEMON_BUILD_INFO.buildId, protocol: API_PROTOCOL,
         profile: { id: profileId, kind: service.workspaceEnvironment().isWsl ? "wsl" : "native", platform: process.platform },
         phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;

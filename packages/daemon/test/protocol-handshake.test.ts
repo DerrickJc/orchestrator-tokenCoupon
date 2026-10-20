@@ -8,6 +8,7 @@ import { createDaemonChallengeNonce, discoverOwnedDaemon, readDaemonOwnerCredent
 import { ApplicationService } from "../src/application-service.js";
 import { createLocalServer } from "../src/http-server.js";
 import { acquireDaemonOwner } from "../src/daemon-owner.js";
+import { DAEMON_BUILD_INFO } from "../src/build-info.js";
 
 it("exposes an authenticated handshake and rejects stale/incompatible writes before any mutation", async () => {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-protocol-"));
@@ -24,10 +25,10 @@ it("exposes an authenticated handshake and rejects stale/incompatible writes bef
     const cookie = (await fetch(origin)).headers.getSetCookie()[0]!.split(";")[0]!;
     const headers = { Cookie: cookie, Origin: origin, "Content-Type": "application/json" };
     const client = createClient({ fetch: (async (path, options) => fetch(origin + String(path), { ...options, headers: { ...Object.fromEntries(new Headers(options?.headers)), Cookie: cookie, Origin: origin } })) as typeof fetch });
-    const health = await client.api("/api/v1/health") as { protocol: unknown; epoch: string; applicationVersion: string; profile: { id: string }; capabilities: { daemonDiscovery: number } };
+    const health = await client.api("/api/v1/health") as { protocol: unknown; epoch: string; applicationVersion: string; buildId: string; profile: { id: string }; capabilities: { daemonDiscovery: number } };
     expect(health.protocol).toEqual(API_PROTOCOL); expect(health.epoch).toBe(service.epoch);
-    expect(health.applicationVersion).toBe("0.1.0"); expect(health.profile.id).toMatch(/^[0-9a-f]{24}$/); expect(health.capabilities.daemonDiscovery).toBe(1);
-    await expect(discoverOwnedDaemon(root)).resolves.toMatchObject({ origin, port, epoch: service.epoch, profileId: health.profile.id, applicationVersion: "0.1.0" });
+    expect(health.applicationVersion).toBe("0.1.0"); expect(health.buildId).toBe(DAEMON_BUILD_INFO.buildId); expect(health.profile.id).toMatch(/^[0-9a-f]{24}$/); expect(health.capabilities.daemonDiscovery).toBe(1);
+    await expect(discoverOwnedDaemon(root)).resolves.toMatchObject({ origin, port, epoch: service.epoch, profileId: health.profile.id, applicationVersion: "0.1.0", buildId: health.buildId });
     const nonce = createDaemonChallengeNonce();
     const challengeResponse = await fetch(`${origin}/api/v1/daemon-challenge?nonce=${nonce}`);
     expect(challengeResponse.status).toBe(200);

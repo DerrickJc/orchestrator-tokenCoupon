@@ -1027,13 +1027,19 @@ BrowserWindow 固定关闭 Node 集成并启用 context isolation、renderer san
 
 新建工作区页面检测到受限 `tokenCouponDesktop` preload 时，改用 Electron 主进程 `dialog.showOpenDialog` 选择本机文件夹；取消选择回到工作区列表，不提交工作区写入。普通浏览器仍使用既有后台目录浏览/Windows 原生窗口路径。Electron 模式不显示一个无法取消 native dialog 的网页“取消”按钮，也不启动远程 `/api/v1/native-picker` 请求。桌面桥接声明和 2 个页面回归覆盖选中路径及取消返回；类型检查和 150 项工作区/规划导航回归通过。此处验证的是桥接路由逻辑，不是 Windows 原生弹窗实机截图或完整 Electron 安装验收。
 
+### 13.73 daemon 发布构建身份（2026-10-20）
+
+daemon 构建阶段生成 `dist/build-info.json`：默认写入 Git 12 位提交号，工作区有改动时附加 `-dirty`；无 Git 元数据的发布构建可通过 `TOKEN_COUPON_BUILD_ID` 提供受限字符集的显式版本标识。health 与签名挑战共用同一份版本/构建标识，桌面附着信息可以辨认旧 daemon 或不同构建；构建标识不含路径和凭据。未生成构建元数据的源码测试或旧包回退为 `development`。
+
+daemon 类型检查通过；真实 HTTP protocol-handshake 与 staged-runtime 集成测试 2 项通过，覆盖 health、challenge 和复制后的 daemon 运行入口。正式发布仍需由打包流水线注入不可变 release ID，并验证升级后旧 daemon 的提示与重启流程。
+
 ## 14. 剩余实施台账（2026-10-20）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
 
 | 范围 | 后续工作 | 验证边界 |
 | --- | --- | --- |
-| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏及 Electron main/preload 附着原型已完成；继续 daemon 自动启动和发布构建身份 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
+| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型及 daemon 构建身份已完成；继续 daemon 自动启动和发布流水线身份核验 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
 | D：桌面预览 | 现有 daemon 附着原型与新建工作区本机目录选择桥接已完成；继续随包后台启动、托盘、其余宿主能力接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；不能用 WSL 结果代替 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |

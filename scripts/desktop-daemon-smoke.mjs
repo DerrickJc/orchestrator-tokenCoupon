@@ -59,6 +59,7 @@ try {
   assert.equal((await fetch(`${origin}/api/v1/health`)).status, 403);
   const first = await client.api("/api/v1/health");
   assert.equal(first.profile.platform, process.platform);
+  assert.equal(typeof first.buildId, "string"); assert(first.buildId.length > 0, "daemon health must expose a build identity");
   assert.equal(first.profile.id, createHash("sha256").update(await realpath(dataDirectory)).digest("hex").slice(0, 24));
   const credential = await readDaemonOwnerCredential(dataDirectory);
   assert.equal(first.capabilities.daemonDiscovery, 1, "private daemon owner profile must permit authenticated desktop discovery");

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --project tsconfig.json",
+    "build": "tsc --project tsconfig.json && node scripts/write-build-info.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "start": "node dist/main.js"
   },
