@@ -988,7 +988,7 @@ function renderSystemSettings() {
   const saved = state.systemSettings;
   if (!state.systemSettingsSupported || !saved || !state.operationRoutingSupported) {
     status.textContent = "当前后台尚未加载完整的功能路由设置。请重启后台并刷新后再配置。";
-    $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; root.replaceChildren(); return;
+    $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; disposeAgentSelectionControls(root); root.replaceChildren(); return;
   }
   const draft = state.settingsDraft = structuredClone(saved);
   $("#system-settings-save").disabled = false; $("#system-settings-mode").disabled = false;
@@ -999,7 +999,7 @@ function renderSystemSettings() {
   renderSystemPolicyFields();
 }
 function renderSystemPolicyFields() {
-  const draft = state.settingsDraft, root = $("#system-settings-policies"); root.replaceChildren();
+  const draft = state.settingsDraft, root = $("#system-settings-policies"); disposeAgentSelectionControls(root); root.replaceChildren();
   if (!draft) return;
   draft.functions.revision ??= structuredClone(draft.functions.planning);
   const names = draft.mode === "unified" ? [["unified", "所有功能"]] : [["planning", "规划"], ["review", "审查"], ["revision", "修订"], ["diagnosis", "错误分析"]];
@@ -1671,7 +1671,7 @@ function renderRunAgents(config, plan) {
     return;
   }
   section.dataset.signature = signature;
-  const defaults = $("#run-agent-defaults"), list = $("#run-agent-task-list"), overrides = $("#run-agent-overrides"); defaults.replaceChildren(); list.replaceChildren();
+  const defaults = $("#run-agent-defaults"), list = $("#run-agent-task-list"), overrides = $("#run-agent-overrides"); disposeAgentSelectionControls(defaults); disposeAgentSelectionControls(list); defaults.replaceChildren(); list.replaceChildren();
   show(defaults, mode === "unified"); show(overrides, mode !== "plan"); overrides.open = mode === "per-task";
   overrides.querySelector("summary").textContent = mode === "per-task" ? `逐任务配置（${plan.tasks.length} 项）` : config.agentOverrides?.length ? `单独配置个别任务（已设置 ${config.agentOverrides.length} 项）` : "单独配置个别任务（可选）";
   if (mode === "plan") return;
@@ -2144,6 +2144,16 @@ function renderDraft() {
   renderPlanEditControls();
 }
 function createAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
+  return globalThis.tokenCouponAgentSelectionControls
+    ? createReactAgentSelectionControls(initial, onChange, isCurrent, runners)
+    : createNativeAgentSelectionControls(initial, onChange, isCurrent, runners);
+}
+function disposeAgentSelectionControls(container) {
+  const bridge = globalThis.tokenCouponAgentSelectionControls;
+  if (!bridge) return;
+  for (const mount of [container, ...container.querySelectorAll("[data-agent-selection-mount]")]) bridge.unmount(mount);
+}
+function createNativeAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
   const root = document.createElement("div"), fields = document.createElement("div"), hint = document.createElement("p");
   root.className = "agent-selection-controls"; fields.className = "settings-grid task-agent-config-fields"; hint.className = "hint"; hint.setAttribute("role", "status");
   const runner = document.createElement("select"); runner.dataset.field = "runner";
@@ -2178,12 +2188,66 @@ function createAgentSelectionControls(initial, onChange = () => {}, isCurrent = 
   model.addEventListener("input", () => { preview(); onChange(value()); }); refresh.addEventListener("click", () => void load(true));
   return { root, load, value };
 }
+function createReactAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
+  const root = document.createElement("div"); root.dataset.agentSelectionMount = "true";
+  let runnerId = initial.runnerId, modelId = initial.modelId || "", modelChoice = modelId || "", choices = [], hint = "";
+  const values = new Map([[runnerId, modelId]]); let generation = 0, customAllowed = runnerId !== "mock";
+  const currentRunner = () => (runners || []).map(item => ({ id: item.id, label: `${labels[item.id] || item.id}${item.available ? "" : " · 未就绪"}`, disabled: !item.available && item.id !== initial.runnerId }));
+  const runnerOptions = () => {
+    const options = currentRunner();
+    if (!options.some(option => option.id === runnerId)) options.push({ id: runnerId, label: `${labels[runnerId] || runnerId} · 当前配置`, disabled: false });
+    return options;
+  };
+  const value = () => ({ runnerId, ...(modelId.trim() ? { modelId: modelId.trim() } : {}) });
+  const preview = () => `配置预览：${labels[runnerId] || runnerId} / ${modelId.trim() || "Runner 默认模型"}`;
+  const selectedChoice = () => modelChoice === "__custom__" ? "__custom__" : choices.some(item => item.id === modelId) ? modelId : modelChoice;
+  const render = () => globalThis.tokenCouponAgentSelectionControls?.render(root, {
+    runners: runnerOptions(), selectedRunnerId: runnerId, modelChoices: choices,
+    selectedModelChoice: selectedChoice(), modelId, showCustomModel: selectedChoice() === "__custom__", hint,
+  }, {
+    onRunnerChange: nextRunner => {
+      if (!isCurrent() || nextRunner === runnerId) return;
+      values.set(runnerId, modelId.trim()); runnerId = nextRunner; modelId = values.get(nextRunner) || "";
+      modelChoice = modelId || ""; customAllowed = runnerId !== "mock"; hint = preview(); render(); onChange(value()); void load();
+    },
+    onModelChoice: nextChoice => {
+      if (!isCurrent()) return;
+      modelChoice = nextChoice;
+      if (nextChoice !== "__custom__") modelId = nextChoice;
+      hint = preview(); render(); onChange(value());
+    },
+    onModelInput: nextModel => {
+      if (!isCurrent()) return;
+      modelId = nextModel; values.set(runnerId, modelId.trim()); hint = preview(); render(); onChange(value());
+    },
+    onRefresh: () => void load(true),
+  });
+  const fill = catalog => {
+    customAllowed = catalog.customAllowed !== false;
+    choices = [{ id: "", label: "沿用所选 Runner 的默认模型" }, ...(catalog.models || []).map(item => ({ id: item.id, label: `${item.label || item.id}${item.label && item.label !== item.id ? ` · ${item.id}` : ""}` }))];
+    if (customAllowed || modelId) choices.push({ id: "__custom__", label: "自定义模型 ID…" });
+    modelChoice = choices.some(item => item.id === modelId) ? modelId : "__custom__";
+  };
+  const load = async (force = false) => {
+    const sequence = ++generation, requestedRunner = runnerId, workspaceId = state.workspace?.workspaceId || "";
+    fill({ models: [], customAllowed: requestedRunner !== "mock" }); hint = "正在读取所选 Runner 的完整模型目录…"; render();
+    try {
+      const catalog = await api(`/api/v1/runners/${encodeURIComponent(requestedRunner)}/models?workspaceId=${encodeURIComponent(workspaceId)}${force ? "&refresh=true" : ""}`);
+      if (sequence !== generation || !root.isConnected || runnerId !== requestedRunner || !isCurrent()) return;
+      fill(catalog); hint = `${preview()}${catalog.error ? ` · ${catalog.error}；仍可使用默认或自定义模型。` : ` · ${catalog.models?.length || 0} 个目录候选，实际可用性以调用结果为准。`}`; render();
+    } catch (error) {
+      if (sequence === generation && root.isConnected && isCurrent()) { hint = `${preview()} · 目录暂不可读：${error.message}；可使用默认或自定义模型。`; render(); }
+    }
+  };
+  fill({ models: [], customAllowed }); hint = preview(); render();
+  return { root, load, value };
+}
 
 function openTaskAgentConfig() {
   const planning = state.planning, draft = planning?.draft;
   if (!planning || !draft || planning.execution) return;
   state.taskAgentContext = { planningId: planning.planningId, workspaceId: state.workspace.workspaceId, planHash: draft.planHash, draftRevision: draft.draftRevision };
-  const root = $("#task-agent-config-list"); root.replaceChildren();
+  const root = $("#task-agent-config-list"); disposeAgentSelectionControls(root); root.replaceChildren();
   const defaults = planning.executionDefaults || {};
   $("#task-agent-config-defaults").textContent = `全局默认：${labels[defaults.runnerId] || defaults.runnerId || "未设置"}${defaults.modelId ? ` / ${defaults.modelId}` : " / Runner 默认模型"} · 执行模式 managed`;
   $("#task-agent-config-error").textContent = "";

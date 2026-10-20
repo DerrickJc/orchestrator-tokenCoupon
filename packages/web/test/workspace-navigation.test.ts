@@ -372,7 +372,7 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
@@ -394,6 +394,26 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     select.replaceChildren(...model.options.map(option => { const item = new w.Option(option.label, option.id); item.disabled = option.disabled; return item; }));
     select.value = model.selectedMode; select.onchange = () => onChange(select.value as "plan" | "unified" | "per-task"); root.replaceChildren(select);
   } } });
+  if (options.reactAgentSelection) Object.assign(w, { tokenCouponAgentSelectionControls: { render(mount: HTMLElement, model: { runners: Array<{ id: string; label: string; disabled: boolean }>; selectedRunnerId: string; modelChoices: Array<{ id: string; label: string }>; selectedModelChoice: string; modelId: string; showCustomModel: boolean; hint: string }, callbacks: { onRunnerChange: (id: string) => void; onModelChoice: (id: string) => void; onModelInput: (value: string) => void; onRefresh: () => void }) {
+    let root = mount.querySelector<HTMLElement>(".agent-selection-controls"), runner: HTMLSelectElement, choice: HTMLSelectElement, input: HTMLInputElement, refresh: HTMLButtonElement, hint: HTMLElement;
+    if (!root) {
+      root = w.document.createElement("div"); root.className = "agent-selection-controls";
+      const fields = w.document.createElement("div"); fields.className = "settings-grid task-agent-config-fields";
+      const runnerLabel = w.document.createElement("label"); runnerLabel.append(w.document.createTextNode("Runner"));
+      runner = w.document.createElement("select"); runner.dataset.field = "runner"; runner.onchange = () => callbacks.onRunnerChange(runner.value); runnerLabel.append(runner);
+      const modelLabel = w.document.createElement("label"); modelLabel.append(w.document.createTextNode("模型"));
+      choice = w.document.createElement("select"); choice.dataset.field = "model-choice"; choice.onchange = () => callbacks.onModelChoice(choice.value);
+      input = w.document.createElement("input"); input.dataset.field = "model"; input.oninput = () => callbacks.onModelInput(input.value);
+      refresh = w.document.createElement("button"); refresh.type = "button"; refresh.textContent = "刷新模型"; refresh.onclick = () => callbacks.onRefresh();
+      modelLabel.append(choice, input, refresh); fields.append(runnerLabel, modelLabel); root.append(fields);
+      hint = w.document.createElement("p"); hint.className = "hint"; root.append(hint); mount.append(root);
+    } else {
+      runner = root.querySelector('[data-field="runner"]')!; choice = root.querySelector('[data-field="model-choice"]')!; input = root.querySelector('[data-field="model"]')!; refresh = root.querySelector("button")!; hint = root.querySelector(".hint")!;
+    }
+    runner.replaceChildren(...model.runners.map(item => { const option = new w.Option(item.label, item.id); option.disabled = item.disabled; return option; })); runner.value = model.selectedRunnerId;
+    choice.replaceChildren(...model.modelChoices.map(item => new w.Option(item.label, item.id))); choice.value = model.selectedModelChoice;
+    input.value = model.modelId; input.hidden = !model.showCustomModel; hint.textContent = model.hint;
+  }, unmount(mount: HTMLElement) { mount.replaceChildren(); } } });
   if (options.reactRunAdvanced) Object.assign(w, { tokenCouponRunParameters: { render(model: { parallelOptions: Array<{ id: string; label: string }>; selectedParallel: string; isolationOptions: Array<{ id: string; label: string }>; selectedIsolation: string; verificationOptions: Array<{ id: string; label: string }>; selectedVerification: string; showVerification: boolean }, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void) {
     const root = w.document.getElementById("run-advanced-options-root")!;
     const grid = w.document.createElement("div"); grid.className = "settings-grid advanced-grid";
@@ -937,17 +957,18 @@ it("requires an updated backend before enabling launch model overrides", async (
 });
 
 it("launches one unified model with a task-specific exception without modifying the approved draft", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunAgentMode: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunAgentMode: true, reactAgentSelection: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const original = JSON.stringify(h.plans[0]);
   h.w.eval('__testState.runners=[{id:"codex",available:true},{id:"claude-code",available:true},{id:"mock",available:true}]');
-  const fetch = h.w.fetch;
-  h.w.fetch = (async (raw: string, init?: any) => raw.includes("/models?") ? Response.json({ models: raw.includes("/codex/") ? [{ id: "gpt-6-luna" }] : [{ id: "deepseek-flash" }], customAllowed: true }) : fetch(raw, init)) as any;
+  const fetch = h.w.fetch, modelRequests: string[] = [];
+  h.w.fetch = (async (raw: string, init?: any) => { if (raw.includes("/models?")) { modelRequests.push(raw); return Response.json({ models: raw.includes("/codex/") ? [{ id: "gpt-6-luna" }] : [{ id: "deepseek-flash" }], customAllowed: true }); } return fetch(raw, init); }) as any;
   const mode = h.element("run-agent-mode") as HTMLSelectElement; mode.value = "unified"; mode.dispatchEvent(new h.w.Event("change"));
   const defaults = h.element("run-agent-defaults"), runner = defaults.querySelector<HTMLSelectElement>('[data-field="runner"]')!;
   runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change"));
   const model = defaults.querySelector<HTMLSelectElement>('[data-field="model-choice"]')!;
-  await expect.poll(() => [...model.options].map(item => item.value)).toContain("gpt-6-luna"); model.value = "gpt-6-luna"; model.dispatchEvent(new h.w.Event("change"));
+  await expect.poll(() => modelRequests).toContainEqual(expect.stringContaining("/codex/models?"));
+  await expect.poll(() => [...model.options].map(item => item.value)).toContain("gpt-6-luna"); expect(modelRequests.some(raw => raw.includes("/codex/"))).toBe(true); model.value = "gpt-6-luna"; model.dispatchEvent(new h.w.Event("change"));
   const row = h.element("run-agent-task-list").querySelector<HTMLDetailsElement>('[data-task-id="verify"]')!; row.open = true; row.dispatchEvent(new h.w.Event("toggle"));
   const override = row.querySelector<HTMLInputElement>('[data-task-override]')!; override.checked = true; override.dispatchEvent(new h.w.Event("change"));
   const taskRunner = row.querySelector<HTMLSelectElement>('[data-field="runner"]')!; taskRunner.value = "claude-code"; taskRunner.dispatchEvent(new h.w.Event("change"));

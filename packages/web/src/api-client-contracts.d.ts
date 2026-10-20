@@ -396,6 +396,27 @@ export type RunAgentModeModel = { options: RunAgentModeOption[]; selectedMode: s
 export type RunAgentModeBridge = {
   render(model: RunAgentModeModel, onChange: (mode: "plan" | "unified" | "per-task") => void): void;
 };
+export type AgentSelectionRunnerOption = { id: string; label: string; disabled: boolean };
+export type AgentSelectionChoice = { id: string; label: string };
+export type AgentSelectionControlsModel = {
+  runners: AgentSelectionRunnerOption[];
+  selectedRunnerId: string;
+  modelChoices: AgentSelectionChoice[];
+  selectedModelChoice: string;
+  modelId: string;
+  showCustomModel: boolean;
+  hint: string;
+};
+export type AgentSelectionControlsCallbacks = {
+  onRunnerChange: (runnerId: string) => void;
+  onModelChoice: (modelChoice: string) => void;
+  onModelInput: (modelId: string) => void;
+  onRefresh: () => void;
+};
+export type AgentSelectionControlsBridge = {
+  render(mount: HTMLElement, model: AgentSelectionControlsModel, callbacks: AgentSelectionControlsCallbacks): void;
+  unmount(mount: HTMLElement): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -495,6 +516,7 @@ declare global {
   var tokenCouponRunModeSelector: RunModeSelectorBridge | undefined;
   var tokenCouponRunParameters: RunParametersBridge | undefined;
   var tokenCouponRunAgentMode: RunAgentModeBridge | undefined;
+  var tokenCouponAgentSelectionControls: AgentSelectionControlsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
