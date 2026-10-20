@@ -296,7 +296,8 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .session-command-bar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:12px; background:var(--soft); border:1px solid #dae4d3; border-radius:10px; margin-bottom:12px; }
 .session-command-bar .hint { flex:1; min-width:200px; margin:0; }
 .dag-dialog { width:min(96vw,1600px); height:90vh; max-width:none; max-height:94vh; padding:22px; border:1px solid var(--line); border-radius:15px; color:var(--ink); box-shadow:0 24px 80px #14201540; }
-.dag-dialog[open] { display:flex; flex-direction:column; gap:12px; }
+.dag-dialog[open] { display:flex; flex-direction:column; }
+.dag-dialog-content { display:flex; flex:1; min-height:0; flex-direction:column; gap:12px; }
 .dag-dialog::backdrop,#task-results-dialog::backdrop,#session-continue-dialog::backdrop { background:#15201599; backdrop-filter:blur(2px); }
 .dag-dialog .section-title { margin:0; }
 .dag-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
@@ -397,7 +398,7 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .execution-action-row { align-items:start; }
 .dag-viewport { display:flex; }
 .dag-viewport svg { flex:none; margin:auto; }
-.dag-dialog > .section-title > button { flex-shrink:0; white-space:nowrap; }
+.dag-dialog-content > .section-title > button { flex-shrink:0; white-space:nowrap; }
 
 /* Failure diagnosis: choose a route, then keep the local conversation focused. */
 .diagnosis-choice-dialog,.diagnosis-chat-dialog { border:1px solid var(--line); border-radius:16px; padding:24px; color:var(--ink); width:min(760px,94vw); max-height:90vh; }
