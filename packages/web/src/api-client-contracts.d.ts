@@ -417,6 +417,22 @@ export type AgentSelectionControlsBridge = {
   render(mount: HTMLElement, model: AgentSelectionControlsModel, callbacks: AgentSelectionControlsCallbacks): void;
   unmount(mount: HTMLElement): void;
 };
+export type RuntimeModelOption = { id: string; label: string };
+export type RuntimeModelControlsModel = {
+  tasks: RuntimeModelOption[];
+  selectedTaskId: string;
+  models: RuntimeModelOption[];
+  selectedModelId: string;
+  customModelId: string;
+};
+export type RuntimeModelControlsCallbacks = {
+  onTaskChange: (taskId: string) => void;
+  onModelChange: (modelId: string) => void;
+  onCustomModelChange: (modelId: string) => void;
+};
+export type RuntimeModelControlsBridge = {
+  render(model: RuntimeModelControlsModel, callbacks: RuntimeModelControlsCallbacks): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -517,6 +533,7 @@ declare global {
   var tokenCouponRunParameters: RunParametersBridge | undefined;
   var tokenCouponRunAgentMode: RunAgentModeBridge | undefined;
   var tokenCouponAgentSelectionControls: AgentSelectionControlsBridge | undefined;
+  var tokenCouponRuntimeModelControls: RuntimeModelControlsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;

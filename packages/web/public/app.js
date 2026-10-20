@@ -2805,30 +2805,66 @@ function renderRuntimeModelPanel(tasks) {
   if (!candidates.length) return;
   const select = $("#runtime-model-task"), signature = JSON.stringify([state.workspace.workspaceId, state.planning.planningId, candidates.map(task => task.taskId)]);
   if (signature !== state.runtimeTaskSignature) {
-    state.runtimeTaskSignature = signature; const previous = select.value; select.replaceChildren(...candidates.map(task => new Option(task.title || task.taskId, task.taskId)));
-    if (candidates.some(task => task.taskId === previous)) select.value = previous;
-    state.runtimeModelCatalogKey = null; void loadRuntimeModelChoices();
+    state.runtimeTaskSignature = signature;
+    const previous = state.runtimeModelTaskId || select.value;
+    state.runtimeModelTaskId = candidates.some(task => task.taskId === previous) ? previous : candidates[0].taskId;
+    state.runtimeModelCatalogKey = null;
+    state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+    state.runtimeModelChoice = ""; state.runtimeModelCustomValue = "";
+    void loadRuntimeModelChoices();
   }
-  const target = candidates.find(task => task.taskId === select.value), busy = !!state.runtimeModelSubmitting || state.activeJob?.kind === "session.model-switch" && state.activeJob.status === "running";
+  state.runtimeModelCandidates = candidates;
+  renderRuntimeModelControls();
+  const target = candidates.find(task => task.taskId === state.runtimeModelTaskId), busy = !!state.runtimeModelSubmitting || state.activeJob?.kind === "session.model-switch" && state.activeJob.status === "running";
   $("#runtime-model-save").disabled = busy;
   $("#runtime-model-retry").disabled = busy || target?.status !== "running" || state.planning.session.health?.state !== "active";
   if (!state.runtimeModelSubmitting) $("#runtime-model-status").textContent = `配置版本 ${state.planning.session.models?.revision || 0} · ${target?.title || target?.taskId || ""}：${statuses[target?.status] || ""}。运行中停止重试会等待当前批次安全收尾；不停止其他任务。`;
 }
+function renderRuntimeModelControls() {
+  const tasks = (state.runtimeModelCandidates || []).map(task => ({ id: task.taskId, label: task.title || task.taskId }));
+  const models = state.runtimeModelChoices || [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+  const bridge = globalThis.tokenCouponRuntimeModelControls;
+  if (bridge) {
+    bridge.render({ tasks, selectedTaskId: state.runtimeModelTaskId || "", models, selectedModelId: state.runtimeModelChoice || "", customModelId: state.runtimeModelCustomValue || "" }, {
+      onTaskChange: selectRuntimeModelTask,
+      onModelChange: value => { state.runtimeModelChoice = value; renderRuntimeModelControls(); },
+      onCustomModelChange: value => { state.runtimeModelCustomValue = value; },
+    });
+    return;
+  }
+  const task = $("#runtime-model-task"), previous = task.value;
+  task.replaceChildren(...tasks.map(item => new Option(item.label, item.id)));
+  task.value = tasks.some(item => item.id === (state.runtimeModelTaskId || previous)) ? state.runtimeModelTaskId || previous : tasks[0]?.id || "";
+  const choice = $("#runtime-model-choice"); choice.replaceChildren(...models.map(item => new Option(item.label, item.id)));
+  choice.value = state.runtimeModelChoice || "";
+  $("#runtime-model-custom").value = state.runtimeModelCustomValue || "";
+  show($("#runtime-model-custom").parentElement, choice.value === "__custom__");
+}
+function selectRuntimeModelTask(taskId) {
+  if (!state.runtimeModelCandidates?.some(task => task.taskId === taskId)) return;
+  state.runtimeModelTaskId = taskId;
+  state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+  state.runtimeModelChoice = ""; state.runtimeModelCustomValue = "";
+  renderRuntimeModelControls();
+  void loadRuntimeModelChoices();
+  if (state.planning?.session) renderRuntimeModelPanel(state.planning.session.tasks);
+}
 async function loadRuntimeModelChoices() {
-  const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = $("#runtime-model-task").value;
+  const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = state.runtimeModelTaskId || $("#runtime-model-task").value;
   if (!plan || !workspaceId || !taskId) return;
   const entry = plan.draft?.plan.tasks.find(item => item.task.id === taskId), runnerId = plan.session?.tasks.find(item => item.taskId === taskId)?.execution?.runnerId || entry?.task.execution.runnerId;
   if (!runnerId) return;
   const identity = `${workspaceId}:${plan.planningId}:${taskId}`, request = state.runtimeModelRequest = (state.runtimeModelRequest || 0) + 1;
-  const select = $("#runtime-model-choice"); select.replaceChildren(new Option("沿用 Session 启动模型", ""), new Option("自定义模型…", "__custom__")); $("#runtime-model-custom").value = "";
+  state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+  state.runtimeModelChoice = ""; state.runtimeModelCustomValue = ""; renderRuntimeModelControls();
   try {
     const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(workspaceId)}`);
-    if (request !== state.runtimeModelRequest || `${state.workspace?.workspaceId}:${state.planning?.planningId}:${$("#runtime-model-task").value}` !== identity) return;
-    for (const model of catalog.models || []) select.add(new Option(model.label || model.id, model.id), select.options.length - 1);
+    if (request !== state.runtimeModelRequest || `${state.workspace?.workspaceId}:${state.planning?.planningId}:${state.runtimeModelTaskId || $("#runtime-model-task").value}` !== identity) return;
+    state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, ...(catalog.models || []).map(model => ({ id: model.id, label: model.label || model.id })), { id: "__custom__", label: "自定义模型…" }];
     const saved = plan.session?.models?.overrides?.[taskId]?.modelId;
-    if (saved) { if (![...select.options].some(item => item.value === saved)) select.add(new Option(saved, saved), select.options.length - 1); select.value = saved; }
+    if (saved) { if (!state.runtimeModelChoices.some(item => item.id === saved)) state.runtimeModelChoices.splice(state.runtimeModelChoices.length - 1, 0, { id: saved, label: saved }); state.runtimeModelChoice = saved; }
   } catch { $("#runtime-model-status").textContent = "候选模型暂不可读，可输入 Runner 支持的自定义模型 ID。"; }
-  show($("#runtime-model-custom").parentElement, select.value === "__custom__");
+  renderRuntimeModelControls();
 }
 async function changeRuntimeModel(stopAndRetry) {
   const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = $("#runtime-model-task").value;
@@ -4893,8 +4929,11 @@ async function openDirectoryPicker() {
 $("#choose-workspace-directory").addEventListener("click", () => { cancelDirectoryPicker(); void openDirectoryBrowser(); });
 $("#choose-workspace-native").addEventListener("click", openDirectoryPicker);
 $("#open-runtime-model").addEventListener("click", async () => { await planTab("models"); if (state.route?.tab === "models") $("#runtime-model-task").focus({ preventScroll: true }); });
-$("#runtime-model-task").addEventListener("change", () => { void loadRuntimeModelChoices(); if (state.planning?.session) renderRuntimeModelPanel(state.planning.session.tasks); });
-$("#runtime-model-choice").addEventListener("change", () => show($("#runtime-model-custom").parentElement, $("#runtime-model-choice").value === "__custom__"));
+if (!globalThis.tokenCouponRuntimeModelControls) {
+  $("#runtime-model-task").addEventListener("change", () => selectRuntimeModelTask($("#runtime-model-task").value));
+  $("#runtime-model-choice").addEventListener("change", () => { state.runtimeModelChoice = $("#runtime-model-choice").value; renderRuntimeModelControls(); });
+  $("#runtime-model-custom").addEventListener("input", () => { state.runtimeModelCustomValue = $("#runtime-model-custom").value; });
+}
 $("#runtime-model-save").addEventListener("click", () => changeRuntimeModel(false));
 $("#runtime-model-retry").addEventListener("click", () => changeRuntimeModel(true));
 $("#enable-notifications").addEventListener("click", async () => {

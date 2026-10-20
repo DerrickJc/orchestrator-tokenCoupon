@@ -372,7 +372,7 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
@@ -414,6 +414,18 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     choice.replaceChildren(...model.modelChoices.map(item => new w.Option(item.label, item.id))); choice.value = model.selectedModelChoice;
     input.value = model.modelId; input.hidden = !model.showCustomModel; hint.textContent = model.hint;
   }, unmount(mount: HTMLElement) { mount.replaceChildren(); } } });
+  if (options.reactRuntimeModels) Object.assign(w, { tokenCouponRuntimeModelControls: { render(model: { tasks: Array<{ id: string; label: string }>; selectedTaskId: string; models: Array<{ id: string; label: string }>; selectedModelId: string; customModelId: string }, callbacks: { onTaskChange: (id: string) => void; onModelChange: (id: string) => void; onCustomModelChange: (value: string) => void }) {
+    const root = w.document.getElementById("runtime-model-controls-root")!;
+    let task = root.querySelector<HTMLSelectElement>("#runtime-model-task"), choice = root.querySelector<HTMLSelectElement>("#runtime-model-choice"), custom = root.querySelector<HTMLInputElement>("#runtime-model-custom");
+    if (!task || !choice || !custom) {
+      root.innerHTML = '<div class="settings-grid"><label>目标任务<select id="runtime-model-task"></select></label><label>模型<select id="runtime-model-choice"></select></label><label id="runtime-model-custom-wrap">自定义模型 ID<input id="runtime-model-custom"></label></div>';
+      task = root.querySelector("#runtime-model-task")!; choice = root.querySelector("#runtime-model-choice")!; custom = root.querySelector("#runtime-model-custom")!;
+    }
+    task.replaceChildren(...model.tasks.map(item => new w.Option(item.label, item.id))); task.value = model.selectedTaskId; task.onchange = () => callbacks.onTaskChange(task!.value);
+    choice.replaceChildren(...model.models.map(item => new w.Option(item.label, item.id))); choice.value = model.selectedModelId; choice.onchange = () => callbacks.onModelChange(choice!.value);
+    custom.value = model.customModelId; custom.oninput = () => callbacks.onCustomModelChange(custom!.value);
+    custom.parentElement!.classList.toggle("hidden", model.selectedModelId !== "__custom__");
+  } } });
   if (options.reactRunAdvanced) Object.assign(w, { tokenCouponRunParameters: { render(model: { parallelOptions: Array<{ id: string; label: string }>; selectedParallel: string; isolationOptions: Array<{ id: string; label: string }>; selectedIsolation: string; verificationOptions: Array<{ id: string; label: string }>; selectedVerification: string; showVerification: boolean }, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void) {
     const root = w.document.getElementById("run-advanced-options-root")!;
     const grid = w.document.createElement("div"); grid.className = "settings-grid advanced-grid";
@@ -1487,7 +1499,7 @@ it("shows latest messages first, live summaries and dependencies without fabrica
 });
 
 it("only changes the execution model after an explicit confirmation and binds the stopped Attempt", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRuntimeModels: true });
   const plan: any = h.plans[0]; plan.draft.plan.tasks[0].task.execution = { runnerId: "codex", mode: "managed", modelId: "fast" };
   const id = randomUUID(); plan.session = { status: "running", models: { revision: 3, overrides: {} }, health: { state: "active", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", status: "running", execution: { runnerId: "codex" }, activeAttemptId: id, attempts: [] }] };
   const original = h.w.fetch; let calls: any[] = [];
