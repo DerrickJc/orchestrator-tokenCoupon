@@ -27,6 +27,10 @@ export interface PlanDefinitionDto {
 }
 export interface RepositoryEvidenceDto { path: string; sha256: string; sizeBytes: number; }
 export interface PlannerConfigDto { provider: string; model: string; baseUrl: string; }
+export interface PlanningProviderDto {
+  id: string; label: string; available: boolean; model?: string; modelOptions?: ModelCatalogDto["models"]; runnerId?: string; reason?: string;
+  connectionVerified?: boolean; remoteClientVerified?: boolean; capabilities?: Record<string, string>;
+}
 export interface RequirementDto { requirementId: string; revision: number; text: string; status: "active" | "pending" | "withdrawn" | "superseded"; sourceMessageIds: string[]; }
 export interface RequirementsStateDto { revision: number; items: RequirementDto[]; messageDecisions: Array<{ messageId: string; kind: "requirement" | "operation" | "noise"; reason: string }>; }
 export interface PlanningAssessmentDto {
@@ -136,6 +140,71 @@ export interface SettingsDto {
 export interface ModelCatalogDto { source: string; models: Array<{ id: string; label: string; description?: string; isDefault?: boolean }>; customAllowed: boolean; error?: string; }
 export interface RunnerOptionDto { id: string; adapterVersion: string; configurationVersion: number; supportedModes: ExecutionModeDto[]; capabilities: Record<string, Record<string, string>>; available: boolean; defaultMode?: ExecutionModeDto; modelOptions: ModelCatalogDto["models"]; error?: string; }
 
+export interface RequestKeyDto { requestKey: string; }
+export interface ExecutionSelectionDto {
+  defaults?: { runnerId: string; modelId?: string };
+  tasks?: Array<{ taskId: string; runnerId: string; modelId?: string }>;
+}
+export interface PlanningStartCommandDto extends RequestKeyDto { request: string; provider: string; model?: string; executionDefaults: ExecutionConfigDto; }
+export interface PlanningReplyCommandDto extends RequestKeyDto { message: string; planner?: { mode?: string; model?: string }; }
+export interface PlanningReviewCommandDto extends RequestKeyDto { reviewer?: { mode?: string; model?: string }; }
+export interface PlanningApproveCommandDto extends RequestKeyDto { draftRevision: number; waivedFindingIds?: string[]; waiverReason?: string; }
+export interface PlanningRunCommandDto extends RequestKeyDto {
+  isolation: "git-worktree" | "shared"; maxParallel: number; verificationTaskId?: string;
+  executionSelection?: ExecutionSelectionDto; expectedPlanHash?: string; expectedDraftRevision?: number;
+}
+export interface DraftTaskEditDto {
+  taskId: string;
+  fields: Partial<Pick<TaskDefinitionDto, "title" | "prompt" | "objective" | "approach" | "steps" | "deliverables" | "acceptanceCriteria" | "constraints" | "notes" | "execution">>;
+}
+export interface DraftEditsDto { title?: string; tasks?: DraftTaskEditDto[]; }
+export type PlanningDraftSaveCommandDto = RequestKeyDto & { expectedDraftRevision: number; expectedPlanHash: string } &
+  ({ edits: DraftEditsDto; plan?: never } | { plan: PlanDefinitionDto; edits?: never });
+export interface PlanningReviseCommandDto extends RequestKeyDto {
+  message: string; reviewId: string; expectedPlanHash: string; expectedDraftRevision: number; planner?: { mode?: string; model?: string };
+}
+export interface PlanningForkCommandDto extends RequestKeyDto { confirmed: true; expectedRevision: number; expectedPlanHash: string; message?: string; }
+export interface PlanningHandoffCommandDto extends RequestKeyDto { role: "plan" | "review"; target: "chatgpt" | "claude" | "other" | "any"; reason?: string; }
+export interface SessionModelChangeCommandDto extends RequestKeyDto {
+  confirmed: true; stopAndRetry: boolean; taskId: string; modelId: string | null; expectedRevision: number; expectedAttemptId?: string;
+}
+export type InteractionReplyDto =
+  | { kind: "approval"; decision: "allow-once" | "deny"; guidance?: string }
+  | { kind: "question"; answers: Array<{ questionId: string; optionIds?: string[]; text?: string }>; guidance?: string }
+  | { kind: "elicitation"; action: "accept" | "decline" | "cancel"; content?: Record<string, string | number | boolean | string[]>; guidance?: string };
+export interface AddWorkspaceCommandDto { path: string; label?: string; }
+export interface RenameWorkspaceCommandDto { label: string; }
+export interface SettingsSaveCommandDto extends SettingsDto {}
+export interface AttemptDiagnosisStartCommandDto extends RequestKeyDto { runnerId: "codex" | "claude-code"; modelId?: string; message?: string; }
+export interface AttemptDiagnosisReplyCommandDto extends RequestKeyDto { message: string; runnerId?: "codex" | "claude-code"; modelId?: string; }
+export interface AttemptEvidenceExportDto { absolutePath: string; evidenceHash: string; truncated: boolean; prompt: string; }
+export interface ExternalBudgetExtendCommandDto { confirmed: true; }
+export type NativePickerCommandDto = { kind: "directory"; workspaceId?: never } | { kind: "files"; workspaceId: string };
+export interface NativePickerResultDto { cancelled: boolean; paths: string[]; }
+export type RemoteScopeDto = "repository:read" | "planning:read" | "planning:write" | "session:read" | "session:control";
+export interface RemoteConnectionStatusDto {
+  configured: boolean; enabled: boolean; publicOrigin?: string; mcpUrl?: string; gateway: "stopped" | "running" | "error";
+  gatewayAddress?: string; lastError?: string; pendingApprovals: number; validGrants: number; remoteClientVerified: boolean;
+  pendingTokenExchanges?: number; mode?: "quick_tunnel" | "fixed_https"; transport?: string; busy?: boolean; workspaceId?: string; workspaceIds?: string[];
+  scopes?: RemoteScopeDto[]; component?: { version: string; source: "existing" | "managed" }; connectionProcess?: { persistent: boolean; recovered: boolean };
+  lastProbeAt?: number; nextProbeAt?: number; addressChanged?: boolean; previousMcpUrl?: string;
+}
+export type QuickConnectionCommandDto =
+  | { consent: true; connectionOnly: true; scopes?: RemoteScopeDto[]; port?: number; workspaceId?: never; workspaceIds?: never }
+  | { consent: true; workspaceId: string; workspaceIds?: string[]; scopes?: RemoteScopeDto[]; port?: number; connectionOnly?: never };
+export interface ConfigureConnectionCommandDto { publicOrigin: string; port?: number; }
+export interface RenameGrantCommandDto { alias: string; }
+export interface UpdateGrantCommandDto { workspaceIds: string[]; source: "chatgpt" | "claude" | "other"; alias?: string; }
+export interface DecideApprovalCommandDto {
+  decision: "allow" | "deny"; workspaceId?: string; workspaceIds?: string[]; source?: "chatgpt" | "claude" | "other";
+  scopes?: RemoteScopeDto[];
+}
+export interface GitStatusDto { state: string; message: string; repositoryRoot?: string; branch?: string; head?: string; trackedMetadataCount?: number; paths?: string[]; commands?: string[]; changes?: Array<{ path: string; code: string; staged: boolean; unstaged: boolean; runtime: boolean }>; }
+export interface GitPreviewCommandDto { mode: "runtime" | "selected"; paths: string[]; }
+export interface GitPreviewDto { mode: "runtime" | "selected"; paths: string[]; fingerprint: string; head: string; previews: Array<{ path: string; code: string; text: string; truncated: boolean }>; suggestedMessage: string; }
+export interface GitCommitCommandDto extends RequestKeyDto { confirmed: true; mode: "runtime" | "selected"; paths: string[]; fingerprint: string; message: string; }
+export interface GitIdentityCommandDto extends RequestKeyDto { confirmed: true; name: string; email: string; }
+
 function pathId(value: string): string { return encodeURIComponent(value); }
 async function readJson<T>(transport: ApiTransport, path: string): Promise<T> {
   const value = await transport.api<T>(path);
@@ -147,6 +216,8 @@ async function readJson<T>(transport: ApiTransport, path: string): Promise<T> {
 export function createDaemonApi(transport: ApiTransport) {
   return Object.freeze({
     health: () => readJson<DaemonHealthDto>(transport, "/api/v1/health"),
+    planningProviders: () => readJson<PlanningProviderDto[]>(transport, "/api/v1/providers"),
+    plannerModels: (refresh = false) => readJson<ModelCatalogDto>(transport, `/api/v1/providers/deepseek-api/models${refresh ? "?refresh=1" : ""}`),
     workspaces: () => readJson<WorkspaceDto[]>(transport, "/api/v1/workspaces"),
     plannings: (workspaceId: string) => readJson<PlanningViewDto[]>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/plannings`),
     planning: (workspaceId: string, planningId: string) => readJson<PlanningViewDto>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/plannings/${pathId(planningId)}`),
@@ -154,6 +225,12 @@ export function createDaemonApi(transport: ApiTransport) {
     interactions: (workspaceId: string, planningId: string) => readJson<PendingInteractionDto[]>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/interactions/${pathId(planningId)}`),
     job: (jobId: string) => readJson<JobDto>(transport, `/api/v1/jobs/${pathId(jobId)}`),
     settings: () => readJson<SettingsDto>(transport, "/api/v1/settings"),
+    remoteConnection: () => readJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection"),
+    workspaceGit: (workspaceId: string) => readJson<GitStatusDto>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/git`),
+    directories: (path?: string, offset = 0, query = "") => {
+      const params = new URLSearchParams({ offset: String(offset), query }); if (path !== undefined) params.set("path", path);
+      return readJson<{ path: string; parent: string | null; shortcuts: Array<{ label: string; path: string }>; query: string; totalMatches: number; entries: Array<{ name: string; path: string }>; nextOffset: number | null }>(transport, `/api/v1/directories?${params}`);
+    },
     runners: () => readJson<RunnerOptionDto[]>(transport, "/api/v1/runners"),
     runnerModels: (runnerId: string, workspaceId?: string, refresh = false) => {
       const query = new URLSearchParams(); if (workspaceId) query.set("workspaceId", workspaceId); if (refresh) query.set("refresh", "1");
@@ -171,6 +248,65 @@ export function createDaemonApi(transport: ApiTransport) {
   });
 }
 export type DaemonApi = ReturnType<typeof createDaemonApi>;
+
+async function sendJson<T>(transport: ApiTransport, path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
+  const value = await transport.api<T>(path, { method, body: JSON.stringify(body ?? {}) });
+  if (value === null) throw new Error("daemon_response_empty：写入接口未返回 JSON 内容");
+  return value;
+}
+
+/** Typed mutation facade. It deliberately delegates to the no-replay handshake-aware transport. */
+export function createDaemonCommands(transport: ApiTransport) {
+  const workspace = (id: string) => `/api/v1/workspaces/${pathId(id)}`;
+  const planning = (workspaceId: string, planningId: string) => `${workspace(workspaceId)}/plannings/${pathId(planningId)}`;
+  const postJob = <T extends RequestKeyDto>(path: string, body: T) => sendJson<JobDto>(transport, path, "POST", body);
+  return Object.freeze({
+    addWorkspace: (body: AddWorkspaceCommandDto) => sendJson<WorkspaceDto>(transport, "/api/v1/workspaces", "POST", body),
+    renameWorkspace: (workspaceId: string, body: RenameWorkspaceCommandDto) => sendJson<WorkspaceDto>(transport, workspace(workspaceId), "PATCH", body),
+    removeWorkspace: (workspaceId: string) => sendJson<{ removed: true }>(transport, workspace(workspaceId), "DELETE"),
+    saveSettings: (body: SettingsSaveCommandDto) => sendJson<SettingsDto>(transport, "/api/v1/settings", "POST", body),
+    startPlanning: (workspaceId: string, body: PlanningStartCommandDto) => postJob(`${workspace(workspaceId)}/plannings`, body),
+    replyToPlanning: (workspaceId: string, planningId: string, body: PlanningReplyCommandDto) => postJob(`${planning(workspaceId, planningId)}/replies`, body),
+    reviewPlanning: (workspaceId: string, planningId: string, body: PlanningReviewCommandDto) => postJob(`${planning(workspaceId, planningId)}/review`, body),
+    retryPlanning: (workspaceId: string, planningId: string, body: RequestKeyDto) => postJob(`${planning(workspaceId, planningId)}/planner-retry`, body),
+    approvePlanning: (workspaceId: string, planningId: string, body: PlanningApproveCommandDto) => postJob(`${planning(workspaceId, planningId)}/approve`, body),
+    runPlanning: (workspaceId: string, planningId: string, body: PlanningRunCommandDto) => postJob(`${planning(workspaceId, planningId)}/run`, body),
+    saveDraft: (workspaceId: string, planningId: string, body: PlanningDraftSaveCommandDto) => postJob(`${planning(workspaceId, planningId)}/draft`, body),
+    revisePlanning: (workspaceId: string, planningId: string, body: PlanningReviseCommandDto) => postJob(`${planning(workspaceId, planningId)}/revise`, body),
+    forkPlanning: (workspaceId: string, planningId: string, body: PlanningForkCommandDto) => postJob(`${planning(workspaceId, planningId)}/fork`, body),
+    handoffPlanning: (workspaceId: string, planningId: string, body: PlanningHandoffCommandDto) => postJob(`${planning(workspaceId, planningId)}/handoff`, body),
+    continueWebPlanning: (workspaceId: string, planningId: string, body: RequestKeyDto) => postJob(`${planning(workspaceId, planningId)}/web-continue`, body),
+    retryTask: (workspaceId: string, planningId: string, body: RequestKeyDto & { taskId: string }) => postJob(`${planning(workspaceId, planningId)}/retry-task`, body),
+    resumeSession: (workspaceId: string, planningId: string, body: RequestKeyDto) => postJob(`${planning(workspaceId, planningId)}/session/resume`, body),
+    pauseSession: (workspaceId: string, planningId: string, body: RequestKeyDto) => postJob(`${planning(workspaceId, planningId)}/session/pause`, body),
+    cancelSession: (workspaceId: string, planningId: string, body: RequestKeyDto) => postJob(`${planning(workspaceId, planningId)}/session/cancel`, body),
+    recoverSession: (workspaceId: string, planningId: string, body: RequestKeyDto & { confirmedStopped: boolean }) => postJob(`${planning(workspaceId, planningId)}/session/recover`, body),
+    changeTaskModel: (workspaceId: string, planningId: string, body: SessionModelChangeCommandDto) => postJob(`${planning(workspaceId, planningId)}/session/models`, body),
+    deliverSession: (workspaceId: string, planningId: string, body: RequestKeyDto) => postJob(`${planning(workspaceId, planningId)}/session/delivery`, body),
+    answerInteraction: (workspaceId: string, requestId: string, body: InteractionReplyDto) => sendJson<{ accepted: true }>(transport, `${workspace(workspaceId)}/interactions/${pathId(requestId)}`, "POST", body),
+    analyzeAttempt: (workspaceId: string, planningId: string, attemptId: string, body: AttemptDiagnosisStartCommandDto) => postJob(`${planning(workspaceId, planningId)}/attempts/${pathId(attemptId)}/diagnostics`, body),
+    replyToAttemptDiagnosis: (workspaceId: string, planningId: string, attemptId: string, diagnosticId: string, body: AttemptDiagnosisReplyCommandDto) => postJob(`${workspace(workspaceId)}/plannings/${pathId(planningId)}/attempts/${pathId(attemptId)}/diagnostics/${pathId(diagnosticId)}/replies`, body),
+    exportAttemptEvidence: (workspaceId: string, planningId: string, attemptId: string) => sendJson<AttemptEvidenceExportDto>(transport, `${workspace(workspaceId)}/plannings/${pathId(planningId)}/attempts/${pathId(attemptId)}/diagnostics/export`, "POST"),
+    chooseNativePath: (body: NativePickerCommandDto) => sendJson<NativePickerResultDto>(transport, "/api/v1/native-picker", "POST", body),
+    cancelJob: (jobId: string, workspaceId: string) => sendJson<JobDto>(transport, `/api/v1/jobs/${pathId(jobId)}/cancel`, "POST", { workspaceId }),
+    configureRemoteConnection: (body: ConfigureConnectionCommandDto) => sendJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection", "POST", body),
+    startQuickConnection: (body: QuickConnectionCommandDto) => sendJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection/quick", "POST", body),
+    testRemoteConnection: () => sendJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection/test", "POST"),
+    stopRemoteConnection: () => sendJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection/stop", "POST"),
+    renameGrant: (grantId: string, body: RenameGrantCommandDto) => sendJson<{ updated: true }>(transport, `/api/v1/remote-connection/grants/${pathId(grantId)}/name`, "POST", body),
+    updateGrant: (grantId: string, body: UpdateGrantCommandDto) => sendJson<{ updated: true }>(transport, `/api/v1/remote-connection/grants/${pathId(grantId)}`, "POST", body),
+    revokeGrant: (grantId: string) => sendJson<{ revoked: true }>(transport, `/api/v1/remote-connection/grants/${pathId(grantId)}/revoke`, "POST"),
+    decideApproval: (requestId: string, body: DecideApprovalCommandDto) => sendJson<{ accepted: true }>(transport, `/api/v1/remote-connection/approvals/${pathId(requestId)}`, "POST", body),
+    extendExternalReadBudget: (workspaceId: string, operationId: string, body: ExternalBudgetExtendCommandDto) => sendJson<Record<string, unknown>>(transport, `${workspace(workspaceId)}/external/${pathId(operationId)}/budget`, "POST", body),
+    reconcileExternalOperation: (workspaceId: string, operationId: string) => sendJson<Record<string, unknown>>(transport, `${workspace(workspaceId)}/external/${pathId(operationId)}/reconcile`, "POST"),
+    cancelExternalOperation: (workspaceId: string, operationId: string) => sendJson<Record<string, unknown>>(transport, `${workspace(workspaceId)}/external/${pathId(operationId)}/cancel`, "POST"),
+    prepareGit: (workspaceId: string, body: RequestKeyDto & { confirmed: true; action: string }) => postJob(`${workspace(workspaceId)}/git`, body),
+    previewGitCommit: (workspaceId: string, body: GitPreviewCommandDto) => sendJson<GitPreviewDto>(transport, `${workspace(workspaceId)}/git/preview`, "POST", body),
+    commitGit: (workspaceId: string, body: GitCommitCommandDto) => postJob(`${workspace(workspaceId)}/git/commit`, body),
+    setGitIdentity: (workspaceId: string, body: GitIdentityCommandDto) => postJob(`${workspace(workspaceId)}/git/identity`, body),
+  });
+}
+export type DaemonCommands = ReturnType<typeof createDaemonCommands>;
 
 export interface DaemonHealthDto {
   status: "ok"; epoch: string; instanceId: string; applicationVersion: string; buildId: string; protocol: { major: number; minor: number };

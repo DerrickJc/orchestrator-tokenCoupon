@@ -208,7 +208,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "POST" && url.pathname === "/api/v1/remote-connection/quick") {
       if (!options.remoteMcp) throw new Error("remote_connection_unavailable：MCP 远程连接服务未启动");
       const body = await readJsonBody(request);
-      const project = body.connectionOnly === true ? { connectionOnly: true } : { workspaceId: stringField(body.workspaceId, "workspaceId", 32) };
+      const project = body.connectionOnly === true ? { connectionOnly: true } : { workspaceId: stringField(body.workspaceId, "workspaceId", 32), ...(body.workspaceIds === undefined ? {} : { workspaceIds: stringArray(body.workspaceIds, "workspaceIds") }) };
       if (body.connectionOnly === true && (body.workspaceId !== undefined || body.workspaceIds !== undefined)) throw new Error("oauth_workspace_invalid：仅建立连接不能同时指定项目");
       const scopes = body.scopes === undefined ? undefined : stringArray(body.scopes, "scopes");
       const port = body.port === undefined ? undefined : integerField(body.port, "port", 1024);

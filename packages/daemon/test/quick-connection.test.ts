@@ -452,17 +452,20 @@ describe("Quick Tunnel connection", () => {
 
   it("requires a local browser session and Origin to start or approve a connection", async () => {
     const h = await fixture(); const port = await freePort();
+    const secondPath = join(h.root, "second-project"); await mkdir(secondPath);
+    const secondWorkspace = await h.service.addWorkspace(secondPath);
     const server = await createLocalServer(h.service, { port, host: "127.0.0.1", dataDirectory: h.dataDirectory, remoteMcp: h.remote });
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
     cleanups.push(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
     const origin = `http://127.0.0.1:${port}`;
-    const body = JSON.stringify({ consent: true, workspaceId: h.workspace.workspaceId });
+    const body = JSON.stringify({ consent: true, workspaceId: h.workspace.workspaceId, workspaceIds: [secondWorkspace.workspaceId] });
     const start = (headers: Record<string, string>) => fetch(`${origin}/api/v1/remote-connection/quick`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
     expect((await start({ Origin: origin })).status).toBe(403);
     const landing = await fetch(origin); const cookie = landing.headers.getSetCookie()[0]!.split(";", 1)[0]!;
     expect((await start({ Cookie: cookie, Origin: "https://evil.test" })).status).toBe(403);
     const accepted = await start({ Cookie: cookie, Origin: origin }); expect(accepted.status).toBe(202);
     await h.waitFor("ready");
+    expect(h.remote.status().workspaceIds).toEqual([h.workspace.workspaceId, secondWorkspace.workspaceId]);
     expect((await h.proxyFetch(`${h.origin}/api/v1/remote-connection`)).status).toBe(404);
     const auth = await authorize(h, ["planning:read"]);
     const route = `${origin}/api/v1/remote-connection/approvals/${auth.pending.requestId}`;

@@ -1,6 +1,6 @@
-import { createDaemonApi } from "./contracts.js";
+import { createDaemonApi, createDaemonCommands } from "./contracts.js";
 import type { ApiRequestOptions } from "./contracts.js";
-export { createDaemonApi };
+export { createDaemonApi, createDaemonCommands };
 export type * from "./contracts.js";
 
 /** Transport/version contracts shared by browser, desktop and future CLI clients. */
@@ -91,6 +91,7 @@ export function createClient(options: { fetch?: typeof fetch; eventSource?: (pat
     connection: () => ({ handshake: handshake ? structuredClone(handshake) : undefined, compatibility }),
     api,
     domain: createDaemonApi({ api }),
+    commands: createDaemonCommands({ api }),
     openEventStream(path: string, handlers: EventStreamHandlers = {}): EventSource {
       if (!path.startsWith("/api/v1/events?") && path !== "/api/v1/events") throw new ClientError("client_event_path_invalid");
       const source = options.eventSource ? options.eventSource(path) : new EventSource(path);
