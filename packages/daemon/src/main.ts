@@ -5,12 +5,15 @@ import { createMcpServer } from "./mcp-server.js";
 import { acquireDaemonOwner } from "./daemon-owner.js";
 import { RemoteMcpConnection } from "./oauth-gateway.js";
 import { resolveDaemonDataDirectory } from "./runtime-paths.js";
+import { installBoundedProcessLogging } from "./bounded-process-log.js";
 
 function option(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
   return index < 0 ? fallback : process.argv[index + 1] ?? fallback;
 }
 
+const logFile = option("--log-file", process.env.TOKEN_COUPON_DAEMON_LOG ?? "");
+if (logFile) installBoundedProcessLogging(logFile);
 const port = Number(option("--port", process.env.TOKEN_COUPON_DAEMON_PORT ?? "4177"));
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("--port 必须是 1024 到 65535 之间的整数");
 const host = option("--host", "127.0.0.1");

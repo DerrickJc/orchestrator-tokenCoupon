@@ -1,11 +1,12 @@
 // Assemble installed production files without workspace symlinks, source or test fixtures.
 // This is an unpacked development stage, not a signed installer or cross-platform dependency build.
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", import.meta.url))) {
+export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", import.meta.url)), bundledNode = process.env.TOKEN_COUPON_BUNDLED_NODE) {
   source = await realpath(source);
   const root = await mkdtemp(join(tmpdir(), "token-coupon-runtime-"));
   const skippedOptional = [], copied = [];
@@ -38,8 +39,20 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
       if (name === "core") await copy(join(from, "resources"), join(destination, "resources"));
       copied.push(`@token-coupon/${name}`);
     }
+    let nodeExecutable;
+    if (bundledNode !== undefined) {
+      if (!bundledNode || !isAbsolute(bundledNode)) throw new Error("runtime_node_path_invalid：随包 Node.js 路径必须是绝对路径");
+      const nodePath = await realpath(bundledNode);
+      if (!(await lstat(nodePath)).isFile()) throw new Error("runtime_node_file_invalid：随包 Node.js 必须是普通文件");
+      const version = execFileSync(nodePath, ["--version"], { encoding: "utf8", timeout: 10_000 }).trim();
+      if (version !== "v22.12.0") throw new Error(`runtime_node_version_invalid：要求 v22.12.0，实际为 ${version || "未知"}`);
+      nodeExecutable = `runtime/node${process.platform === "win32" ? ".exe" : ""}`;
+      await mkdir(join(root, "runtime"), { recursive: true });
+      await cp(nodePath, join(root, nodeExecutable));
+    }
     const manifest = { format: 1, kind: "unpacked-development-stage", hostPlatform: process.platform, hostArch: process.arch, packages: copied, skippedOptional,
       daemonEntry: "node_modules/@token-coupon/daemon/dist/main.js",
+      ...(nodeExecutable ? { nodeExecutable } : {}),
       releaseReady: false };
     await writeFile(join(root, "runtime-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
     return { root, ...manifest, daemonEntry: join(root, manifest.daemonEntry) };

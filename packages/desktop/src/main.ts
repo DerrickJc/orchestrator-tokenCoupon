@@ -1,10 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, session, Tray } from "electron";
 import { discoverOwnedDaemon } from "@token-coupon/client/node";
+import type { ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describeAttachmentFailure, DESKTOP_IPC, isAllowedDaemonOrigin, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl, type DesktopAttachment } from "./desktop-policy.js";
+import { resolveDevelopmentDaemonRuntime, resolvePackagedDaemonRuntime } from "./daemon-runtime.js";
+import { startManagedDaemon } from "./managed-daemon.js";
 import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -12,6 +15,7 @@ const defaultHome = app.getPath("home") || homedir();
 const profileDirectory = daemonProfileDirectory(process.argv, process.env, defaultHome);
 let window: BrowserWindow | undefined;
 let attachment: DesktopAttachment | undefined;
+let managedDaemon: ChildProcess | undefined;
 let tray: Tray | undefined;
 let windowStatePath: string | undefined;
 let stateSaveTimer: NodeJS.Timeout | undefined;
@@ -44,6 +48,12 @@ async function findDaemon(): Promise<DesktopAttachment> {
   throw new Error(describeAttachmentFailure(lastError));
 }
 
+async function discoverDaemonOnce(): Promise<DesktopAttachment> {
+  const found = await discoverOwnedDaemon(profileDirectory, { timeoutMs: 1_200 });
+  if (!isAllowedDaemonOrigin(found.origin)) throw new Error("desktop_daemon_origin_invalid：后台地址不是受信任的本机地址");
+  return found;
+}
+
 function assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
   const url = event.senderFrame?.url;
   if (!attachment || !url || !isTrustedIpcContext(event.sender === window?.webContents,
@@ -70,12 +80,28 @@ function registerIpc(): void {
 
 async function connectOrExplain(): Promise<DesktopAttachment | undefined> {
   for (;;) {
-    try { return await findDaemon(); }
+    try {
+      try { return await findDaemon(); }
+      catch {
+        const runtime = app.isPackaged
+          ? resolvePackagedDaemonRuntime(process.resourcesPath)
+          : resolveDevelopmentDaemonRuntime(app.getAppPath(), process.env);
+        const started = await startManagedDaemon({
+          runtime,
+          dataDirectory: profileDirectory,
+          logPath: join(app.getPath("userData"), "logs", "daemon.log"),
+          discover: discoverDaemonOnce,
+        });
+        managedDaemon = started.child.exitCode === null ? started.child : undefined;
+        started.child.once("exit", () => { if (managedDaemon === started.child) { managedDaemon = undefined; refreshTrayMenu(); } });
+        return started.attachment;
+      }
+    }
     catch (error) {
       const result = await dialog.showMessageBox({
         type: "warning", title: "Token Coupon 后台尚未就绪",
-        message: "没有找到可安全附着的本机 daemon。应用只会连接 owner 身份和 HMAC 挑战均通过验证的后台。",
-        detail: `${describeAttachmentFailure(error)}\n\n确认后台已启动后选择“重试”。`,
+        message: "没有找到可复用的后台，应用也未能启动随包 daemon。",
+        detail: `${describeAttachmentFailure(error)}\n\n桌面应用只连接通过 owner 身份和 HMAC 挑战验证的后台。查看日志后可选择重试；日志位于 ${join(app.getPath("userData"), "logs", "daemon.log")}。`,
         buttons: ["重试", "退出应用"], defaultId: 0, cancelId: 1, noLink: true,
       });
       if (result.response !== 0) return undefined;
@@ -112,17 +138,22 @@ function showMainWindow(): void {
   window.focus();
 }
 
+function refreshTrayMenu(): void {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "打开 Token Coupon", click: showMainWindow },
+    { type: "separator" },
+    { label: managedDaemon ? "退出应用（后台继续运行）" : "退出应用（不停止已连接后台）", click: () => { quitting = true; app.quit(); } },
+  ]));
+}
+
 function installTray(): void {
   if (tray) return;
   try {
     const icon = join(here, process.platform === "win32" ? "token-coupon.ico" : "token-coupon.png");
     tray = new Tray(icon);
     tray.setToolTip("Token Coupon");
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "打开 Token Coupon", click: showMainWindow },
-      { type: "separator" },
-      { label: "退出应用", click: () => { quitting = true; app.quit(); } },
-    ]));
+    refreshTrayMenu();
     tray.on("click", showMainWindow);
     tray.on("double-click", showMainWindow);
   } catch { tray = undefined; }
