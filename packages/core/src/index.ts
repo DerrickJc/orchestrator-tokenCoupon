@@ -1,4 +1,5 @@
 export type { PlanDefinition, PlannedTask } from "./plan.js";
+export { resolveNativeExecutable, spawnNative } from "./native-command.js";
 export type { DecisionReference, PlanDecisionContext, SelectedDecision } from "./plan.js";
 export { decisionValueHash } from "./plan.js";
 export type { ExecutionConfig, ExecutionMode, RequiredRunnerCapability, TaskDefinition } from "./task.js";

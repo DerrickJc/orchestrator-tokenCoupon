@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "files": ["dist", "resources"],
+  "files": [
+    "dist",
+    "resources"
+  ],
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
@@ -16,6 +19,10 @@
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.295"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.295",
+    "cross-spawn": "^7.0.6"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6"
   }
 }

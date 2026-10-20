@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnNative as spawn, resolveNativeExecutable } from "@token-coupon/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { networkFetch } from "./network-fetch.js";
 
@@ -25,7 +26,8 @@ export class ModelCatalog {
 export async function discoverRunnerModels(id: string, cwd: string, command?: { executable: string; args?: string[] }): Promise<ModelCatalogResult> {
   if (id === "mock") return { source: "mock", models: [], customAllowed: false };
   if (id === "claude-code" && !command) return claudeModels(cwd);
-  const rpc = new CatalogRpc(command?.executable ?? (id === "codex" ? "codex" : "dsh"), [...(command?.args ?? []), ...(id === "codex" ? ["app-server", "--stdio"] : ["--profile", "acp"])], cwd);
+  const executable = await resolveNativeExecutable(command?.executable ?? (id === "codex" ? "codex" : "dsh"));
+  const rpc = new CatalogRpc(executable, [...(command?.args ?? []), ...(id === "codex" ? ["app-server", "--stdio"] : ["--profile", "acp"])], cwd);
   let sessionId: string | undefined;
   try {
     await rpc.request("initialize", id === "codex" ? { clientInfo: { name: "token-coupon-model-catalog", version: "1" }, capabilities: {} } : { protocolVersion: 1, clientInfo: { name: "token-coupon-model-catalog", version: "1" }, clientCapabilities: {} });

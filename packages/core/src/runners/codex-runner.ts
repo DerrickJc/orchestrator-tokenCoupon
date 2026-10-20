@@ -1,7 +1,4 @@
-import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
-import { constants } from "node:fs";
-import { delimiter, join } from "node:path";
+import { spawnNative as spawn, resolveNativeExecutable } from "../native-command.js";
 import { StringDecoder } from "node:string_decoder";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 import { parseCodexElicitation } from "./codex-elicitation.js";
@@ -578,15 +575,7 @@ function makeAsyncCodexQuestion(rawQuestions: unknown[], nativeRequestId: string
 }
 
 async function findExecutable(name: string): Promise<string> {
-  if (name.includes("/") || name.includes("\\")) {
-    await access(name, constants.X_OK);
-    return name;
-  }
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    const candidate = join(directory, name);
-    try { await access(candidate, constants.X_OK); return candidate; } catch { /* continue PATH lookup */ }
-  }
-  throw new Error(`找不到 ${name} 可执行文件，请先安装并登录 Codex CLI`);
+  return resolveNativeExecutable(name, "Codex CLI");
 }
 
 function isObject(value: unknown): value is JsonObject { return value !== null && typeof value === "object" && !Array.isArray(value); }

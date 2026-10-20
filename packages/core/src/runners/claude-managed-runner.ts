@@ -1,6 +1,4 @@
-import { access } from "node:fs/promises";
-import { constants } from "node:fs";
-import { delimiter, join } from "node:path";
+import { resolveNativeExecutable } from "../native-command.js";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 import type { CanUseTool, PermissionResult, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -15,11 +13,7 @@ export interface ClaudeManagedSettings {
 }
 
 async function findExecutable(name: string): Promise<string> {
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    const candidate = join(directory, name);
-    try { await access(candidate, constants.X_OK); return candidate; } catch { /* continue PATH lookup */ }
-  }
-  throw new Error(`找不到 ${name} 可执行文件，请先安装并登录 Claude Code`);
+  return resolveNativeExecutable(name, "Claude Code");
 }
 
 export class ClaudeManagedRunner implements Runner {

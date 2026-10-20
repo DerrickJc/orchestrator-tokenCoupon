@@ -414,7 +414,7 @@ Node SEA/其他单文件打包方式另行验证动态依赖、资源文件、�
 | --- | --- | --- | --- |
 | MIG-01 | 已实现 Windows Mutex 与 Linux flock 分派；竞争、大小写与崩溃释放实测见 13.60 | 完整后台、多客户端和恢复组合仍需支持矩阵验收；禁止不安全降级 | 部分完成 |
 | MIG-02 | 已实现 Windows 进程启动时间核验与 owner 平台标识，跨平台记录保持 unknown | 继续覆盖权限不足、历史数据及完整后台恢复；不能因 PID 相同而信任 owner | 部分完成 |
-| MIG-03 | Runner 按 `claude`/`codex` 等精确名字查找 | 统一 Windows 可执行解析，处理 `.exe`、`.cmd`、`PATHEXT`、用户 PATH、绝对路径与受支持安装方式；命令垫片须安全启动 | 阻塞 |
+| MIG-03 | 已统一 PATH/PATHEXT 发现与 Windows cmd 垫片启动，特殊参数实测见 13.61 | 继续真实 Runner 安装形式、登录与完整执行验收；进程树清理独立处理 | 部分完成 |
 | MIG-04 | Windows 取消目前主要作用于直接子进程 | 验证受控进程树清理，可评估 Job Object/平台执行器；区分原生中断与强制清理，仅处理本应用拥有的进程 | 阻塞 |
 | MIG-05 | 暂停、取消、退出与异常重启语义不同 | 根据真实退出与持久化结果显示状态；不因窗口关闭宣称任务取消，不因连接恢复宣称任务成功 | 必验 |
 | MIG-06 | `process.execPath` 被用于 supervisor 与协调辅助进程 | 明确执行用运行时路径，验证 Electron/Node/单文件模式下的含义；不能误启动第二个 GUI 或旧版本资源 | 阻塞 |
@@ -940,6 +940,12 @@ daemon 入口与 ApplicationService 共用数据目录解析：显式参数优�
 Windows 由固定 PowerShell 辅助进程持有系统命名 Mutex，父进程关闭管道或异常退出后释放；名称按规范化路径生成，保留超时/竞争失败，未实现平台仍拒绝降级。Windows owner 使用 OS 进程启动时间核验；新记录保存平台标识，Windows/WSL 记录不互相认领，Windows 下缺少平台身份的旧记录保持 unknown。
 
 Linux 定向协调/恢复回归 15 项通过；原生 Windows Node v20.20.2 隔离验证通过：当前进程身份、启动时间变化、竞争拒绝、大小写路径一致、持锁父进程被终止后重新获取、执行锁创建/检查/释放及跨平台拒绝接管。此处尚不代表 Windows 完整后台或 Node 22.12+ 发布运行时验收。机制依据：[Microsoft Mutex](https://learn.microsoft.com/en-us/dotnet/standard/threading/mutexes) 与 [Mutex API](https://learn.microsoft.com/en-us/dotnet/api/system.threading.mutex)。完整仓库类型检查、构建与回归通过：115 个文件、766 项测试。
+
+### 13.61 原生命令发现与 Windows 垫片（2026-10-20）
+
+统一 Codex、Claude CLI 可执行发现与诊断，模型目录和既有 dsh 入口复用相同启动边界。Windows 解析 PATH/PATHEXT、带引号目录、exe/com/cmd/bat 与绝对入口；忽略空 PATH 项，先确定绝对入口再切换工作区，目录不能伪装成命令。使用 [cross-spawn](https://github.com/moxystudio/node-cross-spawn) 7.0.6 的 Windows 参数处理，不启用任意 shell 字符串执行。Claude managed 仍由原 SDK 管理执行协议。
+
+Linux 定向 Runner/诊断/目录回归 48 项通过。原生 Windows Node v20.20.2 临时 npm 风格 cmd 垫片通过：中文/空格目录、PATH 大小写、PATHEXT、绝对路径、空参数、引号、括号、百分号与 `& | ^` 均保持原值，注入哨兵没有产生文件。完整仓库类型检查、构建与回归通过：116 个文件、768 项测试。上述结果不替代真实 Codex/Claude 登录、Windows 进程树清理或完整支持矩阵。
 
 ## 14. 剩余实施台账（2026-10-20）
 

@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnNative as spawn, resolveNativeExecutable } from "../native-command.js";
 import type { Runner, RunnerContext, RunnerDiagnostics, RunnerInput, RunnerInteractionRequest, RunnerResult } from "../runner.js";
 
 type JsonObject = Record<string, unknown>;
@@ -27,7 +28,7 @@ export class DeepSeekHarnessRunner implements Runner {
   async run(input: RunnerInput, context: RunnerContext): Promise<RunnerResult> {
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(this.executable, ["--profile", "acp"], {
+      child = spawn(await resolveNativeExecutable(this.executable), ["--profile", "acp"], {
         cwd: input.cwd,
         env: process.env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -322,7 +323,7 @@ async function selectModel(rpc: DshAcpConnection, sessionId: string, rawOptions:
 }
 
 async function runVersion(executable: string): Promise<string | undefined> {
-  const child = spawn(executable, ["--version"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn(await resolveNativeExecutable(executable), ["--version"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout = appendBounded(stdout, chunk, 4096); });
