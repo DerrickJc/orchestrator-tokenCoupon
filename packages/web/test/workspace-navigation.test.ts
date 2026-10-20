@@ -1884,6 +1884,20 @@ it("sends the current resume decision to React and keeps the existing confirmati
   expect((h.element("session-continue-target") as HTMLSelectElement).value).toBe("__resume__");
 });
 
+it("publishes pending approval counts and guidance to the React overview bridge", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  h.setInteractions([
+    { requestId: "question", owner: { runnerId: "codex", taskId: "spec" }, request: { kind: "question", title: "需要确认", questions: [{ id: "scope", text: "是否包含冲突检测？" }] } },
+    { requestId: "approval", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行测试", operation: { command: "npm test" }, cwd: "/workspace" } },
+  ]);
+  let received: any;
+  h.w.tokenCouponPendingApprovalOverview = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received?.count).toBe(2);
+  expect(received.summary).toContain("1 项任务提问、1 项工具审批");
+  expect(h.element("pending-approval-box").classList.contains("has-pending")).toBe(true);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

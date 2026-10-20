@@ -3375,10 +3375,11 @@ async function renderInteractions() {
   preserveExecutionReading(() => {
   state.planning.interactions = items; state.waitingInteractions = items.length;
   renderSession();
-  $("#pending-approval-count").textContent = `${items.length} 项`;
   const questionCount = items.filter(item => item.request.kind === "question").length;
   const approvalCount = items.filter(item => item.request.kind === "approval").length;
-  $("#pending-approval-summary").textContent = !items.length ? "当前没有待处理请求。" : questionCount === items.length ? "Runner 正在等待你的回答。请选择答案或补充具体信息；回答会发送给对应任务，不代表批准计划或工具操作。" : approvalCount === items.length ? "工具正在等待你的批准。请核对操作理由、具体命令和工作目录，再决定本次允许或拒绝。" : `${questionCount} 项任务提问、${approvalCount} 项工具审批、${items.length - questionCount - approvalCount} 项表单／网页确认，请分别处理。`;
+  const summary = !items.length ? "当前没有待处理请求。" : questionCount === items.length ? "Runner 正在等待你的回答。请选择答案或补充具体信息；回答会发送给对应任务，不代表批准计划或工具操作。" : approvalCount === items.length ? "工具正在等待你的批准。请核对操作理由、具体命令和工作目录，再决定本次允许或拒绝。" : `${questionCount} 项任务提问、${approvalCount} 项工具审批、${items.length - questionCount - approvalCount} 项表单／网页确认，请分别处理。`;
+  if (globalThis.tokenCouponPendingApprovalOverview) globalThis.tokenCouponPendingApprovalOverview.render({ count: items.length, summary });
+  else { $("#pending-approval-count").textContent = `${items.length} 项`; $("#pending-approval-summary").textContent = summary; }
   $("#pending-approval-box").classList.toggle("has-pending", !!items.length);
   show($("#pending-action-banner"), !!items.length);
   $("#pending-action-label").textContent = `${items.length} 项等待你审批／回答 · ${state.workspace.label}`;

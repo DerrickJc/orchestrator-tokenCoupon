@@ -224,6 +224,10 @@ export type SessionContinueModel = {
 export type SessionContinueBridge = {
   render(model: SessionContinueModel): void;
 };
+export type PendingApprovalOverviewModel = { count: number; summary: string };
+export type PendingApprovalOverviewBridge = {
+  render(model: PendingApprovalOverviewModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -243,4 +247,5 @@ declare global {
   var tokenCouponTaskDependencyPreview: TaskDependencyPreviewBridge | undefined;
   var tokenCouponSessionControls: SessionControlsBridge | undefined;
   var tokenCouponSessionContinue: SessionContinueBridge | undefined;
+  var tokenCouponPendingApprovalOverview: PendingApprovalOverviewBridge | undefined;
 }
