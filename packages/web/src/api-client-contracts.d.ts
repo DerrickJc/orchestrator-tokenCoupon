@@ -83,10 +83,16 @@ export type ReviewViewBridge = {
   setErrors(findingIds: string[]): void;
 };
 
+export type PlannerRequestComposerBridge = {
+  setValue(value: string): void;
+  focus(): void;
+};
+
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
   var tokenCouponCommandPalette: CommandPaletteBridge | undefined;
   var tokenCouponWorkspaceSwitcher: WorkspaceSwitcherBridge | undefined;
   var tokenCouponPlanningSwitcher: PlanningSwitcherBridge | undefined;
   var tokenCouponReviewView: ReviewViewBridge | undefined;
+  var tokenCouponPlannerRequestComposer: PlannerRequestComposerBridge | undefined;
 }

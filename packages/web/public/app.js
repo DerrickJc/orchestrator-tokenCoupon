@@ -721,7 +721,11 @@ async function applyRoute(path, replace = false) {
     if (route.page === "new" && (previous?.page !== "new" || previous.workspaceId !== route.workspaceId || state.resetPlanningPolicy)) { applyPlanningPolicy(); state.resetPlanningPolicy = false; }
     if (route.page === "plan" && state.planning) { renderReviewerControls(state.planning); renderRequirements(); renderReview(); renderPlanOverview(); renderPlanWorkflowBanner(); }
     if (route.page === "plan" && previous?.page === "plan" && previous.planningId === route.planningId && previous.tab !== route.tab) $(`#${route.tab}-tab`)?.scrollIntoView({ block: "start" });
-    if (route.page === "new" && previous?.page !== "new") (isWebMcp($("#planner-provider").value) ? $("#copy-web-planning") : $("#request-text")).focus();
+    if (route.page === "new" && previous?.page !== "new") {
+      if (isWebMcp($("#planner-provider").value)) $("#copy-web-planning").focus();
+      else if (globalThis.tokenCouponPlannerRequestComposer) globalThis.tokenCouponPlannerRequestComposer.focus();
+      else $("#request-text").focus();
+    }
   } catch (error) {
     if (sequence !== state.navigationSequence) return;
     showToast(error.message, true); state.route = { page: "workspaces" }; state.routeHash = "/workspaces";
@@ -3797,9 +3801,12 @@ $("#start-planning").addEventListener("click", async () => {
   const model = $("#planner-model").value.trim();
   const payload = { request, provider, ...(model ? { model } : {}), executionDefaults: { runnerId: $("#runner-id").value, mode: "managed", ...( $("#runner-model").value.trim() ? { modelId: $("#runner-model").value.trim() } : {}) } };
   const job = await startJob("开始规划", (requestKey) => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings`, { method: "POST", body: JSON.stringify({ ...payload, requestKey }) }));
-  if (job && ["running", "succeeded"].includes(job.status)) $("#request-text").value = "";
+  if (job && ["running", "succeeded"].includes(job.status)) {
+    $("#request-text").value = "";
+    globalThis.tokenCouponPlannerRequestComposer?.setValue("");
+  }
 });
-bindTextareaEnterSubmit($("#request-text"), () => $("#start-planning").click());
+if (!globalThis.tokenCouponPlannerRequestComposer) bindTextareaEnterSubmit($("#request-text"), () => $("#start-planning").click());
 $("#new-task").addEventListener("click", startNewTask);
 $("#new-task-sidebar").addEventListener("click", startNewTask);
 $("#refresh-models").addEventListener("click", () => { void loadRunnerModels(true); void loadPlannerModels(true); });

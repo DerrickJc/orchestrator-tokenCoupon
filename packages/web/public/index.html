@@ -9,6 +9,7 @@
   <script type="module" src="../src/workspace-cards.tsx"></script>
   <script type="module" src="../src/planning-navigation.tsx"></script>
   <script type="module" src="../src/review-view.tsx"></script>
+  <script type="module" src="../src/planner-request-composer.tsx"></script>
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -98,7 +99,7 @@
         <div class="section-title"><div><span class="eyebrow" id="planning-entry-label">WEB PLANNING</span><h2 id="planning-entry-title">网页规划准备与执行配置</h2></div><span id="planning-entry-step" class="step-pill">执行配置</span></div>
         <div id="web-planning-guide" class="notice hidden"><b>需求与澄清在网页完成</b><p>先选择执行 Runner 和模型，再复制提示到已连接 MCP 的 ChatGPT／Claude。可以直接提出需求，指定项目内文件，或让模型读取目录后制定计划；提交后这里自动显示草案与审查。</p><button id="copy-web-planning" type="button" class="button button-primary" disabled="">复制网页规划提示</button><p class="hint">复制时带上当前执行配置，无需填写需求。网页所用模型在对应网页选择；已有草案的执行模型需通过修订、审查和批准变更。</p></div>
         <div id="reference-summary" class="notice hidden"></div>
-        <div id="local-request-wrap"><label for="request-text" class="sr-only">需求描述</label><textarea id="request-text" rows="4" maxlength="8192" placeholder="例如：给现有服务增加课程查询接口，先检查项目约定，再补充测试。" aria-describedby="request-shortcuts"></textarea><p class="composer-shortcut-hint" id="request-shortcuts">Enter 发送 · Shift+Enter 换行</p></div>
+        <div id="local-request-wrap"><label for="request-text" class="sr-only">需求描述</label><div id="planner-request-composer-root"></div><textarea id="request-text" rows="4" maxlength="8192" placeholder="例如：给现有服务增加课程查询接口，先检查项目约定，再补充测试。" aria-describedby="request-shortcuts"></textarea><p class="composer-shortcut-hint" id="request-shortcuts">Enter 发送 · Shift+Enter 换行</p></div>
         <div class="settings-grid planning-config-grid">
           <label><span>规划方式</span><select id="planner-provider"></select></label>
           <label id="planner-model-wrap"><span>规划模型</span><select id="planner-model-choice"></select><input id="planner-model" class="hidden" aria-label="自定义规划模型 ID" placeholder="输入自定义模型 ID"><span id="planner-model-hint" class="hint"></span></label>
