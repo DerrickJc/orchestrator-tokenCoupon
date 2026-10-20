@@ -58,9 +58,35 @@ export type PlanningSwitcherBridge = {
   ): void;
 };
 
+export type ReviewChoice = { choice: "accept" | "custom" | "defer"; custom: string };
+export type ReviewFindingView = {
+  findingId: string;
+  severity: "error" | "warning" | "info";
+  description: string;
+  suggestion: string;
+  basis: string;
+};
+export type ReviewViewModel = {
+  contextKey: string;
+  summaryTitle: string;
+  summaryText: string;
+  isCurrent: boolean;
+  reviewReadError?: string;
+  findings: ReviewFindingView[];
+  canChoose: boolean;
+  choices: Record<string, ReviewChoice>;
+  resolutions: { findingId: string; status: string; basis: string }[];
+  history: string[];
+};
+export type ReviewViewBridge = {
+  render(model: ReviewViewModel, onChoiceChange: (findingId: string, choice: ReviewChoice) => void): void;
+  setErrors(findingIds: string[]): void;
+};
+
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
   var tokenCouponCommandPalette: CommandPaletteBridge | undefined;
   var tokenCouponWorkspaceSwitcher: WorkspaceSwitcherBridge | undefined;
   var tokenCouponPlanningSwitcher: PlanningSwitcherBridge | undefined;
+  var tokenCouponReviewView: ReviewViewBridge | undefined;
 }

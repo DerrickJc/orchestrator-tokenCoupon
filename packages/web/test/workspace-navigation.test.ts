@@ -506,6 +506,23 @@ it("passes plan summaries to the React navigation and preserves existing plan/to
   expect(received.items.find((item: any) => item.planningId === "first")?.toolsExpanded).toBe(true);
 });
 
+it("passes review findings to the React view and persists the chosen revision guidance", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/review", ready: true });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  h.w.eval(`__testState.planning.review.findings = [{ findingId: "F1", severity: "warning", description: "缺少错误响应测试", suggestion: "补充 400 响应测试", basis: "接口契约没有负向测试" }]; __testState.renderedReviewSignature = undefined;`);
+  let received: any;
+  (h.w as any).tokenCouponReviewView = {
+    render: (model: any, onChoiceChange: (id: string, choice: any) => void) => { received = { model, onChoiceChange }; },
+    setErrors: () => undefined,
+  };
+  h.w.eval("renderReview()");
+  expect(received.model.findings).toMatchObject([{ findingId: "F1", severity: "warning", suggestion: "补充 400 响应测试" }]);
+  expect(received.model.canChoose).toBe(true);
+  received.onChoiceChange("F1", { choice: "custom", custom: "增加错误响应断言" });
+  const storageKey = h.w.eval("`tc-review-${__testState.reviewChoiceContext.key}`");
+  expect(JSON.parse(h.w.sessionStorage.getItem(storageKey)!)).toMatchObject({ F1: { choice: "custom", custom: "增加错误响应断言" } });
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

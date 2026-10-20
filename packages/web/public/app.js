@@ -2184,43 +2184,77 @@ function renderReview() {
   const signature = JSON.stringify([state.workspace.workspaceId, plan.planningId, plan.draft?.planHash, review, plan.workflow, plan.approval, plan.execution, plan.reviewHistory, plan.approvalHistory, plan.reviewReadError, state.systemSettings?.revision, state.activeJob?.jobId]);
   // A poll with no review change must not close an open select or move a typing cursor.
   if (state.renderedReviewSignature === signature) return;
-  state.renderedReviewSignature = signature; box.replaceChildren();
+  state.renderedReviewSignature = signature;
   const key = `${state.workspace.workspaceId}:${plan.planningId}:${plan.draft?.planHash}:${review?.reviewId}`;
   if (state.reviewChoiceContext?.key !== key) {
     if (state.reviewChoiceContext?.planningId === plan.planningId && state.reviewChoiceContext.dirty) showToast("草案或审查版本已变化，旧处理选择不再适用，请重新确认。", true);
     let choices = {}; try { choices = JSON.parse(sessionStorage.getItem(`tc-review-${key}`) || "{}"); } catch { /* Invalid local input is not a review record. */ }
     state.reviewChoiceContext = { key, planningId: plan.planningId, choices, dirty: Object.keys(choices).length > 0 };
   }
-  const summary = document.createElement("section"); summary.className = `review-overview ${review?.current ? "is-current" : ""}`;
-  const summaryTitle = document.createElement("strong"); summaryTitle.textContent = review ? `${review.current ? "有效审查" : "审查已过期"} · draft-${review.draftRevision}` : plan.workflow?.label || "当前草案尚无有效审查";
+  const summaryTitle = review ? `${review.current ? "有效审查" : "审查已过期"} · draft-${review.draftRevision}` : plan.workflow?.label || "当前草案尚无有效审查";
   const reviewConfig = review?.reviewerConfig || plan.config;
   const reviewSource = review ? `审查来源：${({ deepseek: "DeepSeek API", mock: "离线模拟", "codex-agent": "Codex 本机 Agent", "claude-agent": "Claude Code 本机 Agent", "chatgpt-mcp": "ChatGPT 网页 MCP", "web-mcp": "Claude／网页 MCP" })[reviewConfig.provider] || reviewConfig.provider} · ${review.reviewerReportedModel ? `实际报告 ${review.reviewerReportedModel}` : `配置 ${reviewConfig.model}${["codex-agent", "claude-agent"].includes(reviewConfig.provider) ? "（Runner 未报告实际模型）" : ""}`}` : "";
-  const summaryText = document.createElement("p"); summaryText.textContent = review ? `${review.reviewId ? `Review ${shortId(review.reviewId)} · ` : ""}${review.summary || "无总结"}${reviewSource ? `\n${reviewSource}` : ""}` : !selectedOperationIsWeb("review") ? "点击上方审查按钮，调用所选本机 Agent／API 审查当前草案。有待处理网页审查时，先确认接管。" : plan.workflow?.detail || "先准备审查，再到网页领取并提交报告。";
-  summary.append(summaryTitle, summaryText);
-  box.append(summary);
-  if (plan.reviewReadError) { const error = document.createElement("p"); error.className = "notice notice-warn"; error.textContent = `审查记录读取失败：${plan.reviewReadError}`; box.append(error); }
-  for (const finding of review?.findings || []) {
-    const item = document.createElement("article"); item.className = "finding";
-    const severity = finding.severity === "error" ? "阻塞建议" : finding.severity === "warning" ? "风险提醒" : "可选建议";
-    item.innerHTML = `<div class="finding-head"><span class="badge ${finding.severity === "error" ? "badge-error" : finding.severity === "warning" ? "badge-warning" : "badge-neutral"}">${severity}</span><h4>${esc(finding.findingId)} · ${esc(finding.description)}</h4></div><p class="finding-suggestion">建议：${esc(finding.suggestion)}</p><details class="finding-basis"><summary>查看依据</summary><p class="basis">${esc(finding.basis)}</p></details>`;
-    if (review.current && !plan.execution && !plan.approval && plan.workflow?.role !== "plan") item.append(reviewChoice(finding));
-    box.append(item);
-  }
-  if (review?.resolutions?.length) {
-    const resolutions = document.createElement("details"); resolutions.className = "review-resolutions";
-    const heading = document.createElement("summary"); heading.textContent = `上轮问题逐项回顾 · ${review.resolutions.filter(item => item.status === "resolved").length}/${review.resolutions.length} 已解决`;
-    resolutions.append(heading);
-    for (const resolution of review.resolutions) { const row = document.createElement("p"); row.className = resolution.status === "resolved" ? "resolution-resolved" : "resolution-open"; row.textContent = `${resolution.findingId} · ${resolution.status === "resolved" ? "已解决" : "仍未解决"}：${resolution.basis}`; resolutions.append(row); }
-    box.append(resolutions);
-  }
-  if (plan.reviewHistory?.length || plan.approvalHistory?.length) {
-    const history = document.createElement("details"); history.className = "foldout";
-    const heading = document.createElement("summary"); heading.textContent = "历史审查与批准（只读，不适用于本版）"; history.append(heading);
-    for (const previous of plan.reviewHistory || []) { const text = document.createElement("p"); text.textContent = `draft-${previous.draftRevision} · ${previous.summary} · ${previous.findings.length} 个问题`; history.append(text); }
-    for (const previous of plan.approvalHistory || []) { const text = document.createElement("p"); text.textContent = `历史批准 draft-${previous.draftRevision} · ${new Date(previous.recordedAt).toLocaleString()}`; history.append(text); }
-    box.append(history);
+  const summaryText = review ? `${review.reviewId ? `Review ${shortId(review.reviewId)} · ` : ""}${review.summary || "无总结"}${reviewSource ? `\n${reviewSource}` : ""}` : !selectedOperationIsWeb("review") ? "点击上方审查按钮，调用所选本机 Agent／API 审查当前草案。有待处理网页审查时，先确认接管。" : plan.workflow?.detail || "先准备审查，再到网页领取并提交报告。";
+  const findings = (review?.findings || []).map(finding => ({
+    findingId: finding.findingId,
+    severity: ["error", "warning"].includes(finding.severity) ? finding.severity : "info",
+    description: finding.description,
+    suggestion: finding.suggestion,
+    basis: finding.basis,
+  }));
+  const history = [
+    ...(plan.reviewHistory || []).map(previous => `draft-${previous.draftRevision} · ${previous.summary} · ${previous.findings.length} 个问题`),
+    ...(plan.approvalHistory || []).map(previous => `历史批准 draft-${previous.draftRevision} · ${new Date(previous.recordedAt).toLocaleString()}`),
+  ];
+  if (globalThis.tokenCouponReviewView) {
+    const choices = Object.fromEntries(findings.map(finding => [finding.findingId, state.reviewChoiceContext.choices[finding.findingId] || { choice: "accept", custom: "" }]));
+    globalThis.tokenCouponReviewView.render({
+      contextKey: key,
+      summaryTitle,
+      summaryText,
+      isCurrent: !!review?.current,
+      ...(plan.reviewReadError ? { reviewReadError: plan.reviewReadError } : {}),
+      findings,
+      canChoose: !!review?.current && !plan.execution && !plan.approval && plan.workflow?.role !== "plan",
+      choices,
+      resolutions: review?.resolutions || [],
+      history,
+    }, rememberReviewChoice);
+  } else {
+    box.replaceChildren();
+    const summary = document.createElement("section"); summary.className = `review-overview ${review?.current ? "is-current" : ""}`;
+    const summaryHeading = document.createElement("strong"); summaryHeading.textContent = summaryTitle;
+    const summaryParagraph = document.createElement("p"); summaryParagraph.textContent = summaryText;
+    summary.append(summaryHeading, summaryParagraph); box.append(summary);
+    if (plan.reviewReadError) { const error = document.createElement("p"); error.className = "notice notice-warn"; error.textContent = `审查记录读取失败：${plan.reviewReadError}`; box.append(error); }
+    for (const finding of review?.findings || []) {
+      const item = document.createElement("article"); item.className = "finding";
+      const severity = finding.severity === "error" ? "阻塞建议" : finding.severity === "warning" ? "风险提醒" : "可选建议";
+      item.innerHTML = `<div class="finding-head"><span class="badge ${finding.severity === "error" ? "badge-error" : finding.severity === "warning" ? "badge-warning" : "badge-neutral"}">${severity}</span><h4>${esc(finding.findingId)} · ${esc(finding.description)}</h4></div><p class="finding-suggestion">建议：${esc(finding.suggestion)}</p><details class="finding-basis"><summary>查看依据</summary><p class="basis">${esc(finding.basis)}</p></details>`;
+      if (review.current && !plan.execution && !plan.approval && plan.workflow?.role !== "plan") item.append(reviewChoice(finding));
+      box.append(item);
+    }
+    if (review?.resolutions?.length) {
+      const resolutions = document.createElement("details"); resolutions.className = "review-resolutions";
+      const heading = document.createElement("summary"); heading.textContent = `上轮问题逐项回顾 · ${review.resolutions.filter(item => item.status === "resolved").length}/${review.resolutions.length} 已解决`;
+      resolutions.append(heading);
+      for (const resolution of review.resolutions) { const row = document.createElement("p"); row.className = resolution.status === "resolved" ? "resolution-resolved" : "resolution-open"; row.textContent = `${resolution.findingId} · ${resolution.status === "resolved" ? "已解决" : "仍未解决"}：${resolution.basis}`; resolutions.append(row); }
+      box.append(resolutions);
+    }
+    if (history.length) {
+      const details = document.createElement("details"); details.className = "foldout";
+      const heading = document.createElement("summary"); heading.textContent = "历史审查与批准（只读，不适用于本版）"; details.append(heading);
+      for (const entry of history) { const text = document.createElement("p"); text.textContent = entry; details.append(text); }
+      box.append(details);
+    }
   }
   renderReviewActions(review);
+}
+function rememberReviewChoice(findingId, value) {
+  if (!state.reviewChoiceContext) return;
+  state.reviewChoiceContext.choices[findingId] = value;
+  state.reviewChoiceContext.dirty = true;
+  try { sessionStorage.setItem(`tc-review-${state.reviewChoiceContext.key}`, JSON.stringify(state.reviewChoiceContext.choices)); } catch { /* Input remains in memory if storage is full. */ }
 }
 function renderReviewContinuation() {
   const plan = state.planning; if (!plan) return;
@@ -2252,9 +2286,13 @@ function renderReviewActions(review) {
 }
 async function submitReviewRevision(review) {
   if (functionPolicy("revision") && !state.operationRoutingSupported) { showToast("后台尚未支持按设置切换修订方式，请重启后台并刷新页面。", true); return; }
-  const actions = [...$("#review-view").querySelectorAll(".finding-choice")].map((row) => ({ findingId: row.dataset.findingId, choice: row.querySelector("select").value, custom: row.querySelector("textarea").value.trim() }));
-  if (actions.some((item) => item.choice === "custom" && !item.custom)) {
-    for (const row of $("#review-view").querySelectorAll(".finding-choice")) { const invalid = row.querySelector("select").value === "custom" && !row.querySelector("textarea").value.trim(); row.querySelector(".field-error").textContent = "请填写自定义修订说明"; show(row.querySelector(".field-error"), invalid); }
+  const actions = globalThis.tokenCouponReviewView
+    ? review.findings.map(finding => { const saved = state.reviewChoiceContext.choices[finding.findingId] || { choice: "accept", custom: "" }; return { findingId: finding.findingId, choice: saved.choice, custom: saved.custom.trim() }; })
+    : [...$("#review-view").querySelectorAll(".finding-choice")].map(row => ({ findingId: row.dataset.findingId, choice: row.querySelector("select").value, custom: row.querySelector("textarea").value.trim() }));
+  const invalidChoices = actions.filter(item => item.choice === "custom" && !item.custom.trim()).map(item => item.findingId);
+  if (invalidChoices.length) {
+    if (globalThis.tokenCouponReviewView) globalThis.tokenCouponReviewView.setErrors(invalidChoices);
+    else for (const row of $("#review-view").querySelectorAll(".finding-choice")) { const invalid = invalidChoices.includes(row.dataset.findingId); row.querySelector(".field-error").textContent = "请填写自定义修订说明"; show(row.querySelector(".field-error"), invalid); }
     showToast("自定义修订说明不能为空。", true); return;
   }
   if (!await confirmPlanChanges()) return;
