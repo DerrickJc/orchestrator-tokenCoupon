@@ -1,0 +1,54 @@
+name: Desktop runtime validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-runtime:
+    name: ${{ matrix.os }} · Node 22.12.0
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      TOKEN_COUPON_BUILD_ID: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.12.0
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - name: Stage and smoke native desktop runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export TOKEN_COUPON_BUNDLED_NODE="$(node -p 'process.execPath')"
+          npm run desktop:stage-resources -- --resources-dir "$RUNNER_TEMP/token-coupon-electron-resources"
+
+      - name: Stage and smoke native desktop runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:TOKEN_COUPON_BUNDLED_NODE = (node -p "process.execPath")
+          $resources = Join-Path $env:RUNNER_TEMP "token-coupon-electron-resources"
+          npm run desktop:stage-resources -- --resources-dir $resources
