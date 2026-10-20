@@ -468,6 +468,44 @@ it("keeps quick navigation usable when the compiled React entry is unavailable",
   expect(dialog.open).toBe(false);
 });
 
+it("passes workspace state to the React switcher and keeps selection in the existing router", async () => {
+  const h = await page({ ready: true });
+  let received: any;
+  (h.w as any).tokenCouponWorkspaceSwitcher = {
+    render: (workspaces: any[], selectedWorkspaceId: string | undefined, onSelect: (id: string) => void) => {
+      received = { workspaces, selectedWorkspaceId, onSelect };
+    },
+  };
+  h.w.eval("renderWorkspaces()");
+  expect(received.workspaces).toMatchObject([{ workspaceId: "project", label: "排课后端", path: "/projects/排课后端" }]);
+  expect(received.selectedWorkspaceId).toBeUndefined();
+  received.onSelect("project");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project");
+  expect(received.selectedWorkspaceId).toBe("project");
+});
+
+it("passes plan summaries to the React navigation and preserves existing plan/tool routes", async () => {
+  const h = await page({ hash: "#/workspaces/project", ready: true });
+  await expect.poll(() => h.w.eval("__testState?.plannings?.length")).toBe(2);
+  let received: any;
+  (h.w as any).tokenCouponPlanningSwitcher = {
+    render: (items: any[], activeTool: string | undefined, onSelect: (id: string) => void, onOpenTool: (id: string, tab: string) => void, onToolsToggle: (id: string, expanded: boolean) => void) => {
+      received = { items, activeTool, onSelect, onOpenTool, onToolsToggle };
+    },
+  };
+  h.w.eval("renderPlanningList()");
+  expect(received.items).toHaveLength(2);
+  expect(received.items[0]).toMatchObject({ planningId: "first", title: "计划 first", taskCount: 5, selected: false });
+  received.onSelect("first");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first");
+  await expect.poll(() => received.items.find((item: any) => item.planningId === "first")?.selected).toBe(true);
+  received.onOpenTool("first", "attempts");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/attempts");
+  received.onToolsToggle("first", true);
+  h.w.eval("renderPlanningList()");
+  expect(received.items.find((item: any) => item.planningId === "first")?.toolsExpanded).toBe(true);
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

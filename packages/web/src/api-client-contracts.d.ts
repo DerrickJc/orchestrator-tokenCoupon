@@ -26,7 +26,41 @@ export type CommandPaletteBridge = {
   ): void;
 };
 
+export type WorkspaceCardItem = { workspaceId: string; label: string; path: string };
+
+export type WorkspaceSwitcherBridge = {
+  render(
+    workspaces: WorkspaceCardItem[],
+    selectedWorkspaceId: string | undefined,
+    onSelect: (workspaceId: string) => void,
+  ): void;
+};
+
+export type PlanningNavigationItem = {
+  planningId: string;
+  title: string;
+  status: string;
+  statusTone: string;
+  createdAt?: string;
+  taskCount: number;
+  selected: boolean;
+  workflowLabel?: string;
+  toolsExpanded: boolean;
+};
+
+export type PlanningSwitcherBridge = {
+  render(
+    items: PlanningNavigationItem[],
+    activeTool: string | undefined,
+    onSelect: (planningId: string) => void,
+    onOpenTool: (planningId: string, tab: string) => void,
+    onToolsToggle: (planningId: string, expanded: boolean) => void,
+  ): void;
+};
+
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
   var tokenCouponCommandPalette: CommandPaletteBridge | undefined;
+  var tokenCouponWorkspaceSwitcher: WorkspaceSwitcherBridge | undefined;
+  var tokenCouponPlanningSwitcher: PlanningSwitcherBridge | undefined;
 }

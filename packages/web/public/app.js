@@ -1162,17 +1162,26 @@ async function loadPlannerModels(refresh = false) {
   } catch (error) { if (sequence === state.plannerModelRequest) $("#planner-model-hint").textContent = error.message; }
 }
 function renderWorkspaces() {
-  const list = $("#workspace-list"); list.replaceChildren();
-  const cards = $("#workspace-cards"); cards.replaceChildren();
-  if (!state.workspaces.length) { list.innerHTML = '<div class="muted small" style="padding:8px">尚未添加项目</div>'; cards.innerHTML = '<div class="empty-state">添加一个项目目录，或先完成上一步连接。</div>'; return; }
-  for (const workspace of state.workspaces) {
-    const button = document.createElement("button"); button.className = `workspace-item ${state.workspace?.workspaceId === workspace.workspaceId ? "active" : ""}`; button.innerHTML = `<span class="workspace-glyph">⌂</span><span>${esc(workspace.label)}</span>`;
-    button.addEventListener("click", () => selectWorkspace(workspace.workspaceId)); list.append(button);
-    const card = document.createElement("button"); card.className = `project-card ${state.workspace?.workspaceId === workspace.workspaceId ? "selected" : ""}`;
-    card.innerHTML = `<span class="eyebrow">WORKSPACE</span><strong>${esc(workspace.label)}</strong><span class="muted small">${esc(workspace.path)}</span><span class="card-link">打开工作区 →</span>`;
-    card.addEventListener("click", () => selectWorkspace(workspace.workspaceId));
-    cards.append(card);
+  const list = $("#workspace-list");
+  const cards = $("#workspace-cards");
+  const reactSwitcher = globalThis.tokenCouponWorkspaceSwitcher;
+  if (!reactSwitcher) { list.replaceChildren(); cards.replaceChildren(); }
+  if (!state.workspaces.length) {
+    if (reactSwitcher) reactSwitcher.render([], undefined, selectWorkspace);
+    else { list.innerHTML = '<div class="muted small" style="padding:8px">尚未添加项目</div>'; cards.innerHTML = '<div class="empty-state">添加一个项目目录，或先完成上一步连接。</div>'; }
+    return;
   }
+  for (const workspace of state.workspaces) {
+    if (!reactSwitcher) {
+      const button = document.createElement("button"); button.className = `workspace-item ${state.workspace?.workspaceId === workspace.workspaceId ? "active" : ""}`; button.innerHTML = `<span class="workspace-glyph">⌂</span><span>${esc(workspace.label)}</span>`;
+      button.addEventListener("click", () => selectWorkspace(workspace.workspaceId)); list.append(button);
+      const card = document.createElement("button"); card.className = `project-card ${state.workspace?.workspaceId === workspace.workspaceId ? "selected" : ""}`;
+      card.innerHTML = `<span class="eyebrow">WORKSPACE</span><strong>${esc(workspace.label)}</strong><span class="muted small">${esc(workspace.path)}</span><span class="card-link">打开工作区 →</span>`;
+      card.addEventListener("click", () => selectWorkspace(workspace.workspaceId));
+      cards.append(card);
+    }
+  }
+  reactSwitcher?.render(state.workspaces, state.workspace?.workspaceId, selectWorkspace);
 }
 
 function planningListStatus(planning) {
@@ -1202,9 +1211,36 @@ function planningCreationTime(planning) {
   return `<time class="planning-created" datetime="${esc(date.toISOString())}" title="${esc(date.toLocaleString())}">创建 ${esc(text)}</time>`;
 }
 function renderPlanningList() {
-  const root = $("#planning-list"); root.replaceChildren();
-  const cards = $("#workspace-plan-cards"); cards.replaceChildren();
+  const root = $("#planning-list"), cards = $("#workspace-plan-cards");
   show($("#planning-nav-heading"), !!state.workspace);
+  const reactPlanning = globalThis.tokenCouponPlanningSwitcher;
+  if (reactPlanning) {
+    state.planToolsExpanded ??= new Map();
+    const items = state.plannings.map(planning => {
+      const status = planningListStatus(planning);
+      const identity = `${state.workspace.workspaceId}:${planning.planningId}`;
+      return {
+        planningId: planning.planningId,
+        title: planning.draft?.plan?.title || planning.messages?.[0]?.content?.slice(0, 28) || "新规划",
+        status: status.label,
+        statusTone: status.tone,
+        createdAt: planning.createdAt,
+        taskCount: planning.draft?.plan?.tasks?.length || 0,
+        selected: state.planning?.planningId === planning.planningId,
+        workflowLabel: planning.workflow?.label,
+        toolsExpanded: state.planToolsExpanded.get(identity) ?? (state.planning?.planningId === planning.planningId && ["models", "attempts"].includes(state.route?.tab)),
+      };
+    });
+    reactPlanning.render(
+      items,
+      state.route?.tab,
+      planningId => { void selectPlanning(planningId); },
+      (planningId, tab) => { if (state.workspace) void navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/plans/${encodeURIComponent(planningId)}/${tab}`); },
+      (planningId, expanded) => { if (state.workspace) state.planToolsExpanded.set(`${state.workspace.workspaceId}:${planningId}`, expanded); },
+    );
+    return;
+  }
+  root.replaceChildren(); cards.replaceChildren();
   for (const planning of state.plannings) {
     const button = document.createElement("button"); button.className = `workspace-item ${state.planning?.planningId === planning.planningId ? "active" : ""}`;
     const title = planning.draft?.plan?.title || planning.messages?.[0]?.content?.slice(0, 28) || "新规划";
