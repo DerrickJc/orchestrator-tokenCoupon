@@ -1966,6 +1966,30 @@ it("routes Runner question answers from React through the existing interaction A
   await expect.poll(() => unmounts).toBe(1);
 });
 
+it.each([
+  ["approval", { kind: "approval", decision: "deny", guidance: "重新检查命令参数" }],
+  ["elicitation", { kind: "elicitation", action: "decline", guidance: "不要提交外部表单" }],
+  ["question", { kind: "question", answers: [], guidance: "先读取已有设计文件" }],
+] as const)("maps React guidance for %s to the existing reply protocol", async (kind, expectedReply) => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingInteractionGuidance = {
+    render(mount: HTMLElement, model: any) { received = model; mount.textContent = "React guidance"; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: `guidance-${kind}`, owner: { runnerId: "codex", taskId: "backend" }, request: { kind, title: "需要调整", ...(kind === "question" ? { questions: [] } : {}) } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received?.kind).toBe(kind);
+  const guidance = kind === "approval" ? "重新检查命令参数" : kind === "elicitation" ? "不要提交外部表单" : "先读取已有设计文件";
+  received.onSubmit(guidance);
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: `/api/v1/workspaces/project/interactions/guidance-${kind}`, body: expectedReply });
+  h.setInteractions([]);
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

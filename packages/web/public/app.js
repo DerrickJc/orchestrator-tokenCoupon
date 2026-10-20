@@ -3391,6 +3391,7 @@ async function renderInteractions() {
   globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
   globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
   globalThis.tokenCouponPendingRunnerQuestions?.unmountWithin(root);
+  globalThis.tokenCouponPendingInteractionGuidance?.unmountWithin(root);
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
     const card = document.createElement("div"); card.className = "interaction-card";
@@ -3523,6 +3524,19 @@ function renderRunnerQuestions(card, interaction, drafts) {
 }
 function appendInteractionGuidance(card, interaction) {
   if (!["codex", "claude-code"].includes(interaction.owner.runnerId)) return;
+  if (globalThis.tokenCouponPendingInteractionGuidance) {
+    const mount = document.createElement("div"); mount.className = "interaction-guidance-react-root"; card.append(mount);
+    globalThis.tokenCouponPendingInteractionGuidance.render(mount, {
+      kind: interaction.request.kind,
+      onInvalid: () => showToast("请填写调整指导；当前请求尚未提交。", true),
+      onSubmit: text => {
+        const kind = interaction.request.kind;
+        const reply = kind === "approval" ? { kind, decision: "deny", guidance: text } : kind === "elicitation" ? { kind, action: "decline", guidance: text } : { kind: "question", answers: [], guidance: text };
+        void respondInteraction(interaction.requestId, reply);
+      },
+    });
+    return;
+  }
   const area = document.createElement("div"); area.className = "approval-guidance";
   const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "button button-quiet interaction-no"; toggle.textContent = "NO, tell what to do · 拒绝并指导"; toggle.setAttribute("aria-expanded", "false");
   const editor = document.createElement("div"); editor.className = "guidance-editor hidden";

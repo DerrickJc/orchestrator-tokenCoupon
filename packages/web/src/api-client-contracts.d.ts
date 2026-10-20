@@ -273,6 +273,16 @@ export type PendingRunnerQuestionsBridge = {
   render(mount: HTMLElement, model: PendingRunnerQuestionsModel): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type PendingInteractionGuidanceKind = "approval" | "elicitation" | "question";
+export type PendingInteractionGuidanceModel = {
+  kind: PendingInteractionGuidanceKind;
+  onSubmit: (guidance: string) => void;
+  onInvalid: () => void;
+};
+export type PendingInteractionGuidanceBridge = {
+  render(mount: HTMLElement, model: PendingInteractionGuidanceModel): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -296,4 +306,5 @@ declare global {
   var tokenCouponPendingApprovalText: PendingApprovalTextBridge | undefined;
   var tokenCouponPendingApprovalDecision: PendingApprovalDecisionBridge | undefined;
   var tokenCouponPendingRunnerQuestions: PendingRunnerQuestionsBridge | undefined;
+  var tokenCouponPendingInteractionGuidance: PendingInteractionGuidanceBridge | undefined;
 }

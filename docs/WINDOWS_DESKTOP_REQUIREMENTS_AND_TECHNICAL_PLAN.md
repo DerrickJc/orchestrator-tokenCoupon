@@ -716,3 +716,9 @@ React 管理审查摘要、来源/模型信息、问题卡片、依据折叠、�
 将 Runner 提问表单迁入 React，支持必填校验、单选/多选、允许时的自定义文本和敏感回答输入；轮询导致卡片重建时，应用从现有输入读取草稿并交回组件恢复。提交仍通过原 `respondInteraction` 回调发送 `{ kind: "question", answers }`，并继续由 Runner 处理回答后的任务恢复。组件卸载与卡片刷新同步，回答协议没有变化。
 
 本次 Web 类型检查、生产构建和 `git diff --check` 通过；问题表单组件、回答回调、草稿恢复、审批决策/文本/摘要、Session 控件及执行页面回归共 149 项通过。尚未运行真实浏览器或 Windows 桌面验收；NO 指导和 MCP elicitation 表单仍由原生 JavaScript 管理。
+
+### 13.23 拒绝并指导面板迁入 React（2026-10-20）
+
+将 Codex/Claude Code 请求卡片中的“NO, tell what to do”展开、指导文本输入、空值提示、关闭和提交按钮迁入 React。原应用仍根据请求类型把指导转换为工具拒绝、elicitation 拒绝或 Runner 问题指导，并使用既有交互 API；空指导仍会阻止提交，取消编辑保留已输入文本。刷新卡片时卸载对应 React root。
+
+本次 Web 类型检查、生产构建和 `git diff --check` 通过；指导面板组件、三种请求协议映射、问题回答草稿恢复、审批按钮/文本/摘要、Session 控件及执行页回归共 154 项通过。尚未运行真实浏览器或 Windows 桌面验收；MCP elicitation 表单本身仍由原生 JavaScript 管理。
