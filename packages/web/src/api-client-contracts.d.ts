@@ -348,6 +348,16 @@ export type AttemptRecordControlsModel = { hasMore: boolean; loading: boolean };
 export type AttemptRecordControlsBridge = {
   render(model: AttemptRecordControlsModel, callbacks: { onRefresh: () => void; onMore: () => void }): void;
 };
+export type PlannerProviderOption = { id: string; label: string; disabled: boolean };
+export type PlannerProviderSelectorModel = {
+  standalone: PlannerProviderOption[];
+  localAgents: PlannerProviderOption[];
+  apiProviders: PlannerProviderOption[];
+  selectedProviderId: string;
+};
+export type PlannerProviderSelectorBridge = {
+  render(model: PlannerProviderSelectorModel, onChange: (providerId: string) => void): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -440,6 +450,7 @@ declare global {
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
   var tokenCouponAttemptToolsPagination: AttemptToolsPaginationBridge | undefined;
   var tokenCouponAttemptRecordControls: AttemptRecordControlsBridge | undefined;
+  var tokenCouponPlannerProviderSelector: PlannerProviderSelectorBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;

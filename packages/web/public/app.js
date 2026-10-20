@@ -1070,21 +1070,42 @@ async function init() {
 }
 function disconnected(error) { $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; showToast(error.message || "无法连接本机服务", true); }
 function renderProviders() {
-  const select = $("#planner-provider"); select.replaceChildren();
-  const local = document.createElement("optgroup"); local.label = "本机 Agent（只读规划／审查）";
-  const api = document.createElement("optgroup"); api.label = "模型 API / 离线演示";
+  const select = $("#planner-provider"), standalone = [], local = [], api = [];
   for (const provider of state.providers) {
     if (["chatgpt-web", "chatgpt-mcp"].includes(provider.id) && state.providers.some(item => item.id === "web-mcp")) continue;
-    const option = new Option(provider.available ? provider.label : `${provider.label} · 未连接`, provider.id);
-    option.disabled = !provider.available;
-    if (isWebMcp(provider.id)) select.add(option);
-    else if (provider.id.endsWith("-agent")) local.append(option);
-    else api.append(option);
+    const item = { id: provider.id, label: provider.available ? provider.label : `${provider.label} · 未连接`, disabled: !provider.available };
+    if (isWebMcp(provider.id)) standalone.push(item);
+    else if (provider.id.endsWith("-agent")) local.push(item);
+    else api.push(item);
   }
-  if (local.children.length) select.append(local);
-  if (api.children.length) select.append(api);
+  const allProviders = [...standalone, ...local, ...api];
+  const preferred = allProviders.find(option => option.id === "web-mcp" && !option.disabled)?.id
+    || allProviders.find(option => option.id === "chatgpt-mcp" && !option.disabled)?.id
+    || allProviders.find(option => !option.disabled)?.id || "";
+  if (!allProviders.some(option => option.id === state.plannerProviderId && !option.disabled)) state.plannerProviderId = preferred;
+  const renderSelector = () => {
+    const model = { standalone, localAgents: local, apiProviders: api, selectedProviderId: state.plannerProviderId || "" };
+    if (globalThis.tokenCouponPlannerProviderSelector) {
+      globalThis.tokenCouponPlannerProviderSelector.render(model, providerId => {
+        state.plannerProviderId = providerId; update();
+      });
+      return;
+    }
+    select.replaceChildren();
+    for (const option of standalone) { const entry = new Option(option.label, option.id, false, option.id === state.plannerProviderId); entry.disabled = option.disabled; select.add(entry); }
+    for (const [items, label] of [[local, "本机 Agent（只读规划／审查）"], [api, "模型 API / 离线演示"]]) {
+      if (!items.length) continue;
+      const group = document.createElement("optgroup"); group.label = label;
+      for (const option of items) { const entry = new Option(option.label, option.id, false, option.id === state.plannerProviderId); entry.disabled = option.disabled; group.append(entry); }
+      select.append(group);
+    }
+    select.value = state.plannerProviderId || "";
+    select.onchange = () => { state.plannerProviderId = select.value; update(); };
+  };
   const update = () => {
-    const provider = select.value, mcp = isWebMcp(provider);
+    const provider = globalThis.tokenCouponPlannerProviderSelector ? state.plannerProviderId : select.value, mcp = isWebMcp(provider);
+    state.plannerProviderId = provider;
+    if (globalThis.tokenCouponPlannerProviderSelector) renderSelector();
     show($("#planner-model-wrap"), !mcp && provider !== "mock");
     show($("#web-planning-guide"), mcp); show($("#local-request-wrap"), !mcp); show($("#start-planning"), !mcp);
     $("#planning-entry-label").textContent = mcp ? "WEB PLANNING" : "NEW PLANNING";
@@ -1100,7 +1121,7 @@ function renderProviders() {
     $("#start-planning").textContent = mcp ? "登记需求，等待网页" : "开始规划";
     show($("#provider-notice"), false); void loadPlannerModels();
   };
-  select.value = state.providers.some(item => item.id === "web-mcp") ? "web-mcp" : state.providers.some(item => item.id === "chatgpt-mcp") ? "chatgpt-mcp" : state.providers.find(item => item.available)?.id || ""; select.onchange = update;
+  renderSelector();
   $("#planner-model-choice").onchange = () => applyModelChoice("planner"); update();
 }
 function renderRunners() {

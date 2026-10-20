@@ -9,6 +9,7 @@
   <script type="module" src="../src/workspace-cards.tsx"></script>
   <script type="module" src="../src/planning-navigation.tsx"></script>
   <script type="module" src="../src/review-view.tsx"></script>
+  <script type="module" src="../src/planner-provider-selector.tsx"></script>
   <script type="module" src="../src/planner-request-composer.tsx"></script>
   <script type="module" src="../src/reply-composer.tsx"></script>
   <script type="module" src="../src/plan-draft-view.tsx"></script>
@@ -132,7 +133,7 @@
         <div id="reference-summary" class="notice hidden"></div>
         <div id="local-request-wrap"><label for="request-text" class="sr-only">需求描述</label><div id="planner-request-composer-root"></div><textarea id="request-text" rows="4" maxlength="8192" placeholder="例如：给现有服务增加课程查询接口，先检查项目约定，再补充测试。" aria-describedby="request-shortcuts"></textarea><p class="composer-shortcut-hint" id="request-shortcuts">Enter 发送 · Shift+Enter 换行</p></div>
         <div class="settings-grid planning-config-grid">
-          <label><span>规划方式</span><select id="planner-provider"></select></label>
+          <label><span>规划方式</span><div id="planner-provider-root"><select id="planner-provider"></select></div></label>
           <label id="planner-model-wrap"><span>规划模型</span><select id="planner-model-choice"></select><input id="planner-model" class="hidden" aria-label="自定义规划模型 ID" placeholder="输入自定义模型 ID"><span id="planner-model-hint" class="hint"></span></label>
           <label><span>执行工具</span><select id="runner-id"></select></label>
           <label><span>执行模型</span><select id="runner-model-choice"><option value="">沿用 Runner 默认模型</option><option value="__custom__">自定义模型 ID…</option></select><input id="runner-model" class="hidden" aria-label="自定义执行模型 ID" placeholder="输入自定义模型 ID"></label>
