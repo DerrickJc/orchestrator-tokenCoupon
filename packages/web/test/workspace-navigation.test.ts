@@ -2087,8 +2087,8 @@ it("publishes the current tool page and open foldout state to the React Attempt 
 
 it("publishes the filtered raw-event page to the React Attempt raw event view", async () => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
-  let received: any;
-  h.w.tokenCouponAttemptRawEvents = { render(model: any) { received = model; } } as any;
+  let received: any, actions: any;
+  h.w.tokenCouponAttemptRawEvents = { render(_mount: HTMLElement, model: any, callbacks: any) { received = model; actions = callbacks; } } as any;
   h.element("attempt-raw").scrollTop = 37;
   h.w.eval(`
     __testState.attemptView = {
@@ -2101,13 +2101,13 @@ it("publishes the filtered raw-event page to the React Attempt raw event view", 
     renderAttemptContent();
   `);
   expect(received.lines).toEqual(['{"sequence":16,"type":"runner.output","payload":{"stream":"stderr","text":"diagnostic"}}']);
-  expect(h.element("attempt-raw-page").textContent).toContain("第 2 / 2 页");
+  expect(received.pageLabel).toContain("第 2 / 2 页");
   expect(h.element("attempt-raw").scrollTop).toBe(37);
 
-  h.element("attempt-event-filter").value = "stderr";
-  h.w.eval("renderAttemptContent()");
+  actions.onFilter("stderr");
   expect(received.lines).toHaveLength(1);
-  expect(h.element("attempt-raw-page").textContent).toContain("第 1 / 1 页");
+  expect(received.filterValue).toBe("stderr");
+  expect(received.pageLabel).toContain("第 1 / 1 页");
 });
 
 it("publishes selected diagnosis history, pending submission, and status to the React conversation view", async () => {

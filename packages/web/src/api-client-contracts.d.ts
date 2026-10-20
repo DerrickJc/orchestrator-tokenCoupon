@@ -340,9 +340,9 @@ export type AttemptToolsModel = { tools: AttemptToolView[]; openEventKeys: strin
 export type AttemptToolsBridge = {
   render(model: AttemptToolsModel): void;
 };
-export type AttemptRawEventsModel = { lines: string[] };
+export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
-  render(model: AttemptRawEventsModel): void;
+  render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
 };
 export type AttemptDiagnosisMessageView = { messageId: string; role: "user" | "assistant"; heading: string; content: string };
 export type AttemptDiagnosisHistoryModel = {

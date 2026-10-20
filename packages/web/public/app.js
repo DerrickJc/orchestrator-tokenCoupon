@@ -2990,8 +2990,8 @@ async function selectAttempt() {
   if (!attemptId || !state.workspace || !state.planning) return;
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}:${attemptId}`;
   if (state.attemptView?.identity !== identity) {
-    state.attemptView = { identity, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0 };
-    $("#attempt-messages").replaceChildren(); $("#attempt-tools").replaceChildren(); $("#attempt-raw").textContent = "";
+    state.attemptView = { identity, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0, rawFilter: "" };
+    $("#attempt-messages").replaceChildren(); $("#attempt-tools").replaceChildren(); if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-raw").textContent = "";
     await readSelectedAttempt();
   } else if (!state.attemptView.loaded || ["running", "created"].includes(state.attemptView.attempt?.status)) await readSelectedAttempt();
   else renderAttemptView();
@@ -3423,10 +3423,16 @@ function renderAttemptContent() {
       if (tools.children[index] !== details) tools.insertBefore(details, tools.children[index] || null);
     }
   }
-  const filter = $("#attempt-event-filter").value.trim();
+  const filterValue = view.rawFilter ?? $("#attempt-event-filter").value, filter = filterValue.trim();
   const raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
-  const rawLines = activityPage(view, "raw", raw).map(event => JSON.stringify(event));
-  if (globalThis.tokenCouponAttemptRawEvents) globalThis.tokenCouponAttemptRawEvents.render({ lines: rawLines });
+  const rawPage = activityPageState(view, "raw", raw), rawLines = rawPage.items.map(event => JSON.stringify(event));
+  if (globalThis.tokenCouponAttemptRawEvents) globalThis.tokenCouponAttemptRawEvents.render($("#attempt-raw-root"), {
+    lines: rawLines, filterValue, pageLabel: rawPage.label, previousDisabled: rawPage.page === 0, nextDisabled: rawPage.page + 1 >= rawPage.pages,
+  }, {
+    onFilter: value => { if (state.attemptView) { state.attemptView.rawFilter = value; state.attemptView.rawPage = 0; renderAttemptView(); } },
+    onPrevious: () => { if (state.attemptView) { state.attemptView.rawPage--; renderAttemptView(); } },
+    onNext: () => { if (state.attemptView) { state.attemptView.rawPage++; renderAttemptView(); } },
+  });
   else $("#attempt-raw").textContent = rawLines.join("\n");
   tools.scrollTop = toolScroll; $("#attempt-raw").scrollTop = rawScroll;
   show($("#attempt-more"), !!view.hasMore);
@@ -3442,13 +3448,19 @@ function appendHighlightedReply(root, text) {
   }
 }
 function activityPage(view, kind, items) {
+  return activityPageState(view, kind, items).items;
+}
+function activityPageState(view, kind, items) {
   const size = 15, pages = Math.max(1, Math.ceil(items.length / size));
   view[`${kind}Page`] = Math.max(0, Math.min(view[`${kind}Page`] || 0, pages - 1));
   const page = view[`${kind}Page`];
-  $("#attempt-" + kind + "-page").textContent = `第 ${page + 1} / ${pages} 页 · 已加载 ${items.length} 条${view.hasMore ? "（还有历史待加载）" : ""}`;
-  $("#attempt-" + kind + "-prev").disabled = page === 0;
-  $("#attempt-" + kind + "-next").disabled = page + 1 >= pages;
-  return items.slice(page * size, (page + 1) * size);
+  const label = `第 ${page + 1} / ${pages} 页 · 已加载 ${items.length} 条${view.hasMore ? "（还有历史待加载）" : ""}`;
+  if (kind !== "raw" || !globalThis.tokenCouponAttemptRawEvents) {
+    $("#attempt-" + kind + "-page").textContent = label;
+    $("#attempt-" + kind + "-prev").disabled = page === 0;
+    $("#attempt-" + kind + "-next").disabled = page + 1 >= pages;
+  }
+  return { items: items.slice(page * size, (page + 1) * size), page, pages, label };
 }
 function startSessionAction(action, label, extra = {}) {
   if (action === "session/pause" || action === "session/cancel") return startControlAction(action.endsWith("pause") ? "pause" : "cancel", label, extra);
@@ -4582,7 +4594,7 @@ $("#execution-latest-details").addEventListener("click", () => void openTaskDeta
 $("#copy-execution-clarification").addEventListener("click", () => void openRevisionPlanning());
 $("#attempt-refresh").addEventListener("click", () => readSelectedAttempt(true));
 $("#attempt-more").addEventListener("click", () => readSelectedAttempt(true));
-$("#attempt-event-filter").addEventListener("input", () => { if (state.attemptView) state.attemptView.rawPage = 0; renderAttemptView(); });
+if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-event-filter").addEventListener("input", () => { if (state.attemptView) { state.attemptView.rawFilter = $("#attempt-event-filter").value; state.attemptView.rawPage = 0; } renderAttemptView(); });
 
 $("#composer-back").addEventListener("click", () => state.workspace && selectWorkspace(state.workspace.workspaceId));
 $("#copy-plan-resume").addEventListener("click", copyResumePrompt);
@@ -4674,7 +4686,8 @@ $("#workspace-browse").addEventListener("click", openWorkspaceForm);
 $("#session-check").addEventListener("click", () => refreshAll());
 $("#session-recover").addEventListener("click", diagnoseAndRecover);
 $("#pending-action-open").addEventListener("click", async () => { await planTab("execution"); $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" }); });
-for (const kind of ["tools", "raw"]) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-" + kind + "-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView[`${kind}Page`] += delta; renderAttemptView(); });
+for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-tools-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.toolsPage += delta; renderAttemptView(); });
+if (!globalThis.tokenCouponAttemptRawEvents) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-raw-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.rawPage += delta; renderAttemptView(); });
 if (!state.remotePoll) state.remotePoll = setInterval(() => void refreshRemoteConnection(), 3000);
 setInterval(() => { if (state.workspace && (!state.activeJob || ["planning.run", "session.resume", "session.retry"].includes(state.activeJob.kind))) { void refreshAll(); if (state.planning?.session?.status === "running") void readSelectedAttempt(); } }, 5000);
 void init();
