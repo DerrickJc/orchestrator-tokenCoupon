@@ -43,6 +43,11 @@ it("edits structured task fields locally, emits a plan patch, and preserves it w
   const steps = [...host.querySelectorAll<HTMLTextAreaElement>("textarea")].find(input => input.parentElement?.textContent?.includes("实施步骤"))!;
   setInputValue(steps, "定义请求字段\n覆盖成功和错误响应\n");
   expect(onChange.mock.lastCall?.[0].tasks[0].task.steps).toEqual(["定义请求字段", "覆盖成功和错误响应"]);
+  expect(steps.value).toBe("定义请求字段\n覆盖成功和错误响应\n");
+  setInputValue(steps, steps.value + " ");
+  expect(steps.value).toBe("定义请求字段\n覆盖成功和错误响应\n ");
+  setInputValue(steps, steps.value + "新增一项");
+  expect(onChange.mock.lastCall?.[0].tasks[0].task.steps).toEqual(["定义请求字段", "覆盖成功和错误响应", "新增一项"]);
 
   act(() => root?.render(createElement(PlanDraftEditor, { model: { ...model, disabled: true }, onChange })));
   expect([...host.querySelectorAll("input,textarea")].every(input => (input as HTMLInputElement).disabled)).toBe(true);

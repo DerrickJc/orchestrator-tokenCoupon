@@ -8,8 +8,29 @@ if (daemonOrigin.protocol !== "http:" || !new Set(["127.0.0.1", "localhost", "[:
 }
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), {
+    name: "token-coupon-local-session",
+    configureServer(server) {
+      server.middlewares.use(async (request, response, next) => {
+        if (request.method !== "GET" || !["/", "/index.html"].includes((request.url || "/").split("?")[0])) return next();
+        try {
+          const landing = await fetch(new URL("/", daemonOrigin), { redirect: "error", signal: AbortSignal.timeout(5000) });
+          const cookies = landing.headers.getSetCookie().filter(cookie => cookie.startsWith("tc_local=") && /;\s*HttpOnly(?:;|$)/i.test(cookie));
+          await landing.body?.cancel();
+          if (!landing.ok || !cookies.length) throw new Error("local_session_unavailable");
+          response.setHeader("Set-Cookie", cookies);
+          response.setHeader("Cache-Control", "no-store");
+          next();
+        } catch {
+          response.statusCode = 503;
+          response.setHeader("Content-Type", "text/plain; charset=utf-8");
+          response.end("web_dev_daemon_unavailable：无法建立本机授权，请先启动配置的 daemon，再刷新页面。");
+        }
+      });
+    },
+  }],
   root: fileURLToPath(new URL("./public/", import.meta.url)),
+  resolve: { alias: { "/src": fileURLToPath(new URL("./src/", import.meta.url)) } },
   publicDir: false,
   server: {
     host: "127.0.0.1",

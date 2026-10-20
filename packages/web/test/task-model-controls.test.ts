@@ -26,8 +26,9 @@ async function page(options: { lateCodex?: boolean; reactModelSelectors?: boolea
   } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined;
   const existing = { planningId: "existing-plan", status: "collecting", revision: 1, config: { provider: "deepseek", model: "old" }, messages: [{ role: "user", content: "已有任务" }], externalOperations: [] };
-  const submitted: Array<Record<string, unknown>> = []; let resolveLate!: (reply: Response) => void;
+  const submitted: Array<Record<string, unknown>> = [], requests: string[] = []; let resolveLate!: (reply: Response) => void;
   w.fetch = async (raw: string, init?: RequestInit) => {
+    requests.push(String(raw));
     const url = new URL(raw, w.location.origin), path = url.pathname;
     if (init?.method === "POST" && path.endsWith("/plannings")) { submitted.push(JSON.parse(String(init.body))); return Response.json({ error: "test_request_captured" }, { status: 409 }); }
     if (path === "/api/v1/health") return Response.json({ epoch: "test-epoch", workspaceEnvironment: { currentDirectory: "/project" }, mcp: { url: "http://127.0.0.1:4177/mcp" } });
@@ -47,8 +48,17 @@ async function page(options: { lateCodex?: boolean; reactModelSelectors?: boolea
   const element = (id: string) => w.document.getElementById(id)!;
   const choose = (id: string, value: string) => { (element(id) as HTMLSelectElement).value = value; element(id).dispatchEvent(new w.Event("change", { bubbles: true })); };
   await expect.poll(()=>element("planning-panel").classList.contains("hidden")).toBe(false);
-  return { w, element, choose, submitted, copied, completeLate: () => resolveLate(Response.json({ models: [{ id: "late-codex", label: "Late Codex" }], customAllowed: true })) };
+  return { w, element, choose, submitted, copied, requests, completeLate: () => resolveLate(Response.json({ models: [{ id: "late-codex", label: "Late Codex" }], customAllowed: true })) };
 }
+
+it("refreshes the selected Runner and Planner model catalogs without React", async () => {
+  const h = await page();
+  h.choose("planner-provider", "deepseek-api");
+  await expect.poll(() => (h.element("refresh-models") as HTMLButtonElement).disabled).toBe(false);
+  h.element("refresh-models").click();
+  await expect.poll(() => h.requests.some(path => path.includes("/runners/codex/models?") && path.includes("refresh=1"))).toBe(true);
+  expect(h.requests).toContain("/api/v1/providers/deepseek-api/models?refresh=1");
+});
 
 it("opens webpage planning settings and copies execution configuration without registering a local request", async () => {
   const h = await page(); h.element("new-task").click();

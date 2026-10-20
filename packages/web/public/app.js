@@ -2894,7 +2894,7 @@ function renderRuntimeModelControls() {
     bridge.render({ tasks, selectedTaskId: state.runtimeModelTaskId || "", models, selectedModelId: state.runtimeModelChoice || "", customModelId: state.runtimeModelCustomValue || "" }, {
       onTaskChange: selectRuntimeModelTask,
       onModelChange: value => { state.runtimeModelChoice = value; renderRuntimeModelControls(); },
-      onCustomModelChange: value => { state.runtimeModelCustomValue = value; },
+      onCustomModelChange: value => { state.runtimeModelCustomValue = value; renderRuntimeModelControls(); },
     });
     return;
   }
@@ -3309,7 +3309,11 @@ async function selectAttempt() {
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}:${attemptId}`;
   if (state.attemptView?.identity !== identity) {
     state.attemptView = { identity, rawRevision: 0, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0, rawFilter: "" };
-    $("#attempt-messages").replaceChildren(); $("#attempt-tools").replaceChildren(); if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-raw").textContent = "";
+    if (globalThis.tokenCouponAttemptMessages) globalThis.tokenCouponAttemptMessages.render({ messages: [], emptyMessage: "正在读取执行记录…" });
+    else $("#attempt-messages").replaceChildren();
+    if (globalThis.tokenCouponAttemptTools) globalThis.tokenCouponAttemptTools.render({ tools: [], openEventKeys: [] });
+    else $("#attempt-tools").replaceChildren();
+    if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-raw").textContent = "";
     await readSelectedAttempt();
   } else if (!state.attemptView.loaded || ["running", "created"].includes(state.attemptView.attempt?.status)) await readSelectedAttempt();
   else renderAttemptView();
@@ -4545,7 +4549,9 @@ $("#start-planning").addEventListener("click", async () => {
 if (!globalThis.tokenCouponPlannerRequestComposer) bindTextareaEnterSubmit($("#request-text"), () => $("#start-planning").click());
 $("#new-task").addEventListener("click", startNewTask);
 $("#new-task-sidebar").addEventListener("click", startNewTask);
-document.addEventListener("token-coupon:refresh-models", () => { void loadRunnerModels(true); void loadPlannerModels(true); });
+const refreshModelCatalogs = () => { void loadRunnerModels(true); void loadPlannerModels(true); };
+document.addEventListener("token-coupon:refresh-models", refreshModelCatalogs);
+if (!globalThis.tokenCouponModelCatalogStatus) $("#refresh-models").addEventListener("click", refreshModelCatalogs);
 $("#reply-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (state.replying) return;
   const message = $("#reply-text").value.trim();

@@ -12,6 +12,7 @@ export function PlanDraftEditor({ model, onChange }: {
   onChange: (plan: PlanDraftEditorPlan) => void;
 }) {
   const [plan, setPlan] = useState(model.plan);
+  const [fieldText, setFieldText] = useState<Record<string, string>>({});
   const update = (mutate: (draft: PlanDraftEditorPlan) => void) => {
     const next = structuredClone(plan);
     mutate(next);
@@ -19,12 +20,16 @@ export function PlanDraftEditor({ model, onChange }: {
     onChange(next);
   };
   const field = (label: string, value: string | string[] | undefined, onValue: (value: string | string[]) => void, multiline = false, array = false) => {
-    const text = array && Array.isArray(value) ? value.join("\n") : typeof value === "string" ? value : "";
+    const text = fieldText[label] ?? (array && Array.isArray(value) ? value.join("\n") : typeof value === "string" ? value : "");
+    const change = (raw: string) => {
+      setFieldText(previous => ({ ...previous, [label]: raw }));
+      onValue(array ? raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean) : raw);
+    };
     const rows = array ? Math.min(8, Math.max(3, (Array.isArray(value) ? value.length : 0) + 1)) : 5;
     return <label className="draft-text-field" key={label}>{label}
       {multiline
-        ? <textarea value={text} rows={rows} disabled={model.disabled} onChange={event => onValue(array ? event.currentTarget.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) : event.currentTarget.value)} />
-        : <input value={text} disabled={model.disabled} onChange={event => onValue(event.currentTarget.value)} />}
+        ? <textarea value={text} rows={rows} disabled={model.disabled} onChange={event => change(event.currentTarget.value)} />
+        : <input value={text} disabled={model.disabled} onChange={event => change(event.currentTarget.value)} />}
     </label>;
   };
 
