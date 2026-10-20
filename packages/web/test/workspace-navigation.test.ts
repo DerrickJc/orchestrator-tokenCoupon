@@ -2135,6 +2135,26 @@ it("publishes selected diagnosis history, pending submission, and status to the 
   expect(h.element("attempt-diagnosis-history-select").value).toBe("diagnostic-1");
 });
 
+it("binds the React diagnosis composer to the saved draft and existing form submit flow", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let changed: ((value: string) => void) | undefined;
+  let submit: (() => void) | undefined;
+  let mount: HTMLElement | undefined;
+  h.w.tokenCouponAttemptDiagnosisComposer = { render(element: HTMLElement, model: any, onChange: (value: string) => void, onSubmit: () => void) { mount = element; received = model; changed = onChange; submit = onSubmit; }, setValue() {}, unmountWithin() {} } as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    const context = { identity: "project:first:composer", workspaceId: "project", planningId: "first", attemptId: "attempt-composer", unsentText: "恢复后保留的草稿", data: { diagnostics: [] } };
+    __testState.attemptDiagnosticContext = context;
+    renderAttemptDiagnosticHistory(context);
+  `);
+  expect(mount?.id).toBe("attempt-diagnosis-composer-root");
+  expect(received).toMatchObject({ initialValue: "恢复后保留的草稿", placeholder: "输入问题、补充事实，或讨论处理方案…" });
+  changed?.("追加的诊断事实");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.unsentText")).toBe("追加的诊断事实");
+  expect(submit).toBeTypeOf("function");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

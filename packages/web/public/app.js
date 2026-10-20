@@ -3077,6 +3077,8 @@ function ensureAttemptDiagnosticUI() {
   diagnosisShortcut.className = "composer-shortcut-hint"; diagnosisShortcut.textContent = "Enter 发送 · Shift+Enter 换行";
   diagnosisInput.setAttribute("aria-describedby", "attempt-diagnosis-status diagnosis-shortcuts"); diagnosisShortcut.id = "diagnosis-shortcuts";
   diagnosisInput.insertAdjacentElement("afterend", diagnosisShortcut);
+  const diagnosisComposerRoot = document.createElement("div"); diagnosisComposerRoot.id = "attempt-diagnosis-composer-root";
+  diagnosisInput.before(diagnosisComposerRoot); diagnosisComposerRoot.append(diagnosisInput, diagnosisShortcut);
   bindTextareaEnterSubmit(diagnosisInput, () => $("#attempt-diagnosis-form").requestSubmit());
   $("#diagnosis-export-copy").addEventListener("click", () => void copyExportedDiagnosticPrompt());
 }
@@ -3139,6 +3141,10 @@ function renderAttemptDiagnosticHistory(context) {
     }
     if (diagnostic?.error) { const error = document.createElement("p"); error.className = "field-error"; error.textContent = `分析未完成：${diagnostic.error}`; root.append(error); }
     if (context.running) { const pending = document.createElement("p"); pending.className = "diagnosis-chat-pending"; pending.textContent = "正在分析…"; root.append(pending); }
+  }
+  if (globalThis.tokenCouponAttemptDiagnosisComposer) {
+    const composer = $("#attempt-diagnosis-composer-root"), input = $("#attempt-diagnosis-reply");
+    globalThis.tokenCouponAttemptDiagnosisComposer.render(composer, { initialValue: context.unsentText ?? input.value, placeholder: input.placeholder }, value => { context.unsentText = value; }, () => $("#attempt-diagnosis-form").requestSubmit());
   }
   root.scrollTop = context.scrollAfterSend || atBottom ? root.scrollHeight : previousScroll; context.scrollAfterSend = false;
   $("#attempt-diagnosis-send").disabled = !!context.running;

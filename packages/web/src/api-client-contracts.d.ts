@@ -357,6 +357,12 @@ export type AttemptDiagnosisHistoryBridge = {
   render(mount: HTMLElement, model: AttemptDiagnosisHistoryModel): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type AttemptDiagnosisComposerModel = { initialValue: string; placeholder: string };
+export type AttemptDiagnosisComposerBridge = {
+  render(mount: HTMLElement, model: AttemptDiagnosisComposerModel, onValueChange: (value: string) => void, onSubmit: () => void): void;
+  setValue(mount: HTMLElement, value: string): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -387,4 +393,5 @@ declare global {
   var tokenCouponAttemptTools: AttemptToolsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
+  var tokenCouponAttemptDiagnosisComposer: AttemptDiagnosisComposerBridge | undefined;
 }
