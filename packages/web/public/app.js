@@ -2683,13 +2683,21 @@ function showDagTaskDetails(taskId) {
   const summaryFields = [["状态", `${dagStatusIcon(task?.status)} ${statuses[task?.status] || task?.status || "未开始"}`], ["任务 ID", taskId], ["Runner / 模型", `${execution.runnerId || "未设置"} / ${task?.currentAttempt?.reportedModel || execution.modelId || "Runner 默认"}`], ["前置任务", (task?.dependsOn || definition?.dependsOn || []).map(id => byTitle(state.dagNodes || [], id)).join("、") || "无"]];
   const spec = definition?.task;
   const bodyFields = spec?.schemaVersion === 2 ? [["需求目标", spec.objective], ["设计与技术方案", spec.approach], ["实施步骤", spec.steps], ["交付物", spec.deliverables], ["验收标准", spec.acceptanceCriteria], ["约束", spec.constraints], ["其他说明", spec.notes]] : [["正文与验收", spec?.prompt || "暂无计划正文"]];
-  for (const [label, raw] of [...summaryFields, ...bodyFields]) {
-    if (raw === undefined || raw === null) continue; const value = Array.isArray(raw) ? raw.map((line, i) => `${i + 1}. ${line}`).join("\n") : raw;
-    const section = document.createElement("section"), heading = document.createElement("h4"), body = document.createElement("pre"); heading.textContent = label; body.textContent = value; section.append(heading, body); content.append(section);
-  }
+  const sections = [...summaryFields, ...bodyFields].filter(([, raw]) => raw !== undefined && raw !== null).map(([label, raw]) => ({ label, value: Array.isArray(raw) ? raw.map((line, i) => `${i + 1}. ${line}`).join("\n") : raw }));
   const attemptId = task?.activeAttemptId || task?.attempts?.at(-1)?.attemptId;
-  $("#dag-task-attempt").disabled = !attemptId;
-  $("#dag-task-attempt").onclick = () => { if (!attemptId) return; $("#dag-task-dialog").close(); if ($("#dag-dialog").open) $("#dag-dialog").close(); void openTaskDetails(attemptId); };
+  if (globalThis.tokenCouponDagTaskDetails) {
+    globalThis.tokenCouponDagTaskDetails.render($("#dag-task-content-root"), { sections, canOpenAttempt: !!attemptId }, () => {
+      if (!attemptId) return;
+      $("#dag-task-dialog").close(); if ($("#dag-dialog").open) $("#dag-dialog").close(); void openTaskDetails(attemptId);
+    });
+  } else {
+    content.replaceChildren();
+    for (const { label, value } of sections) {
+      const section = document.createElement("section"), heading = document.createElement("h4"), body = document.createElement("pre"); heading.textContent = label; body.textContent = value; section.append(heading, body); content.append(section);
+    }
+    $("#dag-task-attempt").disabled = !attemptId;
+    $("#dag-task-attempt").onclick = () => { if (!attemptId) return; $("#dag-task-dialog").close(); if ($("#dag-dialog").open) $("#dag-dialog").close(); void openTaskDetails(attemptId); };
+  }
   $("#dag-task-dialog").showModal();
 }
 function taskBoardGroup(status) {

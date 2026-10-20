@@ -446,6 +446,12 @@ export type DagFocusOption = { id: string; label: string };
 export type DagFocusSelectorBridge = {
   render(options: DagFocusOption[], selectedId: string, onChange: (taskId: string) => void): void;
 };
+export type DagTaskDetailSection = { label: string; value: string };
+export type DagTaskDetailsModel = { sections: DagTaskDetailSection[]; canOpenAttempt: boolean };
+export type DagTaskDetailsBridge = {
+  render(mount: HTMLElement, model: DagTaskDetailsModel, onViewAttempt: () => void): void;
+  unmount(mount: HTMLElement): void;
+};
 export type TaskResultFileView = { path: string; absolutePath: string };
 export type TaskResultsModel = {
   summary: string;
@@ -567,6 +573,7 @@ declare global {
   var tokenCouponRuntimeModelControls: RuntimeModelControlsBridge | undefined;
   var tokenCouponSystemPolicyRouting: SystemPolicyRoutingBridge | undefined;
   var tokenCouponDagFocusSelector: DagFocusSelectorBridge | undefined;
+  var tokenCouponDagTaskDetails: DagTaskDetailsBridge | undefined;
   var tokenCouponTaskResults: TaskResultsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
