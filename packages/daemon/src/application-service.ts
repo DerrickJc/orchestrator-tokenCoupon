@@ -1,10 +1,11 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { normalizeWorkspacePath, workspaceEnvironment } from "./workspace-path.js";
+import { resolveDaemonDataDirectory } from "./runtime-paths.js";
 import { workspaceGitStatus, prepareWorkspaceGit, previewGitCommit, commitWorkspaceGit, type GitCommitInput } from "./workspace-tools.js";
 import { readAttemptInfo, readAttemptEvents, readAttemptDiagnosticEvidence } from "./attempt-observation.js";
 import { AttemptDiagnosticStore, type AttemptDiagnosticRecord } from "./attempt-diagnostics.js";
@@ -71,7 +72,7 @@ export class ApplicationService {
 
   constructor(options: ServiceOptions = {}) {
     this.runnerFactory = options.createRunner ?? daemonRunnerFactory;
-    this.dataDirectory = resolve(options.dataDirectory ?? process.env.TOKEN_COUPON_DAEMON_HOME ?? join(homedir(), ".token-coupon", "daemon"));
+    this.dataDirectory = resolveDaemonDataDirectory(options.dataDirectory);
     this.workspacesPath = join(this.dataDirectory, "workspaces.json");
     this.jobsDirectory = join(this.dataDirectory, "jobs");
     this.eventsPath = join(this.dataDirectory, "events.jsonl");

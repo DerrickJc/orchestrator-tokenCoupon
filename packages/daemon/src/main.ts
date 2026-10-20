@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createMcpServer } from "./mcp-server.js";
 import { acquireDaemonOwner } from "./daemon-owner.js";
 import { RemoteMcpConnection } from "./oauth-gateway.js";
+import { resolveDaemonDataDirectory } from "./runtime-paths.js";
 
 function option(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
@@ -13,7 +14,7 @@ function option(name: string, fallback: string): string {
 const port = Number(option("--port", process.env.TOKEN_COUPON_DAEMON_PORT ?? "4177"));
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("--port 必须是 1024 到 65535 之间的整数");
 const host = option("--host", "127.0.0.1");
-const dataDirectory = option("--data-dir", process.env.TOKEN_COUPON_DAEMON_HOME ?? `${process.env.HOME ?? "."}/.token-coupon/daemon`);
+const dataDirectory = resolveDaemonDataDirectory(process.argv.includes("--data-dir") ? option("--data-dir", "") : undefined);
 const releaseOwner = await acquireDaemonOwner(dataDirectory);
 const service = new ApplicationService({ dataDirectory });
 await service.initialize();
