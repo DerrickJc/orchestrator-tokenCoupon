@@ -2363,13 +2363,22 @@ function renderTaskDependencies(tasks) {
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}`;
   state.dagNodes = nodes;
   const signature = JSON.stringify([identity, nodes]); if (root.dataset.signature === signature) return;
-  root.dataset.signature = signature; root.replaceChildren(); if (!nodes.length) { if ($("#dag-dialog").open) $("#dag-dialog").close(); return; }
-  const heading = document.createElement("h4"); heading.textContent = `任务依赖 · ${nodes.length} 个任务`; root.append(heading);
-  const preview = document.createElement("div"); preview.className = "dag-preview dag-mini-map";
-  const graph = buildTaskDag(nodes, preferredDagFocus(nodes), 2, "preview"); preview.append(graph.svg); root.append(preview);
-  const full = document.createElement("button"); full.type = "button"; full.className = "button button-quiet task-dag-full"; full.textContent = "放大查看任务 DAG";
-  full.addEventListener("click", () => openTaskDag(identity)); root.append(full);
-  const caption = document.createElement("p"); caption.className = "hint"; caption.textContent = `以${byTitle(nodes, graph.focusId)}为中心 · 显示 ${graph.shown}/${nodes.length} 项 · 远端分支折叠`; root.append(caption);
+  root.dataset.signature = signature;
+  if (!nodes.length) {
+    if (globalThis.tokenCouponTaskDependencyPreview) globalThis.tokenCouponTaskDependencyPreview.render(null);
+    else root.replaceChildren();
+    if ($("#dag-dialog").open) $("#dag-dialog").close();
+    return;
+  }
+  const graph = buildTaskDag(nodes, preferredDagFocus(nodes), 2, "preview");
+  if (globalThis.tokenCouponTaskDependencyPreview) globalThis.tokenCouponTaskDependencyPreview.render({ taskCount: nodes.length, focusLabel: byTitle(nodes, graph.focusId), shown: graph.shown, svg: graph.svg, onOpen: () => openTaskDag(identity) });
+  else {
+    root.replaceChildren();
+    const heading = document.createElement("h4"); heading.textContent = `任务依赖 · ${nodes.length} 个任务`; root.append(heading);
+    const preview = document.createElement("div"); preview.className = "dag-preview dag-mini-map"; preview.append(graph.svg); root.append(preview);
+    const full = document.createElement("button"); full.type = "button"; full.className = "button button-quiet task-dag-full"; full.textContent = "放大查看任务 DAG"; full.addEventListener("click", () => openTaskDag(identity)); root.append(full);
+    const caption = document.createElement("p"); caption.className = "hint"; caption.textContent = `以${byTitle(nodes, graph.focusId)}为中心 · 显示 ${graph.shown}/${nodes.length} 项 · 远端分支折叠`; root.append(caption);
+  }
   if ($("#dag-dialog").open) {
     if (state.dagView?.identity === identity) updateTaskDag(); else $("#dag-dialog").close();
   }

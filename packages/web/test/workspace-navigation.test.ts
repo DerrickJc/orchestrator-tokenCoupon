@@ -1832,6 +1832,19 @@ it("places decisions before tasks and execution returns after tasks, with sideba
   expect(h.element("session-progress").querySelector("progress")!.max).toBeGreaterThan(0);
 });
 
+it("sends the current DAG preview and full-view action to the React bridge", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { status: "running", tasks: [{ taskId: "spec", title: "接口设计", status: "succeeded", dependsOn: [] }, { taskId: "backend", title: "后端实现", status: "running", dependsOn: ["spec"] }] };
+  let received: any;
+  h.w.tokenCouponTaskDependencyPreview = { render(model: any) { if (model) received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  expect(received).toMatchObject({ taskCount: 2, focusLabel: "后端实现", shown: 2 });
+  expect(received.svg.querySelectorAll(".dag-node")).toHaveLength(2);
+  received.onOpen();
+  expect((h.element("dag-dialog") as HTMLDialogElement).open).toBe(true);
+});
+
 it("sends current task cards to the React board bridge while retaining existing task actions", async () => {
   const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
   (h.plans[0] as any).session = { status: "failed", health: { state: "exited", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", title: "接口文档", status: "failed", dependsOn: [], attempts: [{ attemptId: "attempt-1" }], currentAttempt: { attemptId: "attempt-1", runnerId: "codex", reportedModel: "gpt-6.1-sol", reason: "退出码 1", activity: "构建失败" } }] };

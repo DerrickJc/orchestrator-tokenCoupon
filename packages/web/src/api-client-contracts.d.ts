@@ -197,6 +197,16 @@ export type TaskBoardModel = { emptyMessage?: string; groups: TaskBoardGroup[] }
 export type TaskBoardBridge = {
   render(model: TaskBoardModel): void;
 };
+export type TaskDependencyPreviewModel = {
+  taskCount: number;
+  focusLabel: string;
+  shown: number;
+  svg: SVGSVGElement;
+  onOpen: () => void;
+};
+export type TaskDependencyPreviewBridge = {
+  render(model: TaskDependencyPreviewModel | null): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -213,4 +223,5 @@ declare global {
   var tokenCouponExecutionProgress: ExecutionProgressBridge | undefined;
   var tokenCouponLiveTaskReplies: LiveTaskRepliesBridge | undefined;
   var tokenCouponTaskBoard: TaskBoardBridge | undefined;
+  var tokenCouponTaskDependencyPreview: TaskDependencyPreviewBridge | undefined;
 }
