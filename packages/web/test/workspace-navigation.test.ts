@@ -372,7 +372,7 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
@@ -387,6 +387,19 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       input.onchange = () => onChange(option.id as "default" | "custom");
       const copy = w.document.createElement("span"), title = w.document.createElement("strong"), description = w.document.createElement("small"); title.textContent = option.title; description.textContent = option.description; copy.append(title, description); label.append(input, copy); return label;
     }));
+  } } });
+  if (options.reactRunAdvanced) Object.assign(w, { tokenCouponRunParameters: { render(model: { parallelOptions: Array<{ id: string; label: string }>; selectedParallel: string; isolationOptions: Array<{ id: string; label: string }>; selectedIsolation: string; verificationOptions: Array<{ id: string; label: string }>; selectedVerification: string; showVerification: boolean }, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void) {
+    const root = w.document.getElementById("run-advanced-options-root")!;
+    const grid = w.document.createElement("div"); grid.className = "settings-grid advanced-grid";
+    const addSelect = (id: string, labelText: string, options: Array<{ id: string; label: string }>, selected: string, field: "parallel" | "isolation" | "verification", hidden = false) => {
+      const label = w.document.createElement("label"); if (id === "run-verification") { label.id = "run-verification-wrap"; if (hidden) label.className = "hidden"; }
+      const select = w.document.createElement("select"); select.id = id; select.replaceChildren(...options.map(option => new w.Option(option.label, option.id))); select.value = selected; select.onchange = () => onChange(field, select.value);
+      label.append(w.document.createTextNode(labelText), select); grid.append(label);
+    };
+    addSelect("run-parallel", "任务并发", model.parallelOptions, model.selectedParallel, "parallel");
+    addSelect("run-isolation", "任务隔离", model.isolationOptions, model.selectedIsolation, "isolation");
+    addSelect("run-verification", "最终验证任务", model.verificationOptions, model.selectedVerification, "verification", !model.showVerification);
+    root.replaceChildren(grid);
   } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined; w.confirm = () => true;
   w.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); }; w.HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
@@ -960,7 +973,7 @@ it("remembers per-task launch choices for their own plan and keeps other tasks o
 });
 
 it("selects only the graph-valid final verifier and requires an explicit run after approval", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunAdvanced: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const options = [...h.element("run-verification").querySelectorAll("option")].map(item => (item as HTMLOptionElement).value);
   expect(options).toEqual(["verify"]);
@@ -985,7 +998,7 @@ it("moves to execution setup after approval and never launches until the user co
 });
 
 it("preserves custom launch settings and protects them before opening a new OAuth request", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunMode: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunMode: true, reactRunAdvanced: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const custom = h.w.document.querySelector<HTMLInputElement>('input[name="run-mode-choice"][value="custom"]')!;
   custom.checked = true; custom.dispatchEvent(new h.w.Event("change", { bubbles: true }));

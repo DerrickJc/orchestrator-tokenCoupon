@@ -1736,17 +1736,28 @@ function renderRunConfiguration() {
     for (const item of document.querySelectorAll('input[name="run-mode-choice"]')) item.checked = item === radio;
   }
   show($("#run-custom-fields"), config.mode === "custom");
-  const verification = $("#run-verification");
   const previousVerification = config.verificationTaskId;
-  verification.replaceChildren();
-  if (!candidates.length) verification.add(new Option("没有满足依赖要求的最终验证任务", ""));
-  for (const candidate of candidates) verification.add(new Option(`${candidate.title} · ${candidate.taskId}`, candidate.taskId));
-  verification.value = candidates.some(item => item.taskId === previousVerification) ? previousVerification : candidates.length === 1 ? candidates[0].taskId : "";
-  config.verificationTaskId = verification.value;
-  $("#run-parallel").value = String(config.maxParallel || 1);
-  $("#run-isolation").value = config.isolation || "git-worktree";
+  const verificationOptions = candidates.length
+    ? candidates.map(candidate => ({ id: candidate.taskId, label: `${candidate.title} · ${candidate.taskId}` }))
+    : [{ id: "", label: "没有满足依赖要求的最终验证任务" }];
+  const selectedVerification = candidates.some(item => item.taskId === previousVerification) ? previousVerification : candidates.length === 1 ? candidates[0].taskId : "";
+  const parallelOptions = [...$("#run-parallel").options].map(option => ({ id: option.value, label: option.textContent || option.value }));
+  const isolationOptions = [...$("#run-isolation").options].map(option => ({ id: option.value, label: option.textContent || option.value }));
+  config.verificationTaskId = selectedVerification;
+  if (globalThis.tokenCouponRunParameters) {
+    globalThis.tokenCouponRunParameters.render({
+      parallelOptions, selectedParallel: String(config.maxParallel || 1), isolationOptions, selectedIsolation: config.isolation || "git-worktree",
+      verificationOptions, selectedVerification, showVerification: config.isolation !== "shared",
+    }, (field, value) => persistRunConfiguration(undefined, true, { field, value }));
+  } else {
+    const verification = $("#run-verification");
+    verification.replaceChildren(...verificationOptions.map(option => new Option(option.label, option.id)));
+    verification.value = selectedVerification;
+    $("#run-parallel").value = String(config.maxParallel || 1);
+    $("#run-isolation").value = config.isolation || "git-worktree";
+  }
   const shared = config.isolation === "shared";
-  show($("#run-verification-wrap"), !shared);
+  if (!globalThis.tokenCouponRunParameters) show($("#run-verification-wrap"), !shared);
   const selection = runExecutionSelection(config, plan.draft.plan);
   const taskModes = [...new Set(plan.draft.plan.tasks.map(({ task }) => { const execution = launchExecutionForTask(task, selection); return `${labels[execution.runnerId] || execution.runnerId}${execution.modelId ? ` / ${execution.modelId}` : " / Runner 默认模型"}`; }))];
   $("#run-configuration-summary").textContent = `${config.needsReconfirm ? "草案版本已变化，旧参数仅供参考；请重新选择默认或自定义后再启动。 " : ""}批准草案：draft-${plan.approval.draftRevision}。本次 Runner／模型：${taskModes.join("；") || "未设置"}。启动配置独立保存在 Session，任务内容和依赖沿用已批准草案。`;
@@ -4398,21 +4409,21 @@ $("#run-button").addEventListener("click", async () => {
   if (!job) state.runRequestKey = null;
   state.runInFlight = false; renderRunConfiguration();
 });
-function persistRunConfiguration(modeOverride, deferReactRender = false) {
+function persistRunConfiguration(modeOverride, deferReactRender = false, fieldOverride) {
   if (!state.runConfiguration || !state.runConfigKey) return;
   state.runConfiguration.edited = true; state.runConfiguration.needsReconfirm = false;
   const selectedMode = modeOverride === "default" || modeOverride === "custom" ? modeOverride : undefined;
   state.runConfiguration.mode = selectedMode ?? document.querySelector('input[name="run-mode-choice"]:checked')?.value ?? state.runConfiguration.mode;
-  state.runConfiguration.maxParallel = Number($("#run-parallel").value);
-  state.runConfiguration.isolation = $("#run-isolation").value;
-  state.runConfiguration.verificationTaskId = $("#run-verification").value;
+  state.runConfiguration.maxParallel = Number(fieldOverride?.field === "parallel" ? fieldOverride.value : $("#run-parallel").value);
+  state.runConfiguration.isolation = fieldOverride?.field === "isolation" ? fieldOverride.value : $("#run-isolation").value;
+  state.runConfiguration.verificationTaskId = fieldOverride?.field === "verification" ? fieldOverride.value : $("#run-verification").value;
   if (state.runConfiguration.isolation === "shared") { state.runConfiguration.maxParallel = 1; $("#run-parallel").value = "1"; }
   try { localStorage.setItem(state.runConfigKey, JSON.stringify(state.runConfiguration)); } catch { /* Keep current selection in memory. */ }
   if (deferReactRender) queueMicrotask(renderRunConfiguration);
   else renderRunConfiguration();
 }
 if (!globalThis.tokenCouponRunModeSelector) for (const input of document.querySelectorAll('input[name="run-mode-choice"]')) input.addEventListener("change", persistRunConfiguration);
-for (const id of ["run-parallel", "run-isolation", "run-verification"]) $("#" + id).addEventListener("change", persistRunConfiguration);
+if (!globalThis.tokenCouponRunParameters) for (const id of ["run-parallel", "run-isolation", "run-verification"]) $("#" + id).addEventListener("change", persistRunConfiguration);
 $("#revise-run-tasks")?.remove();
 $("#configure-task-agents").addEventListener("click", openTaskAgentConfig);
 $("#task-agent-config-cancel").addEventListener("click", () => $("#task-agent-config-dialog").close());
