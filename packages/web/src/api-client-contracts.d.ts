@@ -470,9 +470,10 @@ export type TaskResultsBridge = {
   }): void;
   unmount(mount: HTMLElement): void;
 };
-export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
+export type AttemptRawEventView = { line: string; type: string; stream?: string };
+export type AttemptRawEventsModel = { identity: string; events: AttemptRawEventView[]; filterValue: string; initialPage: number; hasMore: boolean };
 export type AttemptRawEventsBridge = {
-  render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
+  render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPageChange: (page: number) => void }): void;
 };
 export type AttemptSelectionChoice = { attemptId: string; label: string };
 export type AttemptSelectionModel = {

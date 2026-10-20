@@ -2164,7 +2164,7 @@ it("publishes the filtered raw-event page to the React Attempt raw event view", 
   h.element("attempt-raw").scrollTop = 37;
   h.w.eval(`
     __testState.attemptView = {
-      workspaceId: "project", planningId: "first", attemptId: "attempt-raw",
+      identity: "project:first:attempt-raw", workspaceId: "project", planningId: "first", attemptId: "attempt-raw",
       attempt: { runnerId: "codex", status: "succeeded" },
       messages: new Map(), finalText: "", textStream: "", semanticMessages: false,
       tools: [], raw: Array.from({ length: 16 }, (_, index) => ({ sequence: index + 1, type: index === 15 ? "runner.output" : "tool.completed", payload: index === 15 ? { stream: "stderr", text: "diagnostic" } : { summary: "event-" + (index + 1) } })),
@@ -2172,14 +2172,16 @@ it("publishes the filtered raw-event page to the React Attempt raw event view", 
     };
     renderAttemptContent();
   `);
-  expect(received.lines).toEqual(['{"sequence":16,"type":"runner.output","payload":{"stream":"stderr","text":"diagnostic"}}']);
-  expect(received.pageLabel).toContain("第 2 / 2 页");
+  expect(received.events).toHaveLength(16);
+  expect(received.events[15]).toEqual({ line: '{"sequence":16,"type":"runner.output","payload":{"stream":"stderr","text":"diagnostic"}}', type: "runner.output", stream: "stderr" });
+  expect(received.initialPage).toBe(1);
+  expect(received.identity).toBe("project:first:attempt-raw:0");
   expect(h.element("attempt-raw").scrollTop).toBe(37);
 
   actions.onFilter("stderr");
-  expect(received.lines).toHaveLength(1);
-  expect(received.filterValue).toBe("stderr");
-  expect(received.pageLabel).toContain("第 1 / 1 页");
+  actions.onPageChange(0);
+  expect(h.w.eval("__testState.attemptView.rawFilter")).toBe("stderr");
+  expect(h.w.eval("__testState.attemptView.rawPage")).toBe(0);
 });
 
 it("publishes selected diagnosis history, pending submission, and status to the React conversation view", async () => {

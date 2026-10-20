@@ -3278,7 +3278,7 @@ async function selectAttempt() {
   if (!attemptId || !state.workspace || !state.planning) return;
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}:${attemptId}`;
   if (state.attemptView?.identity !== identity) {
-    state.attemptView = { identity, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0, rawFilter: "" };
+    state.attemptView = { identity, rawRevision: 0, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0, rawFilter: "" };
     $("#attempt-messages").replaceChildren(); $("#attempt-tools").replaceChildren(); if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-raw").textContent = "";
     await readSelectedAttempt();
   } else if (!state.attemptView.loaded || ["running", "created"].includes(state.attemptView.attempt?.status)) await readSelectedAttempt();
@@ -3324,7 +3324,7 @@ async function readSelectedAttempt(force = false) {
     for (let page = 0; page < 3; page++) {
       const result = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/attempts/${view.attemptId}/events?offset=${view.cursor}${view.fileId ? `&fileId=${encodeURIComponent(view.fileId)}` : ""}`);
       if (state.attemptView !== view) return;
-      if (result.reset) { view.messages.clear(); view.seen.clear(); view.tools = []; view.raw = []; delete view.reportedModel; delete view.reportedModelSource; view.finalText = ""; view.textStream = ""; view.semanticMessages = false; view.toolsPage = 0; view.rawPage = 0; view.notice = "记录文件发生变化，已从头重新读取。"; }
+      if (result.reset) { view.messages.clear(); view.seen.clear(); view.tools = []; view.raw = []; view.rawRevision = (view.rawRevision || 0) + 1; delete view.reportedModel; delete view.reportedModelSource; view.finalText = ""; view.textStream = ""; view.semanticMessages = false; view.toolsPage = 0; view.rawPage = 0; view.notice = "记录文件发生变化，已从头重新读取。"; }
       view.attempt = result.attempt; view.taskId = result.taskId; view.fileId = result.fileId; view.cursor = result.cursor; view.hasMore = result.hasMore; view.loaded = true;
       if (result.malformed) view.notice = `有 ${result.malformed} 条记录无法解析，原始文件可能不完整。`;
       for (const event of result.events) projectAttemptEvent(view, event);
@@ -3732,17 +3732,20 @@ function renderAttemptContent() {
     onPrevious: () => { if (state.attemptView) { state.attemptView.toolsPage--; renderAttemptView(); } },
     onNext: () => { if (state.attemptView) { state.attemptView.toolsPage++; renderAttemptView(); } },
   });
-  const filterValue = view.rawFilter ?? $("#attempt-event-filter").value, filter = filterValue.trim();
-  const raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
-  const rawPage = activityPageState(view, "raw", raw), rawLines = rawPage.items.map(event => JSON.stringify(event));
+  const filterValue = view.rawFilter ?? $("#attempt-event-filter").value;
   if (globalThis.tokenCouponAttemptRawEvents) globalThis.tokenCouponAttemptRawEvents.render($("#attempt-raw-root"), {
-    lines: rawLines, filterValue, pageLabel: rawPage.label, previousDisabled: rawPage.page === 0, nextDisabled: rawPage.page + 1 >= rawPage.pages,
+    identity: `${view.identity}:${view.rawRevision || 0}`,
+    events: view.raw.map(event => ({ line: JSON.stringify(event), type: event.type, stream: event.payload?.stream })),
+    filterValue, initialPage: view.rawPage || 0, hasMore: !!view.hasMore,
   }, {
-    onFilter: value => { if (state.attemptView) { state.attemptView.rawFilter = value; state.attemptView.rawPage = 0; renderAttemptView(); } },
-    onPrevious: () => { if (state.attemptView) { state.attemptView.rawPage--; renderAttemptView(); } },
-    onNext: () => { if (state.attemptView) { state.attemptView.rawPage++; renderAttemptView(); } },
+    onFilter: value => { if (state.attemptView === view) view.rawFilter = value; },
+    onPageChange: page => { if (state.attemptView === view) view.rawPage = page; },
   });
-  else $("#attempt-raw").textContent = rawLines.join("\n");
+  else {
+    const filter = filterValue.trim(), raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
+    const rawPage = activityPageState(view, "raw", raw), rawLines = rawPage.items.map(event => JSON.stringify(event));
+    $("#attempt-raw").textContent = rawLines.join("\n");
+  }
   tools.scrollTop = toolScroll; $("#attempt-raw").scrollTop = rawScroll;
   renderAttemptControls();
 }

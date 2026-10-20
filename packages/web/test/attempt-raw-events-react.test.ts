@@ -9,15 +9,7 @@ const testGlobals = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT
 testGlobals.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root | undefined;
-let host: HTMLDivElement | undefined;
-
-function mount(model: AttemptRawEventsModel) {
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-  act(() => root?.render(createElement(AttemptRawEvents, { model, onFilter: () => undefined, onPrevious: () => undefined, onNext: () => undefined })));
-  return host;
-}
+let host: HTMLElement | undefined;
 
 afterEach(() => {
   if (root) act(() => root?.unmount());
@@ -26,33 +18,54 @@ afterEach(() => {
   host = undefined;
 });
 
-it("renders filtered raw event lines as text in the supplied page order", () => {
-  const mounted = mount({ lines: ['{"sequence":16,"type":"command.completed"}', '{"sequence":17,"type":"runner.output"}'], filterValue: "stderr", pageLabel: "第 2 / 2 页", previousDisabled: false, nextDisabled: true });
-  expect(mounted.querySelector("#attempt-raw")?.textContent).toBe('{"sequence":16,"type":"command.completed"}\n{"sequence":17,"type":"runner.output"}\n');
-  expect(mounted.querySelector<HTMLInputElement>("#attempt-event-filter")?.value).toBe("stderr");
-  expect(mounted.querySelector("#attempt-raw-page")?.textContent).toBe("第 2 / 2 页");
-  expect(mounted.querySelector<HTMLButtonElement>("#attempt-raw-prev")?.disabled).toBe(false);
-  expect(mounted.querySelector<HTMLButtonElement>("#attempt-raw-next")?.disabled).toBe(true);
-  expect(mounted.querySelector("script,img")).toBeNull();
-});
-
-it("renders an empty raw event page without extra text", () => {
-  const mounted = mount({ lines: [], filterValue: "", pageLabel: "第 1 / 1 页", previousDisabled: true, nextDisabled: true });
-  expect(mounted.querySelector("#attempt-raw")?.textContent).toBe("");
-});
-
-it("routes raw-event filtering and pagination actions to the application callbacks", () => {
-  const onFilter = vi.fn(), onPrevious = vi.fn(), onNext = vi.fn();
+it("filters raw events, resets pagination, and keeps event content as text", () => {
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
-  act(() => root?.render(createElement(AttemptRawEvents, {
-    model: { lines: [], filterValue: "", pageLabel: "第 2 / 3 页", previousDisabled: false, nextDisabled: false }, onFilter, onPrevious, onNext,
-  })));
-  const input = host.querySelector<HTMLInputElement>("#attempt-event-filter")!;
-  const setValue = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView!.HTMLInputElement.prototype, "value")!.set!;
-  act(() => { setValue.call(input, "stderr"); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  const events = Array.from({ length: 16 }, (_, index) => ({
+    line: JSON.stringify(index === 15 ? { type: "runner.output", payload: { stream: "stderr", text: "<script>alert(1)</script>" } } : { type: "tool.completed", sequence: index + 1 }),
+    type: index === 15 ? "runner.output" : "tool.completed",
+    ...(index === 15 ? { stream: "stderr" } : {}),
+  }));
+  const model: AttemptRawEventsModel = { identity: "attempt-a:0", events, filterValue: "", initialPage: 1, hasMore: true };
+  const onFilter = vi.fn(), onPageChange = vi.fn();
+  act(() => root?.render(createElement(AttemptRawEvents, { model, onFilter, onPageChange })));
+
+  expect(host.querySelector("#attempt-raw-page")?.textContent).toContain("第 2 / 2 页 · 已加载 16 条（还有历史待加载）");
+  expect(host.querySelector("#attempt-raw")?.textContent).toContain("stderr");
+  expect(host.querySelector("#attempt-raw script")).toBeNull();
   act(() => host!.querySelector<HTMLButtonElement>("#attempt-raw-prev")!.click());
+  expect(onPageChange).toHaveBeenLastCalledWith(0);
+  expect(host.querySelector("#attempt-raw-page")?.textContent).toContain("第 1 / 2 页");
+
+  const filter = host.querySelector<HTMLInputElement>("#attempt-event-filter")!;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(filter, "stderr");
+  act(() => filter.dispatchEvent(new Event("input", { bubbles: true })));
+  expect(onFilter).toHaveBeenLastCalledWith("stderr");
+  expect(onPageChange).toHaveBeenLastCalledWith(0);
+  expect(host.querySelector("#attempt-raw")?.textContent).toContain("<script>alert(1)</script>");
+  expect(host.querySelector("#attempt-raw script")).toBeNull();
+  expect(host.querySelector("#attempt-raw-page")?.textContent).toContain("第 1 / 1 页 · 已加载 1 条");
+  expect((host.querySelector("#attempt-raw-next") as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("renders an empty raw event page with both navigation buttons disabled", () => {
+  host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+  const model: AttemptRawEventsModel = { identity: "attempt-empty:0", events: [], filterValue: "missing", initialPage: 4, hasMore: false };
+  act(() => root?.render(createElement(AttemptRawEvents, { model, onFilter: vi.fn(), onPageChange: vi.fn() })));
+  expect(host.querySelector("#attempt-raw")?.textContent).toBe("");
+  expect(host.querySelector("#attempt-raw-page")?.textContent).toContain("第 1 / 1 页 · 已加载 0 条");
+  expect((host.querySelector("#attempt-raw-prev") as HTMLButtonElement).disabled).toBe(true);
+  expect((host.querySelector("#attempt-raw-next") as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("keeps the current page when the parent refreshes events for the same Attempt", () => {
+  host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+  const events = Array.from({ length: 16 }, (_, index) => ({ line: `event-${index + 1}`, type: "tool.completed" }));
+  const model: AttemptRawEventsModel = { identity: "attempt-refresh:0", events, filterValue: "", initialPage: 0, hasMore: true };
+  const onFilter = vi.fn(), onPageChange = vi.fn();
+  act(() => root?.render(createElement(AttemptRawEvents, { model, onFilter, onPageChange })));
   act(() => host!.querySelector<HTMLButtonElement>("#attempt-raw-next")!.click());
-  expect(onFilter).toHaveBeenCalledWith("stderr");
-  expect(onPrevious).toHaveBeenCalledOnce();
-  expect(onNext).toHaveBeenCalledOnce();
+  expect(host.querySelector("#attempt-raw-page")?.textContent).toContain("第 2 / 2 页");
+  act(() => root?.render(createElement(AttemptRawEvents, { model: { ...model, events: [...events, { line: "event-17", type: "tool.completed" }] }, onFilter, onPageChange })));
+  expect(host.querySelector("#attempt-raw-page")?.textContent).toContain("第 2 / 2 页 · 已加载 17 条");
+  expect(onPageChange).toHaveBeenCalledWith(1);
 });

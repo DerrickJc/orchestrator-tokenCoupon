@@ -11,7 +11,7 @@ const root: Root = createRoot(mount);
 const bridge: AttemptRawEventsBridge = {
   render(mountElement: HTMLElement, model: AttemptRawEventsModel, callbacks) {
     if (mountElement !== mount) return;
-    flushSync(() => root.render(createElement(AttemptRawEvents, { model, ...callbacks })));
+    flushSync(() => root.render(createElement(AttemptRawEvents, { key: model.identity, model, ...callbacks })));
   },
 };
 
