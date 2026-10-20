@@ -8,12 +8,15 @@ export interface DesktopAttachment {
   buildId: string;
 }
 
-export interface DesktopNotificationInput { title: string; body: string }
+export interface DesktopNotificationInput { title: string; body: string; workspaceId?: string; planningId?: string; taskId?: string }
+export interface DesktopNotificationTarget { workspaceId: string; planningId: string; taskId?: string }
 
 export const DESKTOP_IPC = Object.freeze({
   attachment: "token-coupon:attachment",
   chooseFolder: "token-coupon:choose-folder",
   notification: "token-coupon:notification",
+  notificationsEnabled: "token-coupon:notifications-enabled",
+  navigateToTask: "token-coupon:navigate-to-task",
 });
 
 export function isAllowedDaemonOrigin(value: string): boolean {
@@ -36,8 +39,12 @@ export function isTrustedIpcContext(senderIsWindow: boolean, frameIsMainFrame: b
 export function isDesktopNotificationInput(value: unknown): value is DesktopNotificationInput {
   if (!value || typeof value !== "object") return false;
   const input = value as Partial<DesktopNotificationInput>;
+  const hasWorkspace = typeof input.workspaceId === "string", hasPlanning = typeof input.planningId === "string";
   return typeof input.title === "string" && input.title.trim().length > 0 && input.title.length <= 80 &&
-    typeof input.body === "string" && input.body.length <= 240;
+    typeof input.body === "string" && input.body.length <= 240 && hasWorkspace === hasPlanning &&
+    (!hasWorkspace || /^[A-Za-z0-9_-]{1,128}$/.test(input.workspaceId!)) &&
+    (!hasPlanning || /^[0-9a-f-]{36}$/i.test(input.planningId!)) &&
+    (input.taskId === undefined || typeof input.taskId === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(input.taskId) && hasWorkspace && hasPlanning);
 }
 
 export function describeAttachmentFailure(error: unknown): string {

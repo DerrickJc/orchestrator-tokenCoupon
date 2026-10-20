@@ -425,13 +425,16 @@ it("reconciles a restarted daemon without replaying mutations or discarding loca
 async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
-  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [];
+  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopNotificationCalls: any[] = [];
   let desktopFolderResult: { canceled: boolean; path?: string } = { canceled: false, path: "C:\\Projects\\Selected" };
+  let desktopNotificationsEnabled = false;
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
   if (options.desktopPicker) Object.assign(w, { tokenCouponDesktop: {
     getAttachment: async () => ({ origin: "http://127.0.0.1:4177", port: 4177, epoch: "desktop-test", profileId: "a".repeat(24), protocol: { major: 1, minor: 0 }, applicationVersion: "0.1.0", buildId: "test" }),
     chooseWorkspaceFolder: async () => { desktopFolderCalls.push(Date.now()); return desktopFolderResult; },
-    showNotification: async () => true,
+    showNotification: async (input: any) => { desktopNotificationCalls.push(input); return true; },
+    getNotificationsEnabled: async () => desktopNotificationsEnabled,
+    setNotificationsEnabled: async (enabled: boolean) => { desktopNotificationsEnabled = enabled; return enabled; },
   } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
@@ -579,7 +582,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
   await expect.poll(() => (w as any).__testState.initialized).toBe(true);
-  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
+  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopNotificationCalls, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
 
 it("keeps quick navigation usable when the compiled React entry is unavailable", async () => {
@@ -1599,6 +1602,25 @@ it("requests notification permission only on user action and deduplicates pendin
   h.element("planning-list").querySelectorAll<HTMLButtonElement>(":scope > button")[1]!.click();
   await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/second");
   notes[0].onclick(); await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/execution");
+});
+
+it("persists Electron desktop notification preference and focuses the requested task", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/overview", ready: true, approved: true, desktopPicker: true });
+  h.element("enable-notifications").click();
+  await expect.poll(() => h.desktopNotificationCalls.length).toBe(1);
+  expect(h.desktopNotificationCalls[0]).toMatchObject({ title: "Token Coupon", body: "桌面提醒已开启。" });
+  expect(h.element("enable-notifications").textContent).toBe("关闭桌面提醒");
+  (h.plans[0] as any).session = { sessionId: "desktop-session", status: "running", tasks: [{ taskId: "spec", title: "接口文档", status: "planned", attempts: [] }] };
+  h.element("refresh").click();
+  await expect.poll(() => h.w.document.querySelector('.task-row[data-task-id="spec"]')).not.toBeNull();
+  Object.defineProperty(h.w.document, "hidden", { configurable: true, value: true });
+  h.w.eval('notifyPendingApprovals([{ requestId: "desktop-request", owner: { taskId: "spec" } }])');
+  await expect.poll(() => h.desktopNotificationCalls.length).toBe(2);
+  expect(h.desktopNotificationCalls[1]).toMatchObject({ workspaceId: "project", planningId: "first", taskId: "spec" });
+  h.w.dispatchEvent(new h.w.CustomEvent("token-coupon:navigate-to-task", { detail: { workspaceId: "project", planningId: "first", taskId: "spec" } }));
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/execution");
+  const row = [...h.w.document.querySelectorAll<HTMLElement>(".task-row")].find(item => item.dataset.taskId === "spec");
+  expect(row?.classList.contains("desktop-notification-focus")).toBe(true);
 });
 
 it("infers the source while keeping workspace selection explicit and preserving manual overrides", async () => {

@@ -10,6 +10,8 @@ interface Window {
       buildId: string;
     }>;
     chooseWorkspaceFolder(): Promise<{ canceled: boolean; path?: string }>;
-    showNotification(input: { title: string; body: string }): Promise<boolean>;
+    showNotification(input: { title: string; body: string; workspaceId?: string; planningId?: string; taskId?: string }): Promise<boolean>;
+    getNotificationsEnabled(): Promise<boolean>;
+    setNotificationsEnabled(enabled: boolean): Promise<boolean>;
   };
 }

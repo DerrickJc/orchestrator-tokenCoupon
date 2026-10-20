@@ -22,9 +22,12 @@ describe("desktop security policy", () => {
 
   it("bounds notification text and attachment error detail", () => {
     expect(isDesktopNotificationInput({ title: "待审批", body: "任务需要你的决定" })).toBe(true);
+    expect(isDesktopNotificationInput({ title: "待审批", body: "任务需要你的决定", workspaceId: "a1b2c3", planningId: "123e4567-e89b-12d3-a456-426614174000", taskId: "TASK-01" })).toBe(true);
     expect(isDesktopNotificationInput({ title: " ", body: "x" })).toBe(false);
     expect(isDesktopNotificationInput({ title: "a".repeat(81), body: "x" })).toBe(false);
     expect(isDesktopNotificationInput({ title: "ok", body: "x".repeat(241) })).toBe(false);
+    expect(isDesktopNotificationInput({ title: "ok", body: "x", workspaceId: "../../secret", planningId: "123e4567-e89b-12d3-a456-426614174000" })).toBe(false);
+    expect(isDesktopNotificationInput({ title: "ok", body: "x", taskId: "../../secret" })).toBe(false);
     expect(describeAttachmentFailure(new Error("x".repeat(700)))).toHaveLength(600);
   });
 });

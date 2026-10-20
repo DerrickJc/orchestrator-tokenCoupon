@@ -18,6 +18,7 @@ let attachment: DesktopAttachment | undefined;
 let managedDaemon: ChildProcess | undefined;
 let tray: Tray | undefined;
 let windowStatePath: string | undefined;
+let preferencesPath: string | undefined;
 let stateSaveTimer: NodeJS.Timeout | undefined;
 let quitting = false;
 
@@ -64,6 +65,13 @@ function assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
 
 function registerIpc(): void {
   ipcMain.handle(DESKTOP_IPC.attachment, event => { assertTrustedSender(event); return attachment; });
+  ipcMain.handle(DESKTOP_IPC.notificationsEnabled, (event, enabled?: unknown) => {
+    assertTrustedSender(event);
+    if (enabled === undefined) return readNotificationPreference();
+    if (typeof enabled !== "boolean") throw new Error("desktop_notification_preference_invalid：提醒设置必须是开关值");
+    writeNotificationPreference(enabled);
+    return enabled;
+  });
   ipcMain.handle(DESKTOP_IPC.chooseFolder, async event => {
     assertTrustedSender(event);
     const result = await dialog.showOpenDialog(window!, { title: "选择工作区文件夹", properties: ["openDirectory"] });
@@ -73,9 +81,30 @@ function registerIpc(): void {
     assertTrustedSender(event);
     if (!isDesktopNotificationInput(input)) throw new Error("desktop_notification_invalid：通知标题或内容超出允许范围");
     if (!Notification.isSupported()) return false;
-    new Notification({ title: input.title, body: input.body }).show();
+    const notice = new Notification({ title: input.title, body: input.body });
+    notice.on("click", () => {
+      showMainWindow();
+      if (input.workspaceId && input.planningId) window?.webContents.send(DESKTOP_IPC.navigateToTask, {
+        workspaceId: input.workspaceId, planningId: input.planningId, ...(input.taskId ? { taskId: input.taskId } : {}),
+      });
+    });
+    notice.show();
     return true;
   });
+}
+
+function readNotificationPreference(): boolean {
+  if (!preferencesPath) return false;
+  try { const value = JSON.parse(readFileSync(preferencesPath, "utf8")); return value?.notificationsEnabled === true; }
+  catch { return false; }
+}
+
+function writeNotificationPreference(enabled: boolean): void {
+  if (!preferencesPath) throw new Error("desktop_preferences_unavailable：桌面设置尚未就绪");
+  mkdirSync(dirname(preferencesPath), { recursive: true });
+  const temporary = `${preferencesPath}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, notificationsEnabled: enabled })}\n`, { mode: 0o600 });
+  renameSync(temporary, preferencesPath);
 }
 
 async function connectOrExplain(): Promise<DesktopAttachment | undefined> {
@@ -189,6 +218,7 @@ else {
   app.on("second-instance", showMainWindow);
   await app.whenReady();
   windowStatePath = join(app.getPath("userData"), "window-state.json");
+  preferencesPath = join(app.getPath("userData"), "desktop-preferences.json");
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   const current = await connectOrExplain();
   if (!current) app.quit();

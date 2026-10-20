@@ -18,7 +18,7 @@ function bindTextareaEnterSubmit(textarea, submit) {
     submit();
   });
 }
-const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null, modelChoiceSelections: { planner: "", runner: "", reviewer: "" } };
+const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null, desktopNotificationsEnabled: false, modelChoiceSelections: { planner: "", runner: "", reviewer: "" } };
 const statuses = { collecting: "收集中", draft_ready: "草案待处理", approved: "已批准", execution_created: "执行已创建", succeeded: "已完成", failed: "失败", cancelled: "已取消", running: "运行中", paused: "已暂停", blocked: "等待处理", interrupted: "已中断", ready: "准备就绪", planned: "待执行", timed_out: "超时" };
 statuses.needs_input = "等待用户决策";
 const diagnosticStatuses = { running: "分析中", completed: "分析完成", failed: "分析失败", interrupted: "分析中断" };
@@ -1064,6 +1064,13 @@ $("#system-settings-continue").addEventListener("click", () => { state.initialSe
 
 async function init() {
   try {
+    if (window.tokenCouponDesktop) {
+      try {
+        state.desktopNotificationsEnabled = await window.tokenCouponDesktop.getNotificationsEnabled();
+        $("#enable-notifications").textContent = state.desktopNotificationsEnabled ? "关闭桌面提醒" : "开启桌面提醒";
+        $("#notification-status").textContent = state.desktopNotificationsEnabled ? "已开启：新审批到达且页面在后台时发送系统通知。" : "审批到达时显示页签提醒，可选择开启系统通知。";
+      } catch { state.desktopNotificationsEnabled = false; }
+    }
     const health = await api("/api/v1/health");
     applyDaemonHandshake(health);
     state.daemonEpoch = health.epoch;
@@ -4240,11 +4247,34 @@ function notifyPendingApprovals(items) {
   for (const item of fresh) state.notifiedRequests.add(item.requestId);
   const base = `${state.planning?.draft?.plan.title || "Token Coupon"} · Token Coupon`;
   document.title = items.length ? `【${items.length} 项待审批】${base}` : base;
-  if (fresh.length && typeof Notification !== "undefined" && Notification.permission === "granted" && (document.hidden || !document.hasFocus())) {
-    try { const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId; const note = new Notification("Token Coupon · 需要你的决定", { body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, tag: `tc-${state.workspace?.workspaceId}-${state.planning?.planningId}` }); note.onclick = () => { window.focus(); if (workspaceId && planningId) void navigate(`/workspaces/${encodeURIComponent(workspaceId)}/plans/${encodeURIComponent(planningId)}/execution`); note.close(); }; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
+  if (fresh.length && (document.hidden || !document.hasFocus())) {
+    const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId;
+    const requestedTaskId = fresh.length === 1 ? fresh[0].owner?.taskId ?? fresh[0].taskId : undefined;
+    const taskId = typeof requestedTaskId === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(requestedTaskId) ? requestedTaskId : undefined;
+    if (window.tokenCouponDesktop && state.desktopNotificationsEnabled) {
+      void window.tokenCouponDesktop.showNotification({ title: "Token Coupon · 需要你的决定", body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, ...(workspaceId && planningId ? { workspaceId, planningId, ...(taskId ? { taskId } : {}) } : {}) })
+        .then(shown => { if (!shown) $("#notification-status").textContent = "系统通知不可用，页面内仍会显示待审批。"; })
+        .catch(() => { $("#notification-status").textContent = "系统通知不可用，页面内仍会显示待审批。"; });
+    } else if (!window.tokenCouponDesktop && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { const note = new Notification("Token Coupon · 需要你的决定", { body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, tag: `tc-${state.workspace?.workspaceId}-${state.planning?.planningId}` }); note.onclick = () => { window.focus(); if (workspaceId && planningId) void navigate(`/workspaces/${encodeURIComponent(workspaceId)}/plans/${encodeURIComponent(planningId)}/execution`); note.close(); }; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
+    }
   }
   while (state.notifiedRequests.size > 500) state.notifiedRequests.delete(state.notifiedRequests.values().next().value);
 }
+
+window.addEventListener("token-coupon:navigate-to-task", event => {
+  const target = event.detail;
+  if (!target || !/^[A-Za-z0-9_-]{1,128}$/.test(target.workspaceId || "") || !/^[A-Za-z0-9_-]{1,128}$/.test(target.planningId || "") ||
+      target.taskId !== undefined && !/^[A-Za-z0-9._-]{1,100}$/.test(target.taskId)) return;
+  const path = `/workspaces/${encodeURIComponent(target.workspaceId)}/plans/${encodeURIComponent(target.planningId)}/execution`;
+  void navigate(path).then(() => {
+    if (state.route?.workspaceId !== target.workspaceId || state.route?.planningId !== target.planningId || !target.taskId) return;
+    const row = [...document.querySelectorAll(".task-row")].find(item => item.dataset.taskId === target.taskId);
+    if (!row) return;
+    row.classList.add("desktop-notification-focus"); row.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => row.classList.remove("desktop-notification-focus"), 3200);
+  });
+});
 function statusClass(status) { if (["succeeded", "approved"].includes(status)) return "badge-success"; if (["failed", "timed_out", "cancelled", "interrupted"].includes(status)) return "badge-error"; if (["running", "pausing", "blocked", "paused", "unavailable"].includes(status)) return "badge-warning"; return "badge-neutral"; }
 
 const planningStages = { preparing: "准备调用", starting: "启动 Agent", initializing: "初始化连接", waiting_model: "等待模型回复", receiving: "正在接收回复", validating: "校验回复", repairing: "自动修正回复", completed: "校验完成，正在保存", failed: "调用已结束，正在保存", cancelled: "取消收尾中" };
@@ -5075,6 +5105,19 @@ if (!globalThis.tokenCouponRuntimeModelControls) {
 $("#runtime-model-save").addEventListener("click", () => changeRuntimeModel(false));
 $("#runtime-model-retry").addEventListener("click", () => changeRuntimeModel(true));
 $("#enable-notifications").addEventListener("click", async () => {
+  if (window.tokenCouponDesktop) {
+    const enabled = !state.desktopNotificationsEnabled;
+    try {
+      state.desktopNotificationsEnabled = await window.tokenCouponDesktop.setNotificationsEnabled(enabled);
+      $("#enable-notifications").textContent = state.desktopNotificationsEnabled ? "关闭桌面提醒" : "开启桌面提醒";
+      $("#notification-status").textContent = state.desktopNotificationsEnabled ? "已开启：新审批到达且页面在后台时发送系统通知。" : "桌面提醒已关闭，页面内仍会显示待审批。";
+      if (state.desktopNotificationsEnabled) {
+        const shown = await window.tokenCouponDesktop.showNotification({ title: "Token Coupon", body: "桌面提醒已开启。" });
+        if (!shown) $("#notification-status").textContent = "桌面提醒设置已保存，但当前系统不支持弹出通知；页面内仍会显示待审批。";
+      }
+    } catch { $("#notification-status").textContent = "桌面提醒设置未保存；请检查本机应用状态。"; }
+    return;
+  }
   if (typeof Notification === "undefined") { $("#notification-status").textContent = "当前浏览器不支持系统通知，仍保留页签和页面提醒。"; return; }
   try { const permission = await Notification.requestPermission(); $("#notification-status").textContent = permission === "granted" ? "已开启：新审批到达且页面在后台时发送系统通知。" : "未开启系统通知，仍保留页签和页面提醒。"; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
 });

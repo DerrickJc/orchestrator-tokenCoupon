@@ -60,6 +60,7 @@
 #git-preview-content { max-height: 50vh; overflow: auto; }
 #attempt-follow { width: auto; }
 .task-row { align-items: start; }
+.task-row.desktop-notification-focus { outline: 2px solid #b1762e; outline-offset: 2px; background: #fff7e9; }
 .task-row .task-name, .task-row .task-sub { display: block; overflow-wrap: anywhere; }
 .task-row > button { grid-column: 2 / -1; justify-self: start; white-space: normal; }
 .task-row > span { min-width: 0; }
