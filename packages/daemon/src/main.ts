@@ -15,7 +15,7 @@ const port = Number(option("--port", process.env.TOKEN_COUPON_DAEMON_PORT ?? "41
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("--port 必须是 1024 到 65535 之间的整数");
 const host = option("--host", "127.0.0.1");
 const dataDirectory = resolveDaemonDataDirectory(process.argv.includes("--data-dir") ? option("--data-dir", "") : undefined);
-const releaseOwner = await acquireDaemonOwner(dataDirectory);
+const releaseOwner = await acquireDaemonOwner(dataDirectory, port);
 const service = new ApplicationService({ dataDirectory });
 await service.initialize();
 const remoteMcp = new RemoteMcpConnection(service, dataDirectory);

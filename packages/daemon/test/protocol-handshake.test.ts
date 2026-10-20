@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import { expect, it, vi } from "vitest";
 import { createClient, API_PROTOCOL } from "@token-coupon/client";
-import { createDaemonChallengeNonce, readDaemonOwnerCredential, verifyDaemonChallenge } from "@token-coupon/client/node";
+import { createDaemonChallengeNonce, discoverOwnedDaemon, readDaemonOwnerCredential, verifyDaemonChallenge } from "@token-coupon/client/node";
 import { ApplicationService } from "../src/application-service.js";
 import { createLocalServer } from "../src/http-server.js";
 import { acquireDaemonOwner } from "../src/daemon-owner.js";
@@ -12,9 +12,10 @@ import { acquireDaemonOwner } from "../src/daemon-owner.js";
 it("exposes an authenticated handshake and rejects stale/incompatible writes before any mutation", async () => {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-protocol-"));
   const service = new ApplicationService({ dataDirectory: root }); await service.initialize();
-  const releaseOwner = await acquireDaemonOwner(root);
   const reservation = createServer(); await new Promise<void>(done => reservation.listen(0, "127.0.0.1", done));
   const port = (reservation.address() as { port: number }).port; await new Promise<void>(done => reservation.close(() => done()));
+  await expect(acquireDaemonOwner(root, 80)).rejects.toThrow("daemon_owner_port_invalid");
+  const releaseOwner = await acquireDaemonOwner(root, port);
   const server = await createLocalServer(service, { port, host: "127.0.0.1", dataDirectory: root, ownerToken: releaseOwner.token });
   await new Promise<void>(done => server.listen(port, "127.0.0.1", done));
   const origin = `http://127.0.0.1:${port}`;
@@ -26,6 +27,7 @@ it("exposes an authenticated handshake and rejects stale/incompatible writes bef
     const health = await client.api("/api/v1/health") as { protocol: unknown; epoch: string; applicationVersion: string; profile: { id: string }; capabilities: { daemonDiscovery: number } };
     expect(health.protocol).toEqual(API_PROTOCOL); expect(health.epoch).toBe(service.epoch);
     expect(health.applicationVersion).toBe("0.1.0"); expect(health.profile.id).toMatch(/^[0-9a-f]{24}$/); expect(health.capabilities.daemonDiscovery).toBe(1);
+    await expect(discoverOwnedDaemon(root)).resolves.toMatchObject({ origin, port, epoch: service.epoch, profileId: health.profile.id, applicationVersion: "0.1.0" });
     const nonce = createDaemonChallengeNonce();
     const challengeResponse = await fetch(`${origin}/api/v1/daemon-challenge?nonce=${nonce}`);
     expect(challengeResponse.status).toBe(200);

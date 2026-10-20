@@ -10,8 +10,12 @@ import { daemonChallengePayload, type DaemonChallenge } from "./index.js";
 const execFile = promisify(execFileCallback);
 export type DaemonOwnerCredential = {
   token: string;
-  owner: { pid: number; hostname: string; platform: string; processStart: string };
+  owner: { pid: number; hostname: string; platform: string; processStart: string; port?: number };
 };
+export interface DaemonAttachment {
+  origin: string; port: number; epoch: string; profileId: string;
+  protocol: { major: number; minor: number }; applicationVersion: string; buildId: string;
+}
 function powershellPath(): string {
   return join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
@@ -89,7 +93,8 @@ function parseCredential(raw: string): DaemonOwnerCredential {
       typeof owner.hostname !== "string" || !owner.hostname || owner.platform !== process.platform || typeof owner.processStart !== "string" || !/^\d+$/.test(owner.processStart)) {
     throw new Error("daemon_discovery_owner_invalid：后台 owner 身份缺少有效 token、平台或进程启动标识");
   }
-  return { token: record.token as string, owner: { pid: record.pid as number, hostname: owner.hostname as string, platform: owner.platform as string, processStart: owner.processStart as string } };
+  if (owner.port !== undefined && (!Number.isSafeInteger(owner.port) || (owner.port as number) < 1024 || (owner.port as number) > 65535)) throw new Error("daemon_discovery_owner_invalid：后台 owner 记录中的端口无效");
+  return { token: record.token as string, owner: { pid: record.pid as number, hostname: owner.hostname as string, platform: owner.platform as string, processStart: owner.processStart as string, ...(owner.port === undefined ? {} : { port: owner.port as number }) } };
 }
 
 /** Reads the daemon's HMAC key only after checking the owner file and profile permissions. */
@@ -138,6 +143,7 @@ export async function verifyDaemonChallenge(challenge: DaemonChallenge, credenti
   const now = expected.nowMs ?? Date.now(), issuedAt = Date.parse(challenge.issuedAt);
   if (challenge.format !== 1 || challenge.nonce !== expected.nonce || !/^[0-9a-f]{64}$/i.test(expected.nonce) || origin.protocol !== "http:" ||
       challenge.origin !== origin.origin || challenge.host.toLowerCase() !== origin.host.toLowerCase() || challenge.port !== Number(origin.port) ||
+      (credential.owner.port !== undefined && challenge.port !== credential.owner.port) ||
       (expected.profileId !== undefined && challenge.profileId !== expected.profileId) || !Number.isFinite(issuedAt) || Math.abs(now - issuedAt) > 30_000 ||
       challenge.epoch.length < 16 || !/^[0-9a-f]{24}$/i.test(challenge.profileId) || !/^[0-9a-f]{64}$/i.test(challenge.proof)) {
     throw new Error("daemon_discovery_proof_invalid：后台挑战与当前地址、nonce、profile 或有效期不匹配");
@@ -156,3 +162,30 @@ export async function verifyDaemonChallenge(challenge: DaemonChallenge, credenti
 }
 
 export function createDaemonChallengeNonce(): string { return randomBytes(32).toString("hex"); }
+
+/** Finds only the daemon named by the protected owner record; it never scans ports or starts/stops processes. */
+export async function discoverOwnedDaemon(dataDirectory = join(homedir(), ".token-coupon", "daemon"), options: { fetch?: typeof fetch; timeoutMs?: number; legacyPort?: number } = {}): Promise<DaemonAttachment> {
+  const credential = await readDaemonOwnerCredential(dataDirectory);
+  const port = credential.owner.port ?? options.legacyPort ?? 4177;
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("daemon_discovery_port_invalid：后台端口无效");
+  const origin = `http://127.0.0.1:${port}`;
+  const nonce = createDaemonChallengeNonce();
+  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
+  let response: Response;
+  try {
+    response = await fetcher(`${origin}/api/v1/daemon-challenge?nonce=${nonce}`, {
+      cache: "no-store", redirect: "manual", signal: AbortSignal.timeout(options.timeoutMs ?? 2500),
+    });
+  } catch {
+    throw new Error(`daemon_discovery_unreachable：受保护 owner 指向的本机后台端口 ${port} 无响应；不会扫描其他端口或接管进程`);
+  }
+  if (response.status !== 200 || response.redirected || response.url && new URL(response.url).origin !== origin) {
+    throw new Error(`daemon_discovery_challenge_unavailable：本机端口 ${port} 未返回有效的后台身份挑战（HTTP ${response.status}）`);
+  }
+  let challenge: DaemonChallenge;
+  try { challenge = await response.json() as DaemonChallenge; }
+  catch { throw new Error("daemon_discovery_challenge_invalid：本机后台身份挑战不是有效 JSON"); }
+  await verifyDaemonChallenge(challenge, credential, { nonce, origin });
+  return { origin, port, epoch: challenge.epoch, profileId: challenge.profileId, protocol: challenge.protocol,
+    applicationVersion: challenge.applicationVersion, buildId: challenge.buildId };
+}
