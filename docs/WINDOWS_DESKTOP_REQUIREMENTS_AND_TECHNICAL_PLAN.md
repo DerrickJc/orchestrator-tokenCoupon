@@ -1078,13 +1078,19 @@ npm run desktop:stage-resources -- --resources-dir "C:\release-build\electron\re
 
 回归测试覆盖平台不匹配、架构不匹配和匹配通过。另在 WSL 实体暂存目录中使用官方校验过的原生 Windows Node 22.12.0 直接启动 daemon smoke，Mock 规划/审查/批准/执行、认证、重启恢复、旧 epoch 写入拒绝和 Attempt 读取全部通过。该交叉运行只证明 daemon Mock 流程可在 Windows Node 下工作；暂存依赖仍来自 Linux，不能替代 Windows 原生依赖安装、Windows extraResources 组装、Electron GUI 或安装器验收。
 
+### 13.80 暂存包构建身份核对（2026-10-20）
+
+运行时 manifest 现在记录 daemon build-info 中的应用版本和 build ID。组装前校验格式、应用版本与 `TOKEN_COUPON_BUILD_ID`（若显式设置）一致；自动 HTTP smoke 再核对 daemon health 实际返回的版本和 build ID 与 manifest 相同。发布流水线可先设置不可变 `TOKEN_COUPON_BUILD_ID`，再运行 `desktop:stage-resources`，避免把旧构建或版本不一致的 daemon 资源装进新包。该检查强化的是构建身份闭环，不代表已创建签名发布流水线、升级器或 Windows 安装包。
+
+回归覆盖合法 build ID、应用版本不匹配、显式发布 ID 不匹配及非法 ID；暂存布局测试也会核对 build identity，并把预期值传入 HTTP smoke。
+
 ## 14. 剩余实施台账（2026-10-20）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
 
 | 范围 | 后续工作 | 验证边界 |
 | --- | --- | --- |
-| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份、空闲后台安全停止协议已完成；继续发布流水线身份核验 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
+| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份及暂存包身份核对、空闲后台安全停止协议已完成；继续正式流水线、安装升级后的版本对账 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
 | D：桌面预览 | 现有 daemon 附着、目录选择、托盘、窗口恢复、开发模式后台启动原型、持久提醒开关、通知点击任务定位、空闲时安全停止后台、Linux x64 extraResources 闭环及 Windows Node Mock smoke 已完成；继续原生 Windows 依赖/资源组装、其余宿主能力接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；交叉 smoke 不等于 Windows 打包；通知、托盘、目录窗口与进程生命周期仍不能用 WSL 结果代替 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |

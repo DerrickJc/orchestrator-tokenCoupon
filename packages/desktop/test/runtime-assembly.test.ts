@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error The resource assembler is a maintainer ESM script.
 const { assembleDesktopRuntime, installDesktopRuntimeStage } = await import("../../../scripts/assemble-desktop-resources.mjs");
 // @ts-expect-error The staging helper is a maintainer ESM script.
-const { validateBundledNodeIdentity } = await import("../../../scripts/stage-desktop-runtime.mjs");
+const { validateBundledNodeIdentity, validateDesktopBuildIdentity } = await import("../../../scripts/stage-desktop-runtime.mjs");
 const roots: string[] = [];
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "token-coupon-resource-")); roots.push(root); return root; }
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -24,6 +24,14 @@ describe("Electron extraResources assembly", () => {
     expect(() => validateBundledNodeIdentity({ platform: "linux", arch: "x64" }, "win32", "x64")).toThrow("runtime_node_platform_invalid");
     expect(() => validateBundledNodeIdentity({ platform: "win32", arch: "arm64" }, "win32", "x64")).toThrow("runtime_node_arch_invalid");
     expect(() => validateBundledNodeIdentity({ platform: "win32", arch: "x64" }, "win32", "x64")).not.toThrow();
+  });
+
+  it("requires staged build metadata to match the application and pinned release ID", () => {
+    const identity = { format: 1, applicationVersion: "0.1.0", buildId: "release-2026.10.20" };
+    expect(validateDesktopBuildIdentity(identity, "0.1.0", "release-2026.10.20")).toEqual({ applicationVersion: "0.1.0", buildId: "release-2026.10.20" });
+    expect(() => validateDesktopBuildIdentity(identity, "0.2.0", "release-2026.10.20")).toThrow("runtime_build_info_invalid");
+    expect(() => validateDesktopBuildIdentity(identity, "0.1.0", "another-release")).toThrow("runtime_build_id_mismatch");
+    expect(() => validateDesktopBuildIdentity({ ...identity, buildId: "../untrusted" }, "0.1.0")).toThrow("runtime_build_info_invalid");
   });
 
   it("installs a validated runtime stage and marks it as resources-only, not a release", async () => {

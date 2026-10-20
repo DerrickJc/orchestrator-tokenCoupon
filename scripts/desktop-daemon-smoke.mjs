@@ -20,6 +20,8 @@ const origin = `http://127.0.0.1:${port}`;
 const entryOption = process.argv.indexOf("--entry");
 const entry = entryOption >= 0 ? process.argv[entryOption + 1] : fileURLToPath(new URL("../packages/daemon/dist/main.js", import.meta.url));
 assert(entry && isAbsolute(entry), "--entry requires an absolute daemon entry");
+function option(name) { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; }
+const expectedBuildId = option("--expected-build-id"), expectedVersion = option("--expected-version");
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let daemon, exited, diagnostic = "", cookie;
 function start() {
@@ -60,6 +62,8 @@ try {
   const first = await client.api("/api/v1/health");
   assert.equal(first.profile.platform, process.platform);
   assert.equal(typeof first.buildId, "string"); assert(first.buildId.length > 0, "daemon health must expose a build identity");
+  if (expectedBuildId !== undefined) assert.equal(first.buildId, expectedBuildId, "staged daemon build ID must match runtime manifest");
+  if (expectedVersion !== undefined) assert.equal(first.applicationVersion, expectedVersion, "staged daemon version must match runtime manifest");
   assert.equal(first.profile.id, createHash("sha256").update(await realpath(dataDirectory)).digest("hex").slice(0, 24));
   const credential = await readDaemonOwnerCredential(dataDirectory);
   assert.equal(first.capabilities.daemonDiscovery, 1, "private daemon owner profile must permit authenticated desktop discovery");

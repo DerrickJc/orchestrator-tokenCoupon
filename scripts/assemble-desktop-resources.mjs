@@ -81,7 +81,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const smokeScript = fileURLToPath(new URL("./desktop-daemon-smoke.mjs", import.meta.url));
   let smokeOutput;
   try {
-    smokeOutput = execFileSync(nodeExecutable, [smokeScript, "--entry", daemonEntry], {
+    smokeOutput = execFileSync(nodeExecutable, [smokeScript, "--entry", daemonEntry,
+      "--expected-build-id", result.manifest.buildId, "--expected-version", result.manifest.applicationVersion], {
       cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", timeout: 120_000, maxBuffer: 1024 * 1024,
     });
   } catch (error) {

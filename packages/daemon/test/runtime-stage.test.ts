@@ -12,6 +12,8 @@ it("assembles production resources without the application's source, test direct
     const manifest = JSON.parse(await readFile(join(stage.root, "runtime-manifest.json"), "utf8"));
     expect(isAbsolute(manifest.daemonEntry)).toBe(false);
     expect(manifest.releaseReady).toBe(false);
+    expect(manifest.applicationVersion).toBe("0.1.0");
+    expect(manifest.buildId).toMatch(/^[a-zA-Z0-9._+-]{1,120}$/);
     for (const name of ["core", "client", "daemon", "web", "cli"]) {
       const path = join(stage.root, "node_modules", "@token-coupon", name);
       expect((await lstat(path)).isSymbolicLink()).toBe(false);
@@ -21,7 +23,8 @@ it("assembles production resources without the application's source, test direct
     expect(JSON.parse(await readFile(join(stage.root, "node_modules/@token-coupon/daemon/package.json"), "utf8")).dependencies).toHaveProperty("@token-coupon/client");
     let output = "", diagnostic = "";
     const result = await runChildProcess({
-      executable: process.execPath, args: [join(process.cwd(), "scripts/desktop-daemon-smoke.mjs"), "--entry", stage.daemonEntry],
+      executable: process.execPath, args: [join(process.cwd(), "scripts/desktop-daemon-smoke.mjs"), "--entry", stage.daemonEntry,
+        "--expected-build-id", manifest.buildId, "--expected-version", manifest.applicationVersion],
       cwd: stage.root, input: "", spawn: spawnNative,
       context: { signal: AbortSignal.timeout(90000), onStarted() {}, onOutput() {} },
       onOutput: chunk => { if (chunk.stream === "stdout") output += chunk.text; else diagnostic += chunk.text; },

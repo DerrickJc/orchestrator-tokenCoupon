@@ -15,8 +15,22 @@ export function validateBundledNodeIdentity(identity, platform = process.platfor
   }
 }
 
+export function validateDesktopBuildIdentity(identity, applicationVersion, expectedBuildId = process.env.TOKEN_COUPON_BUILD_ID?.trim()) {
+  if (!identity || identity.format !== 1 || identity.applicationVersion !== applicationVersion ||
+      typeof identity.buildId !== "string" || identity.buildId.length === 0 || identity.buildId.length > 120 || !/^[a-zA-Z0-9._+-]+$/.test(identity.buildId)) {
+    throw new Error("runtime_build_info_invalid：daemon 构建身份缺失或与应用版本不匹配");
+  }
+  if (expectedBuildId && identity.buildId !== expectedBuildId) {
+    throw new Error("runtime_build_id_mismatch：daemon 构建身份与当前发布标识不一致");
+  }
+  return { applicationVersion: identity.applicationVersion, buildId: identity.buildId };
+}
+
 export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", import.meta.url)), bundledNode = process.env.TOKEN_COUPON_BUNDLED_NODE) {
   source = await realpath(source);
+  const application = JSON.parse(await readFile(join(source, "packages/client/package.json"), "utf8"));
+  const buildInfo = JSON.parse(await readFile(join(source, "packages/daemon/dist/build-info.json"), "utf8"));
+  const buildIdentity = validateDesktopBuildIdentity(buildInfo, application.version);
   const root = await mkdtemp(join(tmpdir(), "token-coupon-runtime-"));
   const skippedOptional = [], copied = [];
   async function copy(sourcePath, destination) {
@@ -64,7 +78,8 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
       await mkdir(join(root, "runtime"), { recursive: true });
       await cp(nodePath, join(root, nodeExecutable));
     }
-    const manifest = { format: 1, kind: "unpacked-development-stage", hostPlatform: process.platform, hostArch: process.arch, packages: copied, skippedOptional,
+    const manifest = { format: 1, kind: "unpacked-development-stage", hostPlatform: process.platform, hostArch: process.arch,
+      ...buildIdentity, packages: copied, skippedOptional,
       daemonEntry: "node_modules/@token-coupon/daemon/dist/main.js",
       ...(nodeExecutable ? { nodeExecutable } : {}),
       releaseReady: false };
