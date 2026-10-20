@@ -25,6 +25,14 @@ describe("local web console API", () => {
       const origin = `http://127.0.0.1:${port}`;
       const landing = await fetch(origin);
       expect(landing.status).toBe(200);
+      const webManifest = JSON.parse(await readFile(join(process.cwd(), "packages/web/dist/.vite/manifest.json"), "utf8")) as Record<string, { file?: string }>;
+      const builtScripts = [...new Set(Object.values(webManifest).map(entry => entry.file).filter((file): file is string => typeof file === "string" && file.endsWith(".js")))];
+      expect(builtScripts.length).toBeGreaterThan(1);
+      for (const asset of builtScripts) {
+        const response = await fetch(`${origin}/${asset}`);
+        expect(response.status, `missing built web asset ${asset}`).toBe(200);
+        expect(response.headers.get("content-type")).toContain("javascript");
+      }
       const cookie = landing.headers.getSetCookie()[0]?.split(";", 1)[0];
       expect(cookie).toContain("tc_local=");
       expect((await fetch(`${origin}/api/v1/health`)).status).toBe(403);

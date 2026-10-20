@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 const daemonOrigin = new URL(process.env.TOKEN_COUPON_WEB_DAEMON_ORIGIN || "http://127.0.0.1:4177");
 if (daemonOrigin.protocol !== "http:" || !new Set(["127.0.0.1", "localhost", "[::1]"]).has(daemonOrigin.hostname)) {
@@ -7,6 +8,7 @@ if (daemonOrigin.protocol !== "http:" || !new Set(["127.0.0.1", "localhost", "[:
 }
 
 export default defineConfig({
+  plugins: [react()],
   root: fileURLToPath(new URL("./public/", import.meta.url)),
   publicDir: false,
   server: {
@@ -27,5 +29,12 @@ export default defineConfig({
     outDir: fileURLToPath(new URL("./dist/", import.meta.url)),
     emptyOutDir: true,
     manifest: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [{ name: "react-vendor", test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/, priority: 20 }],
+        },
+      },
+    },
   },
 });

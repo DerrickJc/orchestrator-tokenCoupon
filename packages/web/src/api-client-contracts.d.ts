@@ -13,6 +13,21 @@ export type TokenCouponClient = {
   openEventStream(path: string, handlers?: EventStreamHandlers): EventSource;
 };
 
+export type CommandPaletteEntry = {
+  label: string;
+  hint: string;
+  run: () => void | Promise<void>;
+};
+
+export type CommandPaletteBridge = {
+  render(
+    entries: CommandPaletteEntry[],
+    selectedIndex: number,
+    onSelect: (entry: CommandPaletteEntry) => void,
+  ): void;
+};
+
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
+  var tokenCouponCommandPalette: CommandPaletteBridge | undefined;
 }

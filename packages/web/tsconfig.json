@@ -4,12 +4,13 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
-    "types": []
+    "types": ["vite/client"]
   },
-  "files": ["src/api-client-contracts.d.ts", "public/api-client.js"]
+  "files": ["src/api-client-contracts.d.ts", "src/command-palette.tsx", "public/api-client.js"]
 }

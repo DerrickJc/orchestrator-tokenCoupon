@@ -139,21 +139,26 @@ function renderCommandPalette() {
   const query = $("#command-palette-query").value.trim().toLocaleLowerCase();
   const entries = commandPaletteEntries().filter(entry => `${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(query));
   state.commandPaletteEntries = entries; state.commandPaletteIndex = Math.min(state.commandPaletteIndex || 0, Math.max(0, entries.length - 1));
+  if (entries.length) $("#command-palette-query").setAttribute("aria-activedescendant", `command-palette-option-${state.commandPaletteIndex}`);
+  else $("#command-palette-query").removeAttribute("aria-activedescendant");
+  if (globalThis.tokenCouponCommandPalette) {
+    globalThis.tokenCouponCommandPalette.render(entries, state.commandPaletteIndex, runCommandPaletteEntry);
+    return;
+  }
   const root = $("#command-palette-results"); root.replaceChildren();
-  if (!entries.length) { $("#command-palette-query").removeAttribute("aria-activedescendant"); const empty = document.createElement("p"); empty.className = "command-palette-empty"; empty.textContent = "没有匹配的页面或操作。"; root.append(empty); return; }
+  if (!entries.length) { const empty = document.createElement("p"); empty.className = "command-palette-empty"; empty.textContent = "没有匹配的页面或操作。"; root.append(empty); return; }
   entries.forEach((entry, index) => {
     const button = document.createElement("button"); button.type = "button"; button.id = `command-palette-option-${index}`; button.className = "command-palette-option"; button.setAttribute("role", "option"); button.setAttribute("aria-selected", String(index === state.commandPaletteIndex));
     const label = document.createElement("span"), hint = document.createElement("small"); label.textContent = entry.label; hint.textContent = entry.hint; button.append(label, hint);
     button.addEventListener("click", () => runCommandPaletteEntry(entry)); root.append(button);
   });
-  $("#command-palette-query").setAttribute("aria-activedescendant", `command-palette-option-${state.commandPaletteIndex}`);
 }
 function moveCommandPaletteSelection(delta) {
   const entries = state.commandPaletteEntries || [];
   if (!entries.length) return;
   state.commandPaletteIndex = (state.commandPaletteIndex + delta + entries.length) % entries.length;
   renderCommandPalette();
-  $(`#command-palette-option-${state.commandPaletteIndex}`)?.scrollIntoView({ block: "nearest" });
+  $(`#command-palette-option-${state.commandPaletteIndex}`)?.scrollIntoView?.({ block: "nearest" });
 }
 async function runCommandPaletteEntry(entry) {
   $("#command-palette").close();

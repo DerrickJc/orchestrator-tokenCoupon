@@ -1,6 +1,6 @@
 # Windows 客户端需求与技术方案
 
-日期：2026-10-19。状态：**需求与技术方案草案；Electron 桌面工程、Windows 后台适配和 React 页面迁移未实施。现有 Web 页面已具备 Vite 构建/静态分发基础及输入快捷键与快速导航原型；尚未完成浏览器交互和 Windows 桌面验收。**
+日期：2026-10-19。状态：**需求与技术方案草案；Electron 桌面工程与 Windows 后台适配未实施。Web 页面已具备 Vite 构建/静态分发基础、输入快捷键和快速导航；React 渐进迁移已启动，当前仅快速导航结果列表由 React 管理，页面其余部分仍由原生 JavaScript 管理。尚未完成浏览器交互和 Windows 桌面验收。**
 
 本文整理需求讨论、开源项目检索与代码只读核查结果，并补充桌面前端设计和交互方案。代码核查是当时工作树的事实，不等同于已发布版本；实施前需重新记录代码基线和既有变更归属。
 
@@ -585,6 +585,14 @@ Node SEA/其他单文件打包方式另行验证动态依赖、资源文件、�
 
 Web 资源已接入 Vite：`npm run build` 生成带哈希的静态资源与 manifest；daemon 只按 manifest 中登记的资源路径提供构建产物，未构建时回退到现有 `public/` 入口。`npm run web:dev` 在 `127.0.0.1:5173` 启动前端开发服务器，并仅将 `/api` 代理到本机 daemon（默认 `127.0.0.1:4177`）；可用 `TOKEN_COUPON_WEB_DAEMON_ORIGIN` 指向其他 loopback daemon。
 
-HTTP JSON 请求和 SSE 订阅已抽到 `packages/web/public/api-client.js`；页面通过 `tokenCouponClient` 调用同一接口，业务视图不再创建 fetch/EventSource 连接。`packages/web/src/api-client-contracts.d.ts` 定义了共享客户端契约，并加入 Web workspace 类型检查；领域 API DTO 仍待整理，页面也尚未迁移到 React。
+HTTP JSON 请求和 SSE 订阅已抽到 `packages/web/public/api-client.js`；页面通过 `tokenCouponClient` 调用同一接口，业务视图不再创建 fetch/EventSource 连接。`packages/web/src/api-client-contracts.d.ts` 定义了共享客户端契约，并加入 Web workspace 类型检查；领域 API DTO 仍待整理，React 渐进迁移按下方记录推进。
 
-本次 `npm run typecheck`、`npm run build` 成功；规划/编辑、任务模型配置和工作区导航三个 Web 回归文件通过（136 项）；`npx vitest run packages/daemon/test/http-console.test.ts` 通过（1 项）；`git diff --check` 通过。未运行浏览器交互测试、真实模型验收或 Windows 桌面测试。React 页面迁移、Electron 壳、Windows 后台与原生能力仍待后续批次实施。
+React 渐进迁移的第一个独立岛是快速导航结果列表：旧脚本负责生成当前上下文的导航数据和动作，React 组件只负责结果列表的 DOM、选中态与无结果状态；二者通过有类型的 `tokenCouponCommandPalette` 边界协作。其余页面仍由旧脚本管理，不共享同一挂载节点。Vite 将 React 运行时代码拆成独立静态 chunk，daemon 根据 manifest 中的资源记录提供构建文件。
+
+本次基础原型的 `npm run typecheck`、`npm run build` 成功；规划/编辑、任务模型配置和工作区导航三个 Web 回归文件通过（136 项）；daemon HTTP 控制台回归通过（1 项）；`git diff --check` 通过。React 岛迁移新增了 React 渲染状态测试及 manifest 静态资源服务检查。尚未运行真实模型验收或 Windows 桌面测试。其余页面迁移、Electron 壳、Windows 后台与原生能力仍待后续批次实施。
+
+### 13.2 React 渐进迁移首个组件（2026-10-20）
+
+将快速导航结果列表迁移到 React + TypeScript，旧页面保留搜索数据、对话框开关、键盘索引和导航动作；类型化桥接只将列表数据、选中索引和选择回调传给 React。Vite 使用官方 React 插件并将 React runtime 拆为独立 chunk；构建 manifest 中的资源仍由 daemon 静态服务提供。其余页面仍由原生 JavaScript 管理，因此这是局部迁移，不代表桌面客户端或全站 React 化已完成。
+
+本次 `npm run typecheck` 和 `npm run build` 通过；快速导航 React 组件测试与三个既有 Web 回归文件共 138 项通过；`git diff --check` 通过。daemon HTTP 回归因沙箱禁止监听 `127.0.0.1` 未能运行；提权重试在等待授权时被中断，因此新加的构建 chunk HTTP 服务断言尚未验证。真实浏览器、真实模型和 Windows 桌面验收未运行。
