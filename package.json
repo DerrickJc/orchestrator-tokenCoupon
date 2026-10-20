@@ -15,6 +15,7 @@
     "daemon": "npm run build --workspace @token-coupon/client && npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/web && npm run build --workspace @token-coupon/daemon && node packages/daemon/dist/main.js",
     "desktop": "npm run build && npm run start --workspace @token-coupon/desktop",
     "web:dev": "npm run dev --workspace @token-coupon/web",
+    "desktop:stage-resources": "npm run build && node scripts/assemble-desktop-resources.mjs",
     "cli": "npm run build && node packages/cli/dist/main.js",
     "demo:phase3.5": "npm run build && node scripts/phase3.5-demo.mjs",
     "demo:phase3.5-bugfix": "npm run build && node scripts/phase3.5-bugfix-demo.mjs",

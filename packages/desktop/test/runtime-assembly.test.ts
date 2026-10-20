@@ -1,0 +1,45 @@
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+
+// @ts-expect-error The resource assembler is a maintainer ESM script.
+const { assembleDesktopRuntime, installDesktopRuntimeStage } = await import("../../../scripts/assemble-desktop-resources.mjs");
+const roots: string[] = [];
+async function fixture() { const root = await mkdtemp(join(tmpdir(), "token-coupon-resource-")); roots.push(root); return root; }
+afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+
+async function runtimeStage(root: string) {
+  const stage = join(root, "stage"), daemon = join(stage, "node_modules/@token-coupon/daemon/dist/main.js"), node = join(stage, "runtime/node");
+  await mkdir(join(stage, "node_modules/@token-coupon/daemon/dist"), { recursive: true }); await mkdir(join(stage, "runtime"), { recursive: true });
+  await writeFile(daemon, "// daemon entry\n"); await writeFile(node, "#!/bin/sh\nexit 0\n"); await chmod(node, 0o755);
+  await writeFile(join(stage, "runtime-manifest.json"), JSON.stringify({ format: 1, kind: "unpacked-development-stage", packages: ["@token-coupon/daemon"], daemonEntry: "node_modules/@token-coupon/daemon/dist/main.js", nodeExecutable: "runtime/node", releaseReady: false }));
+  return stage;
+}
+
+describe("Electron extraResources assembly", () => {
+  it("installs a validated runtime stage and marks it as resources-only, not a release", async () => {
+    const root = await fixture(), stage = await runtimeStage(root), resources = join(root, "electron", "resources");
+    const result = await installDesktopRuntimeStage(stage, resources);
+    expect(result.directory).toBe(join(resources, "token-coupon-runtime"));
+    expect(result.manifest).toMatchObject({ kind: "electron-extra-resource", runtimeReady: true, releaseReady: false });
+    expect(await readFile(join(result.directory, "node_modules/@token-coupon/daemon/dist/main.js"), "utf8")).toContain("daemon entry");
+    expect((await readFile(join(result.directory, "runtime-manifest.json"), "utf8"))).toContain('"runtimeReady": true');
+  });
+
+  it("rejects missing Node, traversal paths, and overwriting an existing packaged runtime", async () => {
+    const root = await fixture(), stage = await runtimeStage(root), resources = join(root, "electron", "resources");
+    const manifestPath = join(stage, "runtime-manifest.json"), original = JSON.parse(await readFile(manifestPath, "utf8"));
+    await writeFile(manifestPath, JSON.stringify({ ...original, nodeExecutable: undefined }));
+    await expect(installDesktopRuntimeStage(stage, resources)).rejects.toThrow("desktop_resources_node_required");
+    await writeFile(manifestPath, JSON.stringify({ ...original, daemonEntry: "../../outside.js" }));
+    await expect(installDesktopRuntimeStage(stage, resources)).rejects.toThrow("desktop_resources_manifest_invalid");
+    await writeFile(manifestPath, JSON.stringify(original));
+    await installDesktopRuntimeStage(stage, resources);
+    await expect(installDesktopRuntimeStage(stage, resources)).rejects.toThrow("desktop_resources_target_exists");
+  });
+
+  it("requires the explicitly pinned Node runtime before assembling a package", async () => {
+    await expect(assembleDesktopRuntime(join(await fixture(), "resources"), "")).rejects.toThrow("desktop_resources_node_required");
+  });
+});
