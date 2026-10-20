@@ -5,13 +5,19 @@ import { afterEach, expect, it } from "vitest";
 
 const windows: Array<JSDOM> = [];
 afterEach(() => { for (const dom of windows.splice(0)) dom.window.close(); });
-async function page(options: { lateCodex?: boolean } = {}) {
+async function page(options: { lateCodex?: boolean; reactModelSelectors?: boolean } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: "http://127.0.0.1:4177/#/workspaces/workspace/plans/existing-plan", runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window;
   Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   const copied: string[] = []; Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
+  if (options.reactModelSelectors) Object.assign(w, { tokenCouponModelChoiceSelectors: { render(prefix: "planner" | "runner", model: { choices: Array<{ id: string; label: string }>; selectedModelId: string }, onChange: (modelId: string) => void) {
+    const select = w.document.getElementById(`${prefix}-model-choice`) as HTMLSelectElement;
+    select.replaceChildren(...model.choices.map(choice => new w.Option(choice.label, choice.id)));
+    select.value = model.selectedModelId;
+    select.onchange = () => onChange(select.value);
+  } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined;
   const existing = { planningId: "existing-plan", status: "collecting", revision: 1, config: { provider: "deepseek", model: "old" }, messages: [{ role: "user", content: "已有任务" }], externalOperations: [] };
   const submitted: Array<Record<string, unknown>> = []; let resolveLate!: (reply: Response) => void;
@@ -57,7 +63,7 @@ it("opens webpage planning settings and copies execution configuration without r
 });
 
 it("preserves custom model IDs per Runner and submits the selected Planner model", async () => {
-  const h = await page(); h.element("new-task-sidebar").click();
+  const h = await page({ reactModelSelectors: true }); h.element("new-task-sidebar").click();
   h.choose("runner-model-choice", "__custom__");
   (h.element("runner-model") as HTMLInputElement).value = "private-model";
   h.element("runner-model").dispatchEvent(new h.w.Event("change"));

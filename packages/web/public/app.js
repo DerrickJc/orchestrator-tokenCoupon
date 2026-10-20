@@ -18,7 +18,7 @@ function bindTextareaEnterSubmit(textarea, submit) {
     submit();
   });
 }
-const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null };
+const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null, modelChoiceSelections: { planner: "", runner: "" } };
 const statuses = { collecting: "收集中", draft_ready: "草案待处理", approved: "已批准", execution_created: "执行已创建", succeeded: "已完成", failed: "失败", cancelled: "已取消", running: "运行中", paused: "已暂停", blocked: "等待处理", interrupted: "已中断", ready: "准备就绪", planned: "待执行", timed_out: "超时" };
 statuses.needs_input = "等待用户决策";
 const diagnosticStatuses = { running: "分析中", completed: "分析完成", failed: "分析失败", interrupted: "分析中断" };
@@ -1102,8 +1102,13 @@ function renderProviders() {
     select.value = state.plannerProviderId || "";
     select.onchange = () => { state.plannerProviderId = select.value; update(); };
   };
+  let modelOwner;
   const update = () => {
     const provider = globalThis.tokenCouponPlannerProviderSelector ? state.plannerProviderId : select.value, mcp = isWebMcp(provider);
+    if (modelOwner !== provider) {
+      if (modelOwner !== undefined) state.modelChoiceSelections.planner = "";
+      modelOwner = provider;
+    }
     state.plannerProviderId = provider;
     if (globalThis.tokenCouponPlannerProviderSelector) renderSelector();
     show($("#planner-model-wrap"), !mcp && provider !== "mock");
@@ -1122,7 +1127,8 @@ function renderProviders() {
     show($("#provider-notice"), false); void loadPlannerModels();
   };
   renderSelector();
-  $("#planner-model-choice").onchange = () => applyModelChoice("planner"); update();
+  if (!globalThis.tokenCouponModelChoiceSelectors) $("#planner-model-choice").onchange = () => applyModelChoice("planner");
+  update();
 }
 function renderRunners() {
   const select = $("#runner-id");
@@ -1131,8 +1137,13 @@ function renderRunners() {
   const stored = localStorage.getItem("tc-runner-id");
   const selectedRunnerId = stored && options.some(option => option.id === stored && !option.disabled) ? stored : ordered.find(runner => runner.id !== "mock" && runner.available)?.id || "mock";
   const renderSelector = runnerId => globalThis.tokenCouponRunnerSelector?.render({ options, selectedRunnerId: runnerId }, value => update(value));
+  let modelOwner;
   const update = (requestedRunnerId = "") => {
     const runnerId = requestedRunnerId || (globalThis.tokenCouponRunnerSelector ? $("#runner-id").value : select.value);
+    if (modelOwner !== runnerId) {
+      if (modelOwner !== undefined) state.modelChoiceSelections.runner = "";
+      modelOwner = runnerId;
+    }
     state.runnerId = runnerId;
     localStorage.setItem("tc-runner-id", runnerId);
     if (globalThis.tokenCouponRunnerSelector) renderSelector(runnerId);
@@ -1147,20 +1158,37 @@ function renderRunners() {
     select.onchange = () => update(select.value);
   }
   $("#runner-model").onchange = () => localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim());
-  $("#runner-model-choice").onchange = () => { applyModelChoice("runner"); localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim()); };
+  if (!globalThis.tokenCouponModelChoiceSelectors) $("#runner-model-choice").onchange = () => { applyModelChoice("runner"); localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim()); };
   update(selectedRunnerId);
 }
 function renderModelPicker(prefix, catalog, current, defaultLabel) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`);
-  select.replaceChildren(new Option(defaultLabel, ""));
-  for (const model of catalog.models || []) select.add(new Option(`${model.label || model.id}${model.label && model.label !== model.id ? ` · ${model.id}` : ""}${model.isDefault ? "（工具推荐）" : ""}`, model.id));
-  if (catalog.customAllowed) select.add(new Option(prefix === "planner" && isWebMcp($("#planner-provider").value) ? "记录网页模型名称…" : "自定义模型 ID…", "__custom__"));
-  select.value = current && [...select.options].some(option => option.value === current) ? current : current && catalog.customAllowed ? "__custom__" : "";
+  const choices = [
+    { id: "", label: defaultLabel },
+    ...(catalog.models || []).map(model => ({ id: model.id, label: `${model.label || model.id}${model.label && model.label !== model.id ? ` · ${model.id}` : ""}${model.isDefault ? "（工具推荐）" : ""}` })),
+    ...(catalog.customAllowed ? [{ id: "__custom__", label: prefix === "planner" && isWebMcp($("#planner-provider").value) ? "记录网页模型名称…" : "自定义模型 ID…" }] : []),
+  ];
+  const currentIsChoice = current && choices.some(choice => choice.id === current);
+  const remembersCustomChoice = (prefix === "planner" || prefix === "runner") && state.modelChoiceSelections[prefix] === "__custom__";
+  const selectedModelId = currentIsChoice ? current : current && catalog.customAllowed ? "__custom__" :
+    (catalog.customAllowed && remembersCustomChoice ? "__custom__" : "");
+  if ((prefix === "planner" || prefix === "runner") && globalThis.tokenCouponModelChoiceSelectors) {
+    select.onchange = null;
+    globalThis.tokenCouponModelChoiceSelectors.render(prefix, { choices, selectedModelId }, modelId => {
+      state.modelChoiceSelections[prefix] = modelId;
+      applyModelChoice(prefix);
+      if (prefix === "runner") localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim());
+    });
+  } else {
+    select.replaceChildren(...choices.map(choice => new Option(choice.label, choice.id)));
+    select.value = selectedModelId;
+  }
   input.value = catalog.customAllowed || catalog.models?.some(model => model.id === current) ? current : "";
-  show(input, select.value === "__custom__"); input.disabled = !catalog.customAllowed;
+  show(input, selectedModelId === "__custom__"); input.disabled = !catalog.customAllowed;
 }
 function applyModelChoice(prefix) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`), custom = select.value === "__custom__";
+  if (prefix === "planner" || prefix === "runner") state.modelChoiceSelections[prefix] = select.value;
   input.value = custom ? "" : select.value;
   show(input, custom); if (custom) input.focus();
 }
