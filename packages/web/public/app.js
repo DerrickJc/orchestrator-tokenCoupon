@@ -3136,23 +3136,38 @@ async function confirmSessionContinue() {
   await startSessionAction(action.kind === "retry" ? "session/retry" : "session/resume", "从断点继续执行", action.kind === "retry" ? { taskId } : {});
 }
 async function openTaskResults(taskId) {
-  const view = { workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, taskId, files: [] };
+  const view = { workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, taskId, files: [], total: 0, summary: "正在读取此任务的文件归属记录…", hasMore: false, loading: false, preview: null, error: "" };
   state.taskResultView = view;
   $("#task-results-title").textContent = `${state.planning.session.tasks.find(task => task.taskId === taskId)?.title || taskId} · 生成结果`;
-  $("#task-results-summary").textContent = "正在读取此任务的文件归属记录…"; $("#task-results-files").replaceChildren(); $("#task-results-error").textContent = "";
-  show($("#task-results-preview-wrap"), false); show($("#task-results-more"), false); $("#task-results-dialog").showModal();
+  renderTaskResults(view); $("#task-results-dialog").showModal();
   await loadTaskResultPage(view, 0);
 }
+function renderTaskResults(view) {
+  const mount = $("#task-results-content-root");
+  const model = { summary: view.summary, files: view.files, total: view.total, hasMore: view.hasMore, loadingMore: view.loading, preview: view.preview, error: view.error };
+  const callbacks = {
+    onPreview: path => void previewTaskResult(view, path),
+    onCopyPath: async file => { try { await navigator.clipboard.writeText(file.absolutePath); showToast("文件路径已复制。"); } catch { showCopyFallback("复制生成文件路径", file.absolutePath); } },
+    onLoadMore: () => { if (view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); },
+  };
+  if (globalThis.tokenCouponTaskResults) { globalThis.tokenCouponTaskResults.render(mount, model, callbacks); return; }
+  $("#task-results-summary").textContent = model.summary;
+  $("#task-results-error").textContent = model.error;
+  $("#task-results-path").textContent = model.preview?.absolutePath || "";
+  $("#task-results-preview").textContent = model.preview?.content || "";
+  show($("#task-results-preview-wrap"), !!model.preview); show($("#task-results-more"), model.hasMore);
+  $("#task-results-more").disabled = model.loadingMore;
+  renderTaskResultFiles(view);
+}
 async function loadTaskResultPage(view, offset) {
-  if (view.loading) return; view.loading = true; $("#task-results-more").disabled = true;
+  if (view.loading) return; view.loading = true; renderTaskResults(view);
   try {
     const data = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/tasks/${encodeURIComponent(view.taskId)}/files?offset=${offset}`);
     if (state.taskResultView !== view || state.workspace?.workspaceId !== view.workspaceId || state.planning?.planningId !== view.planningId) return;
-    Object.assign(view, { files: [...view.files, ...data.files], nextOffset: data.nextOffset });
-    $("#task-results-summary").textContent = `${data.message}\n执行目录：${data.executionDirectory || "未记录"}${data.commit ? `\n任务提交：${data.commit}` : ""}\n已显示 ${view.files.length}/${data.total} 个文件`;
-    renderTaskResultFiles(view); show($("#task-results-more"), data.nextOffset !== null);
-  } catch (error) { if (state.taskResultView === view) $("#task-results-error").textContent = error.message; }
-  finally { view.loading = false; $("#task-results-more").disabled = false; }
+    Object.assign(view, { files: [...view.files, ...data.files], nextOffset: data.nextOffset, total: data.total, hasMore: data.nextOffset !== null });
+    view.summary = `${data.message}\n执行目录：${data.executionDirectory || "未记录"}${data.commit ? `\n任务提交：${data.commit}` : ""}\n已显示 ${view.files.length}/${data.total} 个文件`;
+  } catch (error) { if (state.taskResultView === view) view.error = error.message; }
+  finally { view.loading = false; if (state.taskResultView === view) renderTaskResults(view); }
 }
 function renderTaskResultFiles(view) {
   const root = $("#task-results-files"), wasOpen = !!root.querySelector("details[open]"); root.replaceChildren();
@@ -3168,12 +3183,13 @@ function renderTaskResultFiles(view) {
   if (view.files.length > 3) root.append(extra);
 }
 async function previewTaskResult(view, path) {
-  const request = view.previewRequest = (view.previewRequest || 0) + 1; $("#task-results-error").textContent = "";
+  const request = view.previewRequest = (view.previewRequest || 0) + 1; view.error = ""; renderTaskResults(view);
   try {
     const data = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/tasks/${encodeURIComponent(view.taskId)}/files?path=${encodeURIComponent(path)}`);
     if (state.taskResultView !== view || request !== view.previewRequest) return;
-    $("#task-results-path").textContent = data.file.absolutePath; $("#task-results-preview").textContent = data.file.content + (data.file.truncated ? "\n[预览已截断]" : ""); show($("#task-results-preview-wrap"));
-  } catch (error) { if (state.taskResultView === view && request === view.previewRequest) { show($("#task-results-preview-wrap"), false); $("#task-results-error").textContent = error.message; } }
+    view.preview = { absolutePath: data.file.absolutePath, content: data.file.content + (data.file.truncated ? "\n[预览已截断]" : "") };
+  } catch (error) { if (state.taskResultView === view && request === view.previewRequest) { view.preview = null; view.error = error.message; } }
+  finally { if (state.taskResultView === view && request === view.previewRequest) renderTaskResults(view); }
 }
 function renderAttemptChoices(tasks) {
   const select = $("#attempt-select"), previous = state.attemptSelection?.selectedAttemptId || select.value;
@@ -4615,7 +4631,7 @@ $("#dag-dialog").addEventListener("click", event => { if (event.target === $("#d
 $("#dag-dialog").addEventListener("close", () => { state.dagView = null; });
 $("#task-results-close").addEventListener("click", () => { $("#task-results-dialog").close(); state.taskResultView = null; });
 $("#task-results-dialog").addEventListener("cancel", () => { state.taskResultView = null; });
-$("#task-results-more").addEventListener("click", () => { const view = state.taskResultView; if (view && view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); });
+if (!globalThis.tokenCouponTaskResults) $("#task-results-more").addEventListener("click", () => { const view = state.taskResultView; if (view && view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); });
 $("#copy-fallback-close").addEventListener("click", () => $("#copy-fallback-dialog").close());
 $("#copy-fallback-select").addEventListener("click", () => { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); });
 $("#copy-fallback-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#copy-fallback-text").value); $("#copy-fallback-dialog").close(); showToast("文本已复制。"); } catch { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); showToast("浏览器仍未授予剪贴板权限，请按 Ctrl+C 复制选中文本。", true); } });

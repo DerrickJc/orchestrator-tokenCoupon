@@ -446,6 +446,24 @@ export type DagFocusOption = { id: string; label: string };
 export type DagFocusSelectorBridge = {
   render(options: DagFocusOption[], selectedId: string, onChange: (taskId: string) => void): void;
 };
+export type TaskResultFileView = { path: string; absolutePath: string };
+export type TaskResultsModel = {
+  summary: string;
+  files: TaskResultFileView[];
+  total: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  preview: { absolutePath: string; content: string } | null;
+  error: string;
+};
+export type TaskResultsBridge = {
+  render(mount: HTMLElement, model: TaskResultsModel, callbacks: {
+    onPreview: (path: string) => void;
+    onCopyPath: (file: TaskResultFileView) => void;
+    onLoadMore: () => void;
+  }): void;
+  unmount(mount: HTMLElement): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -549,6 +567,7 @@ declare global {
   var tokenCouponRuntimeModelControls: RuntimeModelControlsBridge | undefined;
   var tokenCouponSystemPolicyRouting: SystemPolicyRoutingBridge | undefined;
   var tokenCouponDagFocusSelector: DagFocusSelectorBridge | undefined;
+  var tokenCouponTaskResults: TaskResultsBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;
