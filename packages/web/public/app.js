@@ -1141,7 +1141,7 @@ function renderProviders() {
     $("#planner-model").placeholder = mcp ? "网页所选模型名称（仅记录）" : provider.endsWith("-agent") ? "选择本机模型或沿用 Runner 默认" : "输入自定义模型 ID";
     const current = mcp ? "" : provider === "mock" ? "mock" : state.providers.find(item => item.id === provider)?.model || "";
     renderModelPicker("planner", { models: current && current !== "mock" ? [{ id: current, label: `${current}（已配置）` }] : [], customAllowed: true }, current, mcp ? "在所选网页选择" : "使用已配置模型");
-    $("#planner-model-hint").textContent = mcp ? "此处仅记录名称；实际模型在对应网页中切换。" : provider.endsWith("-agent") ? "调用可能使用本机 Agent 登录账号的额度；规划在只读模式下运行，业务任务仍需单独审查、批准和执行。" : "可选择接口公布的模型，也可输入自定义 ID。";
+    setModelCatalogStatus("planner", mcp ? "此处仅记录名称；实际模型在对应网页中切换。" : provider.endsWith("-agent") ? "调用可能使用本机 Agent 登录账号的额度；规划在只读模式下运行，业务任务仍需单独审查、批准和执行。" : "可选择接口公布的模型，也可输入自定义 ID。");
     $("#planner-help").textContent = mcp ? "需求、文件调研、规划和审查在网页完成；这里配置执行、编辑草案、审批和观测。" : provider.endsWith("-agent") ? "开始后调用本机 Agent 一次；返回结果仍经过规划校验，草案需单独审查和批准。" : "按当前 API 或离线模拟配置生成草案。";
     $("#start-planning").textContent = mcp ? "登记需求，等待网页" : "开始规划";
     show($("#provider-notice"), false); void loadPlannerModels();
@@ -1212,18 +1212,28 @@ function applyModelChoice(prefix) {
   input.value = custom ? "" : select.value;
   show(input, custom); if (custom) input.focus();
 }
+function setModelCatalogStatus(kind, message, loading = false) {
+  const bridge = globalThis.tokenCouponModelCatalogStatus;
+  if (bridge) bridge.render(kind, { message, loading });
+  else {
+    const hint = $(`#${kind}-model-hint`);
+    if (hint) hint.textContent = message;
+    const refresh = $("#refresh-models");
+    if (refresh && kind === "runner") { refresh.disabled = loading; refresh.textContent = loading ? "正在读取模型…" : "刷新模型列表"; }
+  }
+}
 async function loadRunnerModels(refresh = false) {
   const runnerId = $("#runner-id").value; if (!runnerId) return;
   const workspaceId = state.workspace?.workspaceId || "";
   const sequence = state.runnerModelRequest = (state.runnerModelRequest || 0) + 1;
-  $("#runner-model-hint").textContent = "正在读取本机工具的模型目录…";
+  setModelCatalogStatus("runner", "正在读取本机工具的模型目录…", true);
   const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
   try {
     const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`);
     if (sequence !== state.runnerModelRequest || runnerId !== $("#runner-id").value || workspaceId !== (state.workspace?.workspaceId || "")) return;
     renderModelPicker("runner", catalog, $("#runner-model").value.trim(), "沿用 Runner 默认模型");
-    $("#runner-model-hint").textContent = catalog.error || (runnerId === "mock" ? "离线模拟无需选择模型。" : `${catalog.models.length} 个候选模型，来自本机工具目录；实际调用仍取决于账户和接口。`);
-  } catch (error) { if (sequence === state.runnerModelRequest) $("#runner-model-hint").textContent = `${error.message}；仍可使用默认模型或自定义 ID。`; }
+    setModelCatalogStatus("runner", catalog.error || (runnerId === "mock" ? "离线模拟无需选择模型。" : `${catalog.models.length} 个候选模型，来自本机工具目录；实际调用仍取决于账户和接口。`));
+  } catch (error) { if (sequence === state.runnerModelRequest) setModelCatalogStatus("runner", `${error.message}；仍可使用默认模型或自定义 ID。`); }
 }
 async function loadPlannerModels(refresh = false) {
   const sequence = state.plannerModelRequest = (state.plannerModelRequest || 0) + 1;
@@ -1233,21 +1243,23 @@ async function loadPlannerModels(refresh = false) {
     const workspaceId = state.workspace?.workspaceId || "";
     const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
     try {
+      setModelCatalogStatus("planner", "正在读取本机工具的规划模型目录…", true);
       const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`);
       if (sequence !== state.plannerModelRequest || provider !== $("#planner-provider").value) return;
       const selected = $("#planner-model").value.trim();
       renderModelPicker("planner", { ...catalog, models: [{ id: "runner-default", label: "沿用 Runner 默认模型", isDefault: true }, ...(catalog.models || [])], customAllowed: true }, selected || "runner-default", "沿用 Runner 默认模型");
-      $("#planner-model-hint").textContent = catalog.error || `${catalog.models.length} 个本机候选模型；选择只配置本次调用，不会启动模型。`;
-    } catch (error) { if (sequence === state.plannerModelRequest) $("#planner-model-hint").textContent = `${error.message}；可自定义模型 ID 或沿用 Runner 默认模型。`; }
+      setModelCatalogStatus("planner", catalog.error || `${catalog.models.length} 个本机候选模型；选择只配置本次调用，不会启动模型。`);
+    } catch (error) { if (sequence === state.plannerModelRequest) setModelCatalogStatus("planner", `${error.message}；可自定义模型 ID 或沿用 Runner 默认模型。`); }
     return;
   }
-  if (provider !== "deepseek-api") return;
+  if (provider !== "deepseek-api") { setModelCatalogStatus("planner", $("#planner-model-hint")?.textContent || "", false); return; }
   try {
+    setModelCatalogStatus("planner", "正在读取规划模型目录…", true);
     const catalog = await api(`/api/v1/providers/deepseek-api/models${refresh ? "?refresh=1" : ""}`);
     if (sequence !== state.plannerModelRequest || $("#planner-provider").value !== "deepseek-api") return;
     renderModelPicker("planner", catalog, $("#planner-model").value.trim(), "使用已配置模型");
-    $("#planner-model-hint").textContent = catalog.error || "候选项来自当前 Planner 接口，可选或自定义模型 ID。";
-  } catch (error) { if (sequence === state.plannerModelRequest) $("#planner-model-hint").textContent = error.message; }
+    setModelCatalogStatus("planner", catalog.error || "候选项来自当前 Planner 接口，可选或自定义模型 ID。");
+  } catch (error) { if (sequence === state.plannerModelRequest) setModelCatalogStatus("planner", error.message); }
 }
 function renderWorkspaces() {
   const list = $("#workspace-list");
@@ -4533,7 +4545,7 @@ $("#start-planning").addEventListener("click", async () => {
 if (!globalThis.tokenCouponPlannerRequestComposer) bindTextareaEnterSubmit($("#request-text"), () => $("#start-planning").click());
 $("#new-task").addEventListener("click", startNewTask);
 $("#new-task-sidebar").addEventListener("click", startNewTask);
-$("#refresh-models").addEventListener("click", () => { void loadRunnerModels(true); void loadPlannerModels(true); });
+document.addEventListener("token-coupon:refresh-models", () => { void loadRunnerModels(true); void loadPlannerModels(true); });
 $("#reply-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (state.replying) return;
   const message = $("#reply-text").value.trim();

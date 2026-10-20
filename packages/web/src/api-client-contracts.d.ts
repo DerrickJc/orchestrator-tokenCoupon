@@ -397,6 +397,11 @@ export type ModelChoiceSelectorModel = { choices: ModelChoiceOption[]; selectedM
 export type ModelChoiceSelectorsBridge = {
   render(prefix: "planner" | "runner" | "reviewer", model: ModelChoiceSelectorModel, onChange: (modelId: string) => void): void;
 };
+export type ModelCatalogKind = "planner" | "runner";
+export type ModelCatalogStatusModel = { message: string; loading: boolean };
+export type ModelCatalogStatusBridge = {
+  render(kind: ModelCatalogKind, model: ModelCatalogStatusModel): void;
+};
 export type ReviewerModeOption = { id: string; label: string };
 export type ReviewerModeSelectorModel = { options: ReviewerModeOption[]; selectedMode: string };
 export type ReviewerModeSelectorBridge = {
@@ -597,6 +602,7 @@ declare global {
   var tokenCouponPlannerProviderSelector: PlannerProviderSelectorBridge | undefined;
   var tokenCouponRunnerSelector: RunnerSelectorBridge | undefined;
   var tokenCouponModelChoiceSelectors: ModelChoiceSelectorsBridge | undefined;
+  var tokenCouponModelCatalogStatus: ModelCatalogStatusBridge | undefined;
   var tokenCouponReviewerModeSelector: ReviewerModeSelectorBridge | undefined;
   var tokenCouponRunModeSelector: RunModeSelectorBridge | undefined;
   var tokenCouponRunParameters: RunParametersBridge | undefined;

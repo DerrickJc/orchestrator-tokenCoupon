@@ -12,6 +12,7 @@
   <script type="module" src="../src/planner-provider-selector.tsx"></script>
   <script type="module" src="../src/runner-selector.tsx"></script>
   <script type="module" src="../src/model-choice-selectors.tsx"></script>
+  <script type="module" src="../src/model-catalog-status.tsx"></script>
   <script type="module" src="../src/reviewer-mode-selector.tsx"></script>
   <script type="module" src="../src/run-mode-selector.tsx"></script>
   <script type="module" src="../src/run-parameters.tsx"></script>
@@ -147,11 +148,11 @@
         <div id="local-request-wrap"><label for="request-text" class="sr-only">需求描述</label><div id="planner-request-composer-root"></div><textarea id="request-text" rows="4" maxlength="8192" placeholder="例如：给现有服务增加课程查询接口，先检查项目约定，再补充测试。" aria-describedby="request-shortcuts"></textarea><p class="composer-shortcut-hint" id="request-shortcuts">Enter 发送 · Shift+Enter 换行</p></div>
         <div class="settings-grid planning-config-grid">
           <label><span>规划方式</span><div id="planner-provider-root"><select id="planner-provider"></select></div></label>
-          <label id="planner-model-wrap"><span>规划模型</span><div id="planner-model-choice-root"><select id="planner-model-choice"></select></div><input id="planner-model" class="hidden" aria-label="自定义规划模型 ID" placeholder="输入自定义模型 ID"><span id="planner-model-hint" class="hint"></span></label>
+          <label id="planner-model-wrap"><span>规划模型</span><div id="planner-model-choice-root"><select id="planner-model-choice"></select></div><input id="planner-model" class="hidden" aria-label="自定义规划模型 ID" placeholder="输入自定义模型 ID"><div id="planner-model-hint-root"><span id="planner-model-hint" class="hint"></span></div></label>
           <label><span>执行工具</span><div id="runner-selector-root"><select id="runner-id"></select></div></label>
           <label><span>执行模型</span><div id="runner-model-choice-root"><select id="runner-model-choice"><option value="">沿用 Runner 默认模型</option><option value="__custom__">自定义模型 ID…</option></select></div><input id="runner-model" class="hidden" aria-label="自定义执行模型 ID" placeholder="输入自定义模型 ID"></label>
         </div>
-        <div class="model-hint-row"><span id="runner-model-hint" class="hint" aria-live="polite"></span><button id="refresh-models" type="button" class="text-button">刷新模型列表</button></div>
+        <div id="runner-model-hint-root"><div class="model-hint-row"><span id="runner-model-hint" class="hint" aria-live="polite"></span><button id="refresh-models" type="button" class="text-button">刷新模型列表</button></div></div>
         <details class="advanced-settings"><summary>执行设置</summary><div class="settings-grid advanced-grid">
           <label>任务并发<select id="parallel"><option value="1">1 个任务</option><option value="2">2 个任务</option><option value="3">3 个任务</option></select></label>
           <label>任务隔离<select id="isolation"><option value="git-worktree">独立 Git worktree（推荐）</option><option value="shared">共享工作区（串行）</option></select></label>
