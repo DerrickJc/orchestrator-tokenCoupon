@@ -18,7 +18,7 @@ function bindTextareaEnterSubmit(textarea, submit) {
     submit();
   });
 }
-const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null, modelChoiceSelections: { planner: "", runner: "" } };
+const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null, modelChoiceSelections: { planner: "", runner: "", reviewer: "" } };
 const statuses = { collecting: "收集中", draft_ready: "草案待处理", approved: "已批准", execution_created: "执行已创建", succeeded: "已完成", failed: "失败", cancelled: "已取消", running: "运行中", paused: "已暂停", blocked: "等待处理", interrupted: "已中断", ready: "准备就绪", planned: "待执行", timed_out: "超时" };
 statuses.needs_input = "等待用户决策";
 const diagnosticStatuses = { running: "分析中", completed: "分析完成", failed: "分析失败", interrupted: "分析中断" };
@@ -1169,10 +1169,10 @@ function renderModelPicker(prefix, catalog, current, defaultLabel) {
     ...(catalog.customAllowed ? [{ id: "__custom__", label: prefix === "planner" && isWebMcp($("#planner-provider").value) ? "记录网页模型名称…" : "自定义模型 ID…" }] : []),
   ];
   const currentIsChoice = current && choices.some(choice => choice.id === current);
-  const remembersCustomChoice = (prefix === "planner" || prefix === "runner") && state.modelChoiceSelections[prefix] === "__custom__";
+  const remembersCustomChoice = ["planner", "runner", "reviewer"].includes(prefix) && state.modelChoiceSelections[prefix] === "__custom__";
   const selectedModelId = currentIsChoice ? current : current && catalog.customAllowed ? "__custom__" :
     (catalog.customAllowed && remembersCustomChoice ? "__custom__" : "");
-  if ((prefix === "planner" || prefix === "runner") && globalThis.tokenCouponModelChoiceSelectors) {
+  if (["planner", "runner", "reviewer"].includes(prefix) && globalThis.tokenCouponModelChoiceSelectors) {
     select.onchange = null;
     globalThis.tokenCouponModelChoiceSelectors.render(prefix, { choices, selectedModelId }, modelId => {
       state.modelChoiceSelections[prefix] = modelId;
@@ -1188,7 +1188,7 @@ function renderModelPicker(prefix, catalog, current, defaultLabel) {
 }
 function applyModelChoice(prefix) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`), custom = select.value === "__custom__";
-  if (prefix === "planner" || prefix === "runner") state.modelChoiceSelections[prefix] = select.value;
+  if (["planner", "runner", "reviewer"].includes(prefix)) state.modelChoiceSelections[prefix] = select.value;
   input.value = custom ? "" : select.value;
   show(input, custom); if (custom) input.focus();
 }
@@ -1855,19 +1855,22 @@ function renderReviewerControls(plan) {
     for (const [value, label] of [["planning", "沿用规划方式"], ["codex-agent", "Codex 本机 Agent"], ["claude-agent", "Claude Code 本机 Agent"], ["deepseek-api", "DeepSeek API"], ["web-chatgpt", "ChatGPT 网页 MCP"], ["web-claude", "Claude 网页 MCP"]]) select.add(new Option(label, value));
     methodLabel.append(select); controls.append(methodLabel);
     const modelLabel = document.createElement("label"); modelLabel.id = "reviewer-model-wrap"; modelLabel.className = "compact-label"; modelLabel.textContent = "审查模型";
+    const modelChoiceRoot = document.createElement("div"); modelChoiceRoot.id = "reviewer-model-choice-root";
     const modelChoice = document.createElement("select"); modelChoice.id = "reviewer-model-choice";
     const modelInput = document.createElement("input"); modelInput.id = "reviewer-model"; modelInput.maxLength = 120; modelInput.placeholder = "沿用 Runner 默认模型";
-    modelLabel.append(modelChoice, modelInput); controls.append(modelLabel);
+    modelChoiceRoot.append(modelChoice); modelLabel.append(modelChoiceRoot, modelInput); controls.append(modelLabel);
     button.parentElement.insertBefore(controls, button);
     const hint = document.createElement("p"); hint.id = "reviewer-mode-hint"; hint.className = "hint"; button.parentElement.parentElement.insertBefore(hint, button.parentElement.nextSibling);
   }
   if (!$("#reviewer-model-choice")) {
-    const choice = document.createElement("select"); choice.id = "reviewer-model-choice"; $("#reviewer-model").before(choice);
+    let choiceRoot = $("#reviewer-model-choice-root");
+    if (!choiceRoot) { choiceRoot = document.createElement("div"); choiceRoot.id = "reviewer-model-choice-root"; $("#reviewer-model").before(choiceRoot); }
+    const choice = document.createElement("select"); choice.id = "reviewer-model-choice"; choiceRoot.append(choice);
   }
   if (!select.dataset.bound) {
     select.dataset.bound = "true";
     select.addEventListener("change", () => { localStorage.setItem("tc-reviewer-mode", select.value); $("#reviewer-model").value = ""; state.reviewerModelMode = ""; renderReviewerControls(state.planning); });
-    $("#reviewer-model-choice").addEventListener("change", () => applyModelChoice("reviewer"));
+    if (!globalThis.tokenCouponModelChoiceSelectors) $("#reviewer-model-choice").addEventListener("change", () => applyModelChoice("reviewer"));
   }
   const reviewKey = `${plan.planningId}:${state.systemSettings?.revision || 0}`;
   if (state.reviewerPolicyKey !== reviewKey && functionPolicy("review")) {
@@ -1893,6 +1896,7 @@ function renderReviewerControls(plan) {
   };
   $("#reviewer-mode-hint").textContent = hints[mode] || "请选择审查方式。";
   if (mode !== state.reviewerModelMode) {
+    state.modelChoiceSelections.reviewer = "";
     state.reviewerModelMode = mode;
     void runReviewModelCatalog(mode);
   }

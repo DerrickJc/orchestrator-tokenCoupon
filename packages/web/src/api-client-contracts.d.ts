@@ -366,7 +366,7 @@ export type RunnerSelectorBridge = {
 export type ModelChoiceOption = { id: string; label: string };
 export type ModelChoiceSelectorModel = { choices: ModelChoiceOption[]; selectedModelId: string };
 export type ModelChoiceSelectorsBridge = {
-  render(prefix: "planner" | "runner", model: ModelChoiceSelectorModel, onChange: (modelId: string) => void): void;
+  render(prefix: "planner" | "runner" | "reviewer", model: ModelChoiceSelectorModel, onChange: (modelId: string) => void): void;
 };
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {

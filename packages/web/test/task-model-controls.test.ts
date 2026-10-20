@@ -12,7 +12,7 @@ async function page(options: { lateCodex?: boolean; reactModelSelectors?: boolea
   Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   const copied: string[] = []; Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
-  if (options.reactModelSelectors) Object.assign(w, { tokenCouponModelChoiceSelectors: { render(prefix: "planner" | "runner", model: { choices: Array<{ id: string; label: string }>; selectedModelId: string }, onChange: (modelId: string) => void) {
+  if (options.reactModelSelectors) Object.assign(w, { tokenCouponModelChoiceSelectors: { render(prefix: "planner" | "runner" | "reviewer", model: { choices: Array<{ id: string; label: string }>; selectedModelId: string }, onChange: (modelId: string) => void) {
     const select = w.document.getElementById(`${prefix}-model-choice`) as HTMLSelectElement;
     select.replaceChildren(...model.choices.map(choice => new w.Option(choice.label, choice.id)));
     select.value = model.selectedModelId;
@@ -91,4 +91,12 @@ it("does not replace a newly selected Runner with a late model response", async 
   await new Promise(resolve=>setTimeout(resolve,20));
   expect((h.element("runner-model-choice") as HTMLSelectElement).value).toBe("claude-code-fast");
   expect((h.element("runner-model") as HTMLInputElement).value).toBe("claude-code-fast");
+});
+
+it("uses the React model selector for the reviewer model catalog", async () => {
+  const h = await page({ reactModelSelectors: true });
+  h.choose("reviewer-mode", "deepseek-api");
+  await expect.poll(() => Array.from((h.element("reviewer-model-choice") as HTMLSelectElement).options).some(option => option.value === "deepseek-pro")).toBe(true);
+  h.choose("reviewer-model-choice", "deepseek-pro");
+  expect((h.element("reviewer-model") as HTMLInputElement).value).toBe("deepseek-pro");
 });

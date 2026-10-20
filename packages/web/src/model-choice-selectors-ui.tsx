@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { ModelChoiceSelectorModel } from "./api-client-contracts.js";
 
 export function ModelChoiceSelector({ prefix, model, onChange }: {
-  prefix: "planner" | "runner";
+  prefix: "planner" | "runner" | "reviewer";
   model: ModelChoiceSelectorModel;
   onChange(modelId: string): void;
 }) {
