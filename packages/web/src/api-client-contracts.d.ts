@@ -391,6 +391,11 @@ export type RunParametersModel = {
 export type RunParametersBridge = {
   render(model: RunParametersModel, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void): void;
 };
+export type RunAgentModeOption = { id: "plan" | "unified" | "per-task"; label: string; disabled: boolean };
+export type RunAgentModeModel = { options: RunAgentModeOption[]; selectedMode: string };
+export type RunAgentModeBridge = {
+  render(model: RunAgentModeModel, onChange: (mode: "plan" | "unified" | "per-task") => void): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -489,6 +494,7 @@ declare global {
   var tokenCouponReviewerModeSelector: ReviewerModeSelectorBridge | undefined;
   var tokenCouponRunModeSelector: RunModeSelectorBridge | undefined;
   var tokenCouponRunParameters: RunParametersBridge | undefined;
+  var tokenCouponRunAgentMode: RunAgentModeBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;

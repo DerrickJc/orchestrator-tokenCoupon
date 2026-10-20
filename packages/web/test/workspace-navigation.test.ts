@@ -372,7 +372,7 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
@@ -387,6 +387,12 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       input.onchange = () => onChange(option.id as "default" | "custom");
       const copy = w.document.createElement("span"), title = w.document.createElement("strong"), description = w.document.createElement("small"); title.textContent = option.title; description.textContent = option.description; copy.append(title, description); label.append(input, copy); return label;
     }));
+  } } });
+  if (options.reactRunAgentMode) Object.assign(w, { tokenCouponRunAgentMode: { render(model: { options: Array<{ id: string; label: string; disabled: boolean }>; selectedMode: string }, onChange: (mode: "plan" | "unified" | "per-task") => void) {
+    const root = w.document.getElementById("run-agent-mode-root")!;
+    const select = w.document.createElement("select"); select.id = "run-agent-mode";
+    select.replaceChildren(...model.options.map(option => { const item = new w.Option(option.label, option.id); item.disabled = option.disabled; return item; }));
+    select.value = model.selectedMode; select.onchange = () => onChange(select.value as "plan" | "unified" | "per-task"); root.replaceChildren(select);
   } } });
   if (options.reactRunAdvanced) Object.assign(w, { tokenCouponRunParameters: { render(model: { parallelOptions: Array<{ id: string; label: string }>; selectedParallel: string; isolationOptions: Array<{ id: string; label: string }>; selectedIsolation: string; verificationOptions: Array<{ id: string; label: string }>; selectedVerification: string; showVerification: boolean }, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void) {
     const root = w.document.getElementById("run-advanced-options-root")!;
@@ -931,7 +937,7 @@ it("requires an updated backend before enabling launch model overrides", async (
 });
 
 it("launches one unified model with a task-specific exception without modifying the approved draft", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunAgentMode: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const original = JSON.stringify(h.plans[0]);
   h.w.eval('__testState.runners=[{id:"codex",available:true},{id:"claude-code",available:true},{id:"mock",available:true}]');

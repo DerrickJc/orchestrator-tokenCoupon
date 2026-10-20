@@ -1644,17 +1644,27 @@ function renderRunAgents(config, plan) {
   let section = $("#run-agent-configuration");
   if (!section) {
     section = document.createElement("fieldset"); section.id = "run-agent-configuration"; section.className = "run-agent-configuration";
-    section.innerHTML = '<legend>本次执行 Runner／模型</legend><label class="compact-label">配置方式<select id="run-agent-mode"><option value="plan">沿用已批准草案</option><option value="unified">统一配置所有任务</option><option value="per-task">逐任务单独配置</option></select></label><div id="run-agent-defaults"></div><details id="run-agent-overrides"><summary>单独配置个别任务（可选）</summary><div id="run-agent-task-list"></div></details><p class="hint">只影响本次 Session 的 Runner／模型；任务正文、依赖及工具审批沿用已批准草案。模型留空使用所选 Runner 的本机默认。</p>';
+    section.innerHTML = '<legend>本次执行 Runner／模型</legend><label class="compact-label">配置方式<div id="run-agent-mode-root"><select id="run-agent-mode"><option value="plan">沿用已批准草案</option><option value="unified">统一配置所有任务</option><option value="per-task">逐任务单独配置</option></select></div></label><div id="run-agent-defaults"></div><details id="run-agent-overrides"><summary>单独配置个别任务（可选）</summary><div id="run-agent-task-list"></div></details><p class="hint">只影响本次 Session 的 Runner／模型；任务正文、依赖及工具审批沿用已批准草案。模型留空使用所选 Runner 的本机默认。</p>';
     $("#run-configuration-summary").after(section);
-    $("#run-agent-mode").addEventListener("change", () => { if (!state.runConfiguration) return; state.runConfiguration.agentMode = $("#run-agent-mode").value; state.runConfiguration.edited = true; state.runRequestKey = null; renderRunConfiguration(); });
+    if (!globalThis.tokenCouponRunAgentMode) $("#run-agent-mode").addEventListener("change", () => updateRunAgentMode($("#run-agent-mode").value));
   }
   section.disabled = !!state.activeJob || !!state.runInFlight;
-  for (const option of $("#run-agent-mode").options) if (option.value !== "plan") option.disabled = !state.executionSelectionSupported;
+  const mode = config.agentMode || "plan";
+  const modeOptions = [
+    { id: "plan", label: "沿用已批准草案", disabled: false },
+    { id: "unified", label: "统一配置所有任务", disabled: !state.executionSelectionSupported },
+    { id: "per-task", label: "逐任务单独配置", disabled: !state.executionSelectionSupported },
+  ];
+  if (globalThis.tokenCouponRunAgentMode) {
+    globalThis.tokenCouponRunAgentMode.render({ options: modeOptions, selectedMode: mode }, updateRunAgentMode);
+  } else {
+    for (const option of $("#run-agent-mode").options) if (option.value !== "plan") option.disabled = !state.executionSelectionSupported;
+    $("#run-agent-mode").value = mode;
+  }
   let supportNote = $("#run-agent-support-note");
   if (!supportNote) { supportNote = document.createElement("p"); supportNote.id = "run-agent-support-note"; supportNote.className = "hint"; supportNote.setAttribute("role", "status"); section.append(supportNote); }
   show(supportNote, !state.executionSelectionSupported); supportNote.textContent = "当前后台尚未加载运行模型选择功能，请正常重启后台并刷新此页面。仍可沿用已批准草案运行。";
-  const mode = config.agentMode || "plan", signature = JSON.stringify([state.runConfigKey, mode]);
-  $("#run-agent-mode").value = mode;
+  const signature = JSON.stringify([state.runConfigKey, mode]);
   if (section.dataset.signature === signature) {
     if (mode === "unified") $("#run-agent-overrides > summary").textContent = config.agentOverrides?.length ? `单独配置个别任务（已设置 ${config.agentOverrides.length} 项）` : "单独配置个别任务（可选）";
     for (const hint of section.querySelectorAll(".run-agent-inherited")) hint.textContent = `沿用统一配置：${labels[config.agentDefaults?.runnerId] || config.agentDefaults?.runnerId || ""} / ${config.agentDefaults?.modelId || "Runner 默认模型"}`;
@@ -1699,6 +1709,13 @@ function renderRunAgents(config, plan) {
     if (mode === "unified" && !stored) hint.classList.add("run-agent-inherited");
     list.append(row);
   }
+}
+function updateRunAgentMode(mode) {
+  if (!state.runConfiguration || !["plan", "unified", "per-task"].includes(mode)) return;
+  state.runConfiguration.agentMode = mode;
+  state.runConfiguration.edited = true;
+  state.runRequestKey = null;
+  renderRunConfiguration();
 }
 function renderRunConfiguration() {
   const plan = state.planning;
