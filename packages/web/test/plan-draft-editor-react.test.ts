@@ -44,6 +44,7 @@ it("edits structured task fields locally, emits a plan patch, and preserves it w
   setInputValue(steps, "定义请求字段\n覆盖成功和错误响应\n");
   expect(onChange.mock.lastCall?.[0].tasks[0].task.steps).toEqual(["定义请求字段", "覆盖成功和错误响应"]);
   expect(steps.value).toBe("定义请求字段\n覆盖成功和错误响应\n");
+  expect(steps.getAttribute("aria-label")).toBe("任务 1 · 实施步骤（每行一项）");
   setInputValue(steps, steps.value + " ");
   expect(steps.value).toBe("定义请求字段\n覆盖成功和错误响应\n ");
   setInputValue(steps, steps.value + "新增一项");

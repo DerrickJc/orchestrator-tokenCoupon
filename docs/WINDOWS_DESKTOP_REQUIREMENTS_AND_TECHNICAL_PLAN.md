@@ -955,6 +955,14 @@ SSE hello 返回保留范围及 epoch/cursor/window 重置原因。页面只在�
 
 类型检查、生产构建及完整仓库回归通过：118 个文件、775 项测试。此处不代替 Electron 发现挑战、完整领域 DTO、安装升级或 Windows 完整后台验收。
 
+### 13.63 真实浏览器回归与固定字段名称（2026-10-20）
+
+新增 `node scripts/desktop-browser-fixture.mjs`：自动创建独立临时 profile/中文空格目录，用 Mock 完成规划、审查、批准、执行两个任务，再准备另一份未批准草案；输出 origin、两份 Planning ID 与 PID。只用于测试，不读取既有后台数据，不调用真实付费模型。Ctrl+C/SIGTERM 停止并清理临时目录。先完成根目录构建，再启动 fixture；使用输出的 origin 打开对应工作区/计划。
+
+实际 Chromium 页面验证通过：Vite 生产资源与 HttpOnly 授权、SSE 状态核对、两个真实 Mock Attempt 来回切换并读取对应日志、结构化步骤连续输入换行。已执行的计划不允许直接编辑；未批准草案可以编辑。1280、960、640 CSS px 三种宽度均无文档级横向溢出，测试交互没有 JavaScript pageerror。多行输入补充固定 aria-label，避免字段精确匹配混入已有正文；相关 Web 类型检查、构建与 3 项定向组件/应用回归通过。
+
+截图保存在本机 `/tmp/token-coupon-desktop-browser-editor.png`；这是临时测试证据，不随源码发布。浏览器自动请求未提供的 favicon 返回 404，与上述业务检查区分。此次是 Linux/WSL 后台＋Chromium 的实际页面回归，**不是** Windows Electron、原生文件选择、全部 UI-01 至 UI-15 或真实 Runner 的完整验收。
+
 ## 14. 剩余实施台账（2026-10-20）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。

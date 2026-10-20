@@ -28,8 +28,8 @@ export function PlanDraftEditor({ model, onChange }: {
     const rows = array ? Math.min(8, Math.max(3, (Array.isArray(value) ? value.length : 0) + 1)) : 5;
     return <label className="draft-text-field" key={label}>{label}
       {multiline
-        ? <textarea value={text} rows={rows} disabled={model.disabled} onChange={event => change(event.currentTarget.value)} />
-        : <input value={text} disabled={model.disabled} onChange={event => change(event.currentTarget.value)} />}
+        ? <textarea aria-label={label} value={text} rows={rows} disabled={model.disabled} onChange={event => change(event.currentTarget.value)} />
+        : <input aria-label={label} value={text} disabled={model.disabled} onChange={event => change(event.currentTarget.value)} />}
     </label>;
   };
 
