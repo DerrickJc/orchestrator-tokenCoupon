@@ -34,6 +34,23 @@ it("opens backend directory selection by default for remote clients and register
   expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces", body: { path: "/projects/远程项目" } });
   expect(h.nativeCalls).toHaveLength(0);
 });
+it("uses the Electron preload folder picker in the desktop app without calling the remote picker route", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  h.element("add-workspace-main").click(); await chooseNativeFolder(h);
+  expect(h.element("workspace-native-choice").textContent).toContain("桌面应用：本机文件夹选择器");
+  await expect.poll(() => h.desktopFolderCalls.length).toBe(1);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("C:\\Projects\\Selected");
+  expect(h.nativeCalls).toHaveLength(0);
+  expect(h.posts.some(post => post.path === "/api/v1/workspaces")).toBe(false);
+});
+it("returns to workspace selection when the desktop folder picker is canceled", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  h.setDesktopFolderResult({ canceled: true });
+  h.element("add-workspace-main").click(); await chooseNativeFolder(h);
+  await expect.poll(() => h.visible("workspace-form")).toBe(false);
+  expect(h.visible("workspace-cards")).toBe(true);
+  expect(h.desktopFolderCalls).toHaveLength(1); expect(h.nativeCalls).toHaveLength(0);
+});
 it("initializes unified preferences, persists a selected Agent and keeps per-function settings editable", async () => {
   const h = await page({ empty: true, settings: defaultSystemSettings(), reactSystemPolicyRouting: true });
   await expect.poll(() => h.w.location.hash).toBe("#/settings");
@@ -405,11 +422,17 @@ it("reconciles a restarted daemon without replaying mutations or discarding loca
   h.w.eval("connectEvents();");
   expect(sources[1].url).toContain("after=2&epoch=restarted");
 });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
-  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
+  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [];
+  let desktopFolderResult: { canceled: boolean; path?: string } = { canceled: false, path: "C:\\Projects\\Selected" };
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
+  if (options.desktopPicker) Object.assign(w, { tokenCouponDesktop: {
+    getAttachment: async () => ({ origin: "http://127.0.0.1:4177", port: 4177, epoch: "desktop-test", profileId: "a".repeat(24), protocol: { major: 1, minor: 0 }, applicationVersion: "0.1.0", buildId: "test" }),
+    chooseWorkspaceFolder: async () => { desktopFolderCalls.push(Date.now()); return desktopFolderResult; },
+    showNotification: async () => true,
+  } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
   if (options.reactRunMode) Object.assign(w, { tokenCouponRunModeSelector: { render(model: { options: Array<{ id: string; title: string; description: string }>; selectedMode: string }, onChange: (mode: "default" | "custom") => void) {
@@ -556,7 +579,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
   await expect.poll(() => (w as any).__testState.initialized).toBe(true);
-  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
+  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
 
 it("keeps quick navigation usable when the compiled React entry is unavailable", async () => {

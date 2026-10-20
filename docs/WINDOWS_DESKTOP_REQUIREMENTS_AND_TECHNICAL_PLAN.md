@@ -1021,7 +1021,11 @@ daemon 创建受保护 owner 记录时一并保存监听端口；旧记录仍可
 
 BrowserWindow 固定关闭 Node 集成并启用 context isolation、renderer sandbox 与 webSecurity；跨源导航、弹窗和权限请求均拒绝。preload 只暴露获取附着信息、选择工作区目录、显示限长桌面通知三个方法；main 校验每个 IPC 调用来自当前获验证 origin 的主窗口主 frame，并校验通知字段。策略回归覆盖本机地址白名单、来源绑定和通知长度边界。此实现遵循 [Electron 安全指南](https://www.electronjs.org/docs/latest/tutorial/security/) 与 [BrowserWindow 隔离选项](https://www.electronjs.org/docs/latest/api/browser-window)。
 
-根目录类型检查覆盖 desktop workspace，桌面 TypeScript 构建和 preload 复制通过；策略测试 3 项通过。当前环境安装 Electron JS 包后，下载官方运行二进制遇到网络 `fetch failed`，因此没有声称 Electron GUI 已启动。此原型仅能附着已启动的 daemon；daemon 随应用启动、关闭到托盘、工作区选择器接入与安装包仍未完成。Electron 44.9.1 是 2026-10-19 官方 stable release 页面可见的稳定版本，后续应按 Electron 安全更新维护，不把此版本写成长期不变的推荐值。
+根目录类型检查覆盖 desktop workspace，桌面 TypeScript 构建和 preload 复制通过；策略测试 3 项通过。当前环境安装 Electron JS 包后，下载官方运行二进制遇到网络 `fetch failed`，因此没有声称 Electron GUI 已启动。此原型仅能附着已启动的 daemon；daemon 随应用启动、关闭到托盘和安装包仍未完成。Electron 44.9.1 是 2026-10-19 官方 stable release 页面可见的稳定版本，后续应按 Electron 安全更新维护，不把此版本写成长期不变的推荐值。
+
+### 13.72 桌面本机目录选择桥接（2026-10-20）
+
+新建工作区页面检测到受限 `tokenCouponDesktop` preload 时，改用 Electron 主进程 `dialog.showOpenDialog` 选择本机文件夹；取消选择回到工作区列表，不提交工作区写入。普通浏览器仍使用既有后台目录浏览/Windows 原生窗口路径。Electron 模式不显示一个无法取消 native dialog 的网页“取消”按钮，也不启动远程 `/api/v1/native-picker` 请求。桌面桥接声明和 2 个页面回归覆盖选中路径及取消返回；类型检查和 150 项工作区/规划导航回归通过。此处验证的是桥接路由逻辑，不是 Windows 原生弹窗实机截图或完整 Electron 安装验收。
 
 ## 14. 剩余实施台账（2026-10-20）
 
@@ -1031,7 +1035,7 @@ BrowserWindow 固定关闭 Node 集成并启用 context isolation、renderer san
 | --- | --- | --- |
 | C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏及 Electron main/preload 附着原型已完成；继续 daemon 自动启动和发布构建身份 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
-| D：桌面预览 | 现有 daemon 附着原型已完成；继续随包后台启动、托盘、选择器接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；不能用 WSL 结果代替 |
+| D：桌面预览 | 现有 daemon 附着原型与新建工作区本机目录选择桥接已完成；继续随包后台启动、托盘、其余宿主能力接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；不能用 WSL 结果代替 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |
 | F：既有质量主线 | 关键任务产物 Review、成果追溯、可信用量、CLI daemon 模式 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
 | G：发布准备 | 用户资料、许可、安装升级与卸载、签名和渠道 | 干净 Windows、完整生产资源及兼容/回退报告 |

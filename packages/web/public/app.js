@@ -5023,39 +5023,46 @@ function renderFileSelection() {
 function cancelDirectoryPicker(message = "") {
   const controller = state.directoryPickerController; if (!controller) return;
   state.directoryPickerController = null; controller.abort(); state.nativePicking = false;
-  const button = $("#choose-workspace-native"); button.disabled = false; button.textContent = "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy");
+  const button = $("#choose-workspace-native"); button.disabled = false; button.textContent = desktopFolderPicker ? "选择文件夹" : "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy");
   show($("#cancel-directory-picker"), false);
   if (message) { $("#workspace-picker-status").textContent = message; $("#workspace-manual-path").open = true; }
 }
 const pickerStatus = document.createElement("p"); pickerStatus.id = "workspace-picker-status"; pickerStatus.className = "hint"; pickerStatus.setAttribute("role", "status"); pickerStatus.setAttribute("aria-live", "polite");
-const cancelPicker = document.createElement("button"); cancelPicker.id = "cancel-directory-picker"; cancelPicker.type = "button"; cancelPicker.className = "button button-quiet hidden"; cancelPicker.textContent = "取消 Windows 选择";
+const desktopFolderPicker = typeof window.tokenCouponDesktop?.chooseWorkspaceFolder === "function";
+const cancelPicker = document.createElement("button"); cancelPicker.id = "cancel-directory-picker"; cancelPicker.type = "button"; cancelPicker.className = "button button-quiet hidden"; cancelPicker.textContent = "取消选择";
 const nativeChoice = document.createElement("details"); nativeChoice.id = "workspace-native-choice"; nativeChoice.className = "foldout";
-nativeChoice.innerHTML = '<summary>同机使用：Windows 原生窗口</summary><p class="hint">仅在运行后台的 Windows 已解锁桌面打开，另一台电脑看不到此窗口。远程使用请点“浏览后台目录”。</p><button id="choose-workspace-native" type="button" class="button button-quiet">在后台 Windows 打开选择窗口</button>';
+nativeChoice.innerHTML = desktopFolderPicker
+  ? '<summary>桌面应用：本机文件夹选择器</summary><p class="hint">在当前电脑选择工作区文件夹。</p><button id="choose-workspace-native" type="button" class="button button-quiet">选择文件夹</button>'
+  : '<summary>同机使用：Windows 原生窗口</summary><p class="hint">仅在运行后台的 Windows 已解锁桌面打开，另一台电脑看不到此窗口。远程使用请点“浏览后台目录”。</p><button id="choose-workspace-native" type="button" class="button button-quiet">在后台 Windows 打开选择窗口</button>';
 $("#choose-workspace-directory").textContent = "浏览后台目录";
 $("#choose-workspace-directory").after(nativeChoice); nativeChoice.append(cancelPicker, pickerStatus);
 cancelPicker.addEventListener("click", () => cancelDirectoryPicker("已取消 Windows 选择；可浏览后台目录或手动填写路径。"));
 async function openDirectoryPicker() {
-  if (state.nativePicking) { showActionFeedback("系统选择窗口仍在等待", "请在运行后台的 Windows 桌面选择或取消；也可返回选择已有工作区。"); return; }
+  if (state.nativePicking) { showActionFeedback("系统选择窗口仍在等待", desktopFolderPicker ? "请完成或取消当前文件夹选择。" : "请在运行后台的 Windows 桌面选择或取消；也可返回选择已有工作区。"); return; }
   const generation = state.folderSelectionGeneration, button = $("#choose-workspace-native"), controller = new AbortController();
   state.directoryPickerController = controller;
   state.nativePicking = true; button.disabled = true; button.textContent = "正在选择文件夹…"; button.setAttribute("aria-busy", "true");
-  show(cancelPicker); pickerStatus.textContent = "正在请求 Windows 文件夹窗口；未看到窗口时，可取消并手动填写。";
-  showActionFeedback("正在打开文件夹选择窗口", "请在运行后台的 Windows 桌面选择或取消；如果窗口在后台，可通过任务栏切换。也可返回选择已有工作区。");
-  const reminder = setTimeout(() => { if (state.directoryPickerController === controller && generation === state.folderSelectionGeneration) { pickerStatus.textContent = "仍在等待 Windows 窗口。若桌面没有弹窗，请取消选择并手动填写路径；最多等待 5 分钟。"; showActionFeedback("等待系统文件夹选择", pickerStatus.textContent); } }, 12000);
-  const deadline = setTimeout(() => { if (state.directoryPickerController === controller) cancelDirectoryPicker("本次选择等待超时，已请求取消。可重试或手动填写路径。"); }, 310000);
+  show(cancelPicker, !desktopFolderPicker); pickerStatus.textContent = desktopFolderPicker ? "正在打开本机文件夹选择器；如需取消，请关闭系统窗口。" : "正在请求 Windows 文件夹窗口；未看到窗口时，可取消并手动填写。";
+  showActionFeedback("正在打开文件夹选择窗口", desktopFolderPicker ? "请在当前电脑选择或取消文件夹。" : "请在运行后台的 Windows 桌面选择或取消；如果窗口在后台，可通过任务栏切换。也可返回选择已有工作区。");
+  const reminder = desktopFolderPicker ? undefined : setTimeout(() => { if (state.directoryPickerController === controller && generation === state.folderSelectionGeneration) { pickerStatus.textContent = "仍在等待 Windows 窗口。若桌面没有弹窗，请取消选择并手动填写路径；最多等待 5 分钟。"; showActionFeedback("等待系统文件夹选择", pickerStatus.textContent); } }, 12000);
+  const deadline = desktopFolderPicker ? undefined : setTimeout(() => { if (state.directoryPickerController === controller) cancelDirectoryPicker("本次选择等待超时，已请求取消。可重试或手动填写路径。"); }, 310000);
   try {
-    const result = await api("/api/v1/native-picker", { method: "POST", body: JSON.stringify({ kind: "directory" }), signal: controller.signal });
+    const result = desktopFolderPicker
+      ? await window.tokenCouponDesktop.chooseWorkspaceFolder()
+      : await api("/api/v1/native-picker", { method: "POST", body: JSON.stringify({ kind: "directory" }), signal: controller.signal });
     if (controller.signal.aborted || !workspaceFormIsCurrent(generation)) return;
-    if (result.cancelled) { closeWorkspaceForm(); showActionFeedback("已取消新建工作区", "已返回工作区选择，原有授权选择与任务保留。"); return; }
-    $("#workspace-path").value = result.paths[0]; $("#workspace-selected-path").textContent = result.paths[0]; show($("#workspace-form")); show($("#workspace-path-error"), false);
+    if (result.cancelled || result.canceled) { closeWorkspaceForm(); showActionFeedback("已取消新建工作区", "已返回工作区选择，原有授权选择与任务保留。"); return; }
+    const selectedPath = result.path || result.paths?.[0];
+    if (typeof selectedPath !== "string" || !selectedPath) throw new Error("folder_picker_result_invalid：文件夹选择器没有返回路径");
+    $("#workspace-path").value = selectedPath; $("#workspace-selected-path").textContent = selectedPath; show($("#workspace-form")); show($("#workspace-path-error"), false);
     pickerStatus.textContent = "文件夹已选择，填写名称后添加项目。";
-    showActionFeedback("已选择文件夹", `${result.paths[0]}。填写名称后点击“添加项目”登记。`);
+    showActionFeedback("已选择文件夹", `${selectedPath}。填写名称后点击“添加项目”登记。`);
   } catch (error) {
     if (controller.signal.aborted || !workspaceFormIsCurrent(generation)) return;
     pickerStatus.textContent = "系统选择未完成，可重新选择或手动填写。";
     $("#workspace-path-error").textContent = error.message; show($("#workspace-path-error")); $("#workspace-manual-path").open = true; showActionFeedback("系统选择器未打开", `${error.message}。可手动填写路径或返回已有工作区。`, "validation");
   }
-  finally { clearTimeout(reminder); clearTimeout(deadline); if (state.directoryPickerController === controller) { state.directoryPickerController = null; state.nativePicking = false; button.disabled = false; button.textContent = "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy"); show(cancelPicker, false); } }
+  finally { if (reminder) clearTimeout(reminder); if (deadline) clearTimeout(deadline); if (state.directoryPickerController === controller) { state.directoryPickerController = null; state.nativePicking = false; button.disabled = false; button.textContent = desktopFolderPicker ? "选择文件夹" : "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy"); show(cancelPicker, false); } }
 }
 $("#choose-workspace-directory").addEventListener("click", () => { cancelDirectoryPicker(); void openDirectoryBrowser(); });
 $("#choose-workspace-native").addEventListener("click", openDirectoryPicker);
