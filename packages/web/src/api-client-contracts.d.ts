@@ -358,6 +358,11 @@ export type PlannerProviderSelectorModel = {
 export type PlannerProviderSelectorBridge = {
   render(model: PlannerProviderSelectorModel, onChange: (providerId: string) => void): void;
 };
+export type RunnerSelectorOption = { id: string; label: string; disabled: boolean };
+export type RunnerSelectorModel = { options: RunnerSelectorOption[]; selectedRunnerId: string };
+export type RunnerSelectorBridge = {
+  render(model: RunnerSelectorModel, onChange: (runnerId: string) => void): void;
+};
 export type AttemptRawEventsModel = { lines: string[]; filterValue: string; pageLabel: string; previousDisabled: boolean; nextDisabled: boolean };
 export type AttemptRawEventsBridge = {
   render(mount: HTMLElement, model: AttemptRawEventsModel, callbacks: { onFilter: (value: string) => void; onPrevious: () => void; onNext: () => void }): void;
@@ -451,6 +456,7 @@ declare global {
   var tokenCouponAttemptToolsPagination: AttemptToolsPaginationBridge | undefined;
   var tokenCouponAttemptRecordControls: AttemptRecordControlsBridge | undefined;
   var tokenCouponPlannerProviderSelector: PlannerProviderSelectorBridge | undefined;
+  var tokenCouponRunnerSelector: RunnerSelectorBridge | undefined;
   var tokenCouponAttemptRawEvents: AttemptRawEventsBridge | undefined;
   var tokenCouponAttemptSelection: AttemptSelectionBridge | undefined;
   var tokenCouponAttemptDiagnosisHistory: AttemptDiagnosisHistoryBridge | undefined;

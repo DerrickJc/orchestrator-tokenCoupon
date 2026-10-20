@@ -10,6 +10,7 @@
   <script type="module" src="../src/planning-navigation.tsx"></script>
   <script type="module" src="../src/review-view.tsx"></script>
   <script type="module" src="../src/planner-provider-selector.tsx"></script>
+  <script type="module" src="../src/runner-selector.tsx"></script>
   <script type="module" src="../src/planner-request-composer.tsx"></script>
   <script type="module" src="../src/reply-composer.tsx"></script>
   <script type="module" src="../src/plan-draft-view.tsx"></script>
@@ -135,7 +136,7 @@
         <div class="settings-grid planning-config-grid">
           <label><span>规划方式</span><div id="planner-provider-root"><select id="planner-provider"></select></div></label>
           <label id="planner-model-wrap"><span>规划模型</span><select id="planner-model-choice"></select><input id="planner-model" class="hidden" aria-label="自定义规划模型 ID" placeholder="输入自定义模型 ID"><span id="planner-model-hint" class="hint"></span></label>
-          <label><span>执行工具</span><select id="runner-id"></select></label>
+          <label><span>执行工具</span><div id="runner-selector-root"><select id="runner-id"></select></div></label>
           <label><span>执行模型</span><select id="runner-model-choice"><option value="">沿用 Runner 默认模型</option><option value="__custom__">自定义模型 ID…</option></select><input id="runner-model" class="hidden" aria-label="自定义执行模型 ID" placeholder="输入自定义模型 ID"></label>
         </div>
         <div class="model-hint-row"><span id="runner-model-hint" class="hint" aria-live="polite"></span><button id="refresh-models" type="button" class="text-button">刷新模型列表</button></div>

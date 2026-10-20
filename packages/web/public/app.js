@@ -1125,23 +1125,30 @@ function renderProviders() {
   $("#planner-model-choice").onchange = () => applyModelChoice("planner"); update();
 }
 function renderRunners() {
-  const select = $("#runner-id"); select.replaceChildren();
+  const select = $("#runner-id");
   const ordered = ["codex", "claude-code", "dsh", "mock"].flatMap(id => state.runners.filter(item => item.id === id));
-  for (const runner of ordered) {
-    const option = new Option(`${labels[runner.id] || runner.id}${runner.available ? "" : " · 未就绪"}`, runner.id);
-    option.disabled = !runner.available; select.add(option);
-  }
+  const options = ordered.map(runner => ({ id: runner.id, label: (labels[runner.id] || runner.id) + (runner.available ? "" : " · 未就绪"), disabled: !runner.available }));
   const stored = localStorage.getItem("tc-runner-id");
-  select.value = stored && [...select.options].some(option => option.value === stored && !option.disabled) ? stored : ordered.find(runner => runner.id !== "mock" && runner.available)?.id || "mock";
-  const update = () => {
-    localStorage.setItem("tc-runner-id", select.value);
-    renderModelPicker("runner", { models: [], customAllowed: select.value !== "mock" }, localStorage.getItem(`tc-model-${select.value}`) || "", "沿用 Runner 默认模型");
+  const selectedRunnerId = stored && options.some(option => option.id === stored && !option.disabled) ? stored : ordered.find(runner => runner.id !== "mock" && runner.available)?.id || "mock";
+  const renderSelector = runnerId => globalThis.tokenCouponRunnerSelector?.render({ options, selectedRunnerId: runnerId }, value => update(value));
+  const update = (requestedRunnerId = "") => {
+    const runnerId = requestedRunnerId || (globalThis.tokenCouponRunnerSelector ? $("#runner-id").value : select.value);
+    state.runnerId = runnerId;
+    localStorage.setItem("tc-runner-id", runnerId);
+    if (globalThis.tokenCouponRunnerSelector) renderSelector(runnerId);
+    renderModelPicker("runner", { models: [], customAllowed: runnerId !== "mock" }, localStorage.getItem("tc-model-" + runnerId) || "", "沿用 Runner 默认模型");
     void loadRunnerModels();
   };
-  select.onchange = update;
-  $("#runner-model").onchange = () => localStorage.setItem(`tc-model-${select.value}`, $("#runner-model").value.trim());
-  $("#runner-model-choice").onchange = () => { applyModelChoice("runner"); localStorage.setItem(`tc-model-${select.value}`, $("#runner-model").value.trim()); };
-  update();
+  if (globalThis.tokenCouponRunnerSelector) renderSelector(selectedRunnerId);
+  else {
+    select.replaceChildren();
+    for (const option of options) { const entry = new Option(option.label, option.id); entry.disabled = option.disabled; select.add(entry); }
+    select.value = selectedRunnerId;
+    select.onchange = () => update(select.value);
+  }
+  $("#runner-model").onchange = () => localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim());
+  $("#runner-model-choice").onchange = () => { applyModelChoice("runner"); localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim()); };
+  update(selectedRunnerId);
 }
 function renderModelPicker(prefix, catalog, current, defaultLabel) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`);
