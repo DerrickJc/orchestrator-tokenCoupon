@@ -1,8 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it } from "vitest";
 import { defaultSystemSettings } from "../../daemon/src/system-settings.js";
+import { AttemptDiagnosisDialog } from "../src/attempt-diagnosis-dialog-ui.js";
 
 const windows: JSDOM[] = [];
 async function chooseNativeFolder(h: Awaited<ReturnType<typeof page>>) {
@@ -2329,8 +2332,13 @@ it("renders the diagnosis route selector through its React bridge and wires its 
   const h = await page({ hash: "#/workspaces/project/plans/first/execution" });
   await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
   let callbacks: { onClose(): void; onLocal(): void; onWeb(): void } | undefined;
+  let dialogCallbacks: { onClose(): void; onSwitch(): void } | undefined;
   h.w.tokenCouponAttemptDiagnosisChoice = {
     render(mount: HTMLElement, next: typeof callbacks) { callbacks = next; mount.textContent = "React 选择分析方式"; },
+    unmountWithin() {},
+  } as any;
+  h.w.tokenCouponAttemptDiagnosisDialog = {
+    render(mount: HTMLElement, next: typeof dialogCallbacks) { dialogCallbacks = next; mount.innerHTML = renderToStaticMarkup(createElement(AttemptDiagnosisDialog, next)); },
     unmountWithin() {},
   } as any;
   h.w.eval('__testState.attemptView = {workspaceId:"project",planningId:"first",attemptId:"diagnostic-attempt",attempt:{runnerId:"codex"}}; void openAttemptDiagnosis()');
@@ -2344,6 +2352,11 @@ it("renders the diagnosis route selector through its React bridge and wires its 
   callbacks!.onLocal();
   await expect.poll(() => h.element("attempt-diagnosis-dialog").hasAttribute("open")).toBe(true);
   expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(false);
+  expect(h.element("attempt-diagnosis-dialog-root").querySelector("#attempt-diagnosis-composer-root")).not.toBeNull();
+  expect(dialogCallbacks).toBeDefined();
+  dialogCallbacks!.onSwitch();
+  expect(h.element("attempt-diagnosis-dialog").hasAttribute("open")).toBe(false);
+  expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(true);
 });
 
 it("creates a linked revision from the visible source version and opens the new planning record", async () => {

@@ -3062,19 +3062,31 @@ function ensureAttemptDiagnosticUI() {
     $("#diagnosis-web").addEventListener("click", () => { choice.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); });
   }
   const chat = document.createElement("dialog"); chat.id = "attempt-diagnosis-dialog"; chat.className = "diagnosis-chat-dialog";
-  chat.innerHTML = `<div class="section-title"><div><h3>任务诊断</h3><p id="attempt-diagnosis-context" class="hint"></p></div><button type="button" data-diagnosis-close class="text-button">关闭</button></div><select id="attempt-diagnosis-history-select" aria-label="历史诊断" class="hidden"></select><p id="attempt-diagnosis-status" class="diagnosis-chat-status" role="status"></p><section id="attempt-diagnosis-history" class="diagnosis-chat-history" aria-label="诊断对话"></section><form id="attempt-diagnosis-form" class="diagnosis-chat-composer"><label class="sr-only" for="attempt-diagnosis-reply">发送诊断问题</label><textarea id="attempt-diagnosis-reply" rows="3" maxlength="8192" placeholder="输入问题、补充事实，或讨论处理方案…"></textarea><div class="diagnosis-chat-footer"><div class="diagnosis-model-selectors"><label>助手<select id="attempt-diagnosis-runner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label><label id="diagnosis-custom-wrap" class="hidden">模型 ID<input id="diagnosis-custom-model" maxlength="200" placeholder="输入模型 ID"></label></div><button id="attempt-diagnosis-send" type="submit" class="button button-primary">发送</button></div><p class="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p></form>`;
+  const chatRoot = document.createElement("div"); chatRoot.id = "attempt-diagnosis-dialog-root"; chat.append(chatRoot);
   document.body.append(chat);
-  const diagnosisHistorySelect = $("#attempt-diagnosis-history-select"), diagnosisHistoryControls = document.createElement("div");
-  diagnosisHistoryControls.id = "attempt-diagnosis-history-controls-root"; diagnosisHistorySelect.replaceWith(diagnosisHistoryControls); diagnosisHistoryControls.append(diagnosisHistorySelect);
-  $(".diagnosis-model-selectors").id = "attempt-diagnosis-model-controls-root";
+  const reactDialog = globalThis.tokenCouponAttemptDiagnosisDialog;
+  if (reactDialog) {
+    reactDialog.render(chatRoot, { onClose: () => chat.close(), onSwitch: () => { chat.close(); showAttemptDiagnosisChoice(); } });
+  } else {
+    chatRoot.innerHTML = `<div class="section-title"><div><h3>任务诊断</h3><p id="attempt-diagnosis-context" class="hint"></p></div><button type="button" data-diagnosis-close class="text-button">关闭</button></div><select id="attempt-diagnosis-history-select" aria-label="历史诊断" class="hidden"></select><p id="attempt-diagnosis-status" class="diagnosis-chat-status" role="status"></p><section id="attempt-diagnosis-history" class="diagnosis-chat-history" aria-label="诊断对话"></section><form id="attempt-diagnosis-form" class="diagnosis-chat-composer"><label class="sr-only" for="attempt-diagnosis-reply">发送诊断问题</label><textarea id="attempt-diagnosis-reply" rows="3" maxlength="8192" placeholder="输入问题、补充事实，或讨论处理方案…"></textarea><div class="diagnosis-chat-footer"><div class="diagnosis-model-selectors"><label>助手<select id="attempt-diagnosis-runner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label><label id="diagnosis-custom-wrap" class="hidden">模型 ID<input id="diagnosis-custom-model" maxlength="200" placeholder="输入模型 ID"></label></div><button id="attempt-diagnosis-send" type="submit" class="button button-primary">发送</button></div><p class="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p></form>`;
+    const diagnosisHistorySelect = $("#attempt-diagnosis-history-select"), diagnosisHistoryControls = document.createElement("div");
+    diagnosisHistoryControls.id = "attempt-diagnosis-history-controls-root"; diagnosisHistorySelect.replaceWith(diagnosisHistoryControls); diagnosisHistoryControls.append(diagnosisHistorySelect);
+    $(".diagnosis-model-selectors").id = "attempt-diagnosis-model-controls-root";
+  }
   const exported = document.createElement("dialog"); exported.id = "diagnosis-export-dialog"; exported.className = "reference-dialog";
   exported.innerHTML = `<div class="section-title"><h3>到网页分析</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><p id="diagnosis-export-status" role="status">正在保存证据…</p><label>证据文件<input id="diagnosis-export-path" readonly></label><p class="hint">在已连接 Token Coupon MCP 的 GPT／Claude 网页粘贴提示即可读取。网页无法直接访问本机路径；未启用 MCP 时，请上传此文件。此操作不调用本机诊断模型。</p><button id="diagnosis-export-copy" type="button" class="button button-primary" disabled>复制分析提示</button>`;
   document.body.append(exported);
   const exportRoot = document.createElement("div"); exportRoot.id = "diagnosis-export-root";
   while (exported.firstChild) exportRoot.append(exported.firstChild);
   exported.append(exportRoot);
-  for (const dialog of [chat, exported]) dialog.querySelector("[data-diagnosis-close]").addEventListener("click", () => dialog.close());
-  for (const dialog of [chat, exported]) {
+  if (!reactDialog) chat.querySelector("[data-diagnosis-close]").addEventListener("click", () => chat.close());
+  exported.querySelector("[data-diagnosis-close]").addEventListener("click", () => exported.close());
+  if (!reactDialog) {
+    const switchMode = document.createElement("button"); switchMode.type = "button"; switchMode.className = "text-button"; switchMode.textContent = "切换分析方式";
+    switchMode.addEventListener("click", () => { chat.close(); showAttemptDiagnosisChoice(); }); chat.querySelector(".section-title").append(switchMode);
+  }
+  if (!globalThis.tokenCouponAttemptDiagnosisExport) {
+    const dialog = exported;
     const switchMode = document.createElement("button"); switchMode.type = "button"; switchMode.className = "text-button"; switchMode.textContent = "切换分析方式";
     switchMode.addEventListener("click", () => { dialog.close(); showAttemptDiagnosisChoice(); }); dialog.querySelector(".section-title").append(switchMode);
   }
@@ -3089,7 +3101,8 @@ function ensureAttemptDiagnosticUI() {
   diagnosisInput.setAttribute("aria-describedby", "attempt-diagnosis-status diagnosis-shortcuts"); diagnosisShortcut.id = "diagnosis-shortcuts";
   diagnosisInput.insertAdjacentElement("afterend", diagnosisShortcut);
   const diagnosisComposerRoot = document.createElement("div"); diagnosisComposerRoot.id = "attempt-diagnosis-composer-root";
-  diagnosisInput.before(diagnosisComposerRoot); diagnosisComposerRoot.append(diagnosisInput, diagnosisShortcut);
+  if (!reactDialog) { diagnosisInput.before(diagnosisComposerRoot); diagnosisComposerRoot.append(diagnosisInput, diagnosisShortcut); }
+  else { $("#attempt-diagnosis-composer-root").append(diagnosisShortcut); }
   bindTextareaEnterSubmit(diagnosisInput, () => $("#attempt-diagnosis-form").requestSubmit());
   $("#diagnosis-export-copy").addEventListener("click", () => void copyExportedDiagnosticPrompt());
 }

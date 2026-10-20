@@ -386,6 +386,10 @@ export type AttemptDiagnosisChoiceBridge = {
   render(mount: HTMLElement, callbacks: { onClose: () => void; onLocal: () => void; onWeb: () => void }): void;
   unmountWithin(container: HTMLElement): void;
 };
+export type AttemptDiagnosisDialogBridge = {
+  render(mount: HTMLElement, callbacks: { onClose: () => void; onSwitch: () => void }): void;
+  unmountWithin(container: HTMLElement): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -420,4 +424,5 @@ declare global {
   var tokenCouponAttemptDiagnosisControls: AttemptDiagnosisControlsBridge | undefined;
   var tokenCouponAttemptDiagnosisExport: AttemptDiagnosisExportBridge | undefined;
   var tokenCouponAttemptDiagnosisChoice: AttemptDiagnosisChoiceBridge | undefined;
+  var tokenCouponAttemptDiagnosisDialog: AttemptDiagnosisDialogBridge | undefined;
 }
