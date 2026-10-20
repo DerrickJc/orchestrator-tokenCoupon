@@ -451,6 +451,23 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
 
+it("keeps quick navigation usable when the compiled React entry is unavailable", async () => {
+  const h = await page({ ready: true });
+  h.element("command-palette-open").click();
+  const dialog = h.element("command-palette") as HTMLDialogElement;
+  expect(dialog.open).toBe(true);
+  expect(h.element("command-palette-results").querySelectorAll('[role="option"]').length).toBeGreaterThan(0);
+
+  const input = h.element("command-palette-query") as HTMLInputElement;
+  input.value = "连接中心";
+  input.dispatchEvent(new h.w.Event("input", { bubbles: true }));
+  const options = h.element("command-palette-results").querySelectorAll<HTMLButtonElement>('[role="option"]');
+  expect(options).toHaveLength(1);
+  options[0]!.click();
+  await expect.poll(() => h.w.location.hash).toBe("#/connect");
+  expect(dialog.open).toBe(false);
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

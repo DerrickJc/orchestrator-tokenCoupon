@@ -1,6 +1,6 @@
 # Windows 客户端需求与技术方案
 
-日期：2026-10-19。状态：**需求与技术方案草案；Electron 桌面工程与 Windows 后台适配未实施。Web 页面已具备 Vite 构建/静态分发基础、输入快捷键和快速导航；React 渐进迁移已启动，当前仅快速导航结果列表由 React 管理，页面其余部分仍由原生 JavaScript 管理。尚未完成浏览器交互和 Windows 桌面验收。**
+日期：2026-10-19，实施记录更新至 2026-10-20。状态：**需求与技术方案草案；Electron 桌面工程与 Windows 后台适配未实施。Web 页面已具备 Vite 构建/静态分发基础、输入快捷键和快速导航；React 渐进迁移已启动，快速导航弹窗与交互由 React 管理，其他页面仍由原生 JavaScript 管理。尚未完成真实浏览器交互和 Windows 桌面验收。**
 
 本文整理需求讨论、开源项目检索与代码只读核查结果，并补充桌面前端设计和交互方案。代码核查是当时工作树的事实，不等同于已发布版本；实施前需重新记录代码基线和既有变更归属。
 
@@ -596,3 +596,9 @@ React 渐进迁移的第一个独立岛是快速导航结果列表：旧脚本�
 将快速导航结果列表迁移到 React + TypeScript，旧页面保留搜索数据、对话框开关、键盘索引和导航动作；类型化桥接只将列表数据、选中索引和选择回调传给 React。Vite 使用官方 React 插件并将 React runtime 拆为独立 chunk；构建 manifest 中的资源仍由 daemon 静态服务提供。其余页面仍由原生 JavaScript 管理，因此这是局部迁移，不代表桌面客户端或全站 React 化已完成。
 
 本次 `npm run typecheck` 和 `npm run build` 通过；快速导航 React 组件测试与三个既有 Web 回归文件共 138 项通过；`git diff --check` 通过。daemon HTTP 回归因沙箱禁止监听 `127.0.0.1` 未能运行；提权重试在等待授权时被中断，因此新加的构建 chunk HTTP 服务断言尚未验证。真实浏览器、真实模型和 Windows 桌面验收未运行。
+
+### 13.3 快速导航交互迁入 React（2026-10-20）
+
+在 13.2 的结果列表基础上，将快速导航的弹窗开关、搜索筛选、方向键循环选择、Enter 执行和 Esc/关闭按钮行为迁入 React。旧脚本仍负责按当前工作区与计划生成导航项并执行被选动作，通过有类型的 `tokenCouponCommandPalette.open()` 提供数据与回调；React 独占弹窗内容及交互状态，避免两个入口同时操作相同 DOM。保留原生 JavaScript 回退，因此没有构建 React 资源时，快速导航仍可用。
+
+本次 `npm run typecheck --workspace @token-coupon/web`、`npm run build --workspace @token-coupon/web` 通过；快速导航 React 组件测试和 Web 页面回归测试共 121 项通过；`git diff --check` 通过。daemon HTTP 控制台测试仍受本机 loopback 监听权限限制，本次未重试；真实浏览器、真实模型和 Windows 桌面验收未运行。除快速导航外，其他业务页面仍由原生 JavaScript 管理。

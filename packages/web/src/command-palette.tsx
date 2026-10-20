@@ -1,14 +1,29 @@
+import { useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { CommandPaletteBridge } from "./api-client-contracts.js";
-import { PaletteResults } from "./command-palette-results.js";
+import { flushSync } from "react-dom";
+import type { CommandPaletteBridge, CommandPaletteEntry } from "./api-client-contracts.js";
+import { CommandPaletteUi, type PaletteRequest } from "./command-palette-ui.js";
 
-const resultsNode = document.getElementById("command-palette-results");
-if (!resultsNode) throw new Error("command_palette_mount_missing：找不到快速导航结果挂载点");
+const mount = document.getElementById("command-palette-root");
+if (!mount) throw new Error("command_palette_mount_missing：找不到快速导航挂载点");
 
-const root: Root = createRoot(resultsNode);
+let publishRequest: (request: PaletteRequest) => void = () => {
+  throw new Error("command_palette_not_ready：快速导航尚未挂载");
+};
+let sequence = 0;
+
+function MountedCommandPalette() {
+  const [request, setRequest] = useState<PaletteRequest | null>(null);
+  publishRequest = setRequest;
+  return <CommandPaletteUi request={request} />;
+}
+
+const root: Root = createRoot(mount);
+flushSync(() => root.render(<MountedCommandPalette />));
+
 const bridge: CommandPaletteBridge = {
-  render(entries, selectedIndex, onSelect) {
-    root.render(<PaletteResults entries={entries} selectedIndex={selectedIndex} onSelect={onSelect} />);
+  open(entries: CommandPaletteEntry[], onSelect) {
+    publishRequest({ id: ++sequence, entries, onSelect });
   },
 };
 

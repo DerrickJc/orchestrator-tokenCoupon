@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "types": ["vite/client"]
   },
-  "files": ["src/api-client-contracts.d.ts", "src/command-palette.tsx", "public/api-client.js"]
+  "files": ["src/api-client-contracts.d.ts", "src/command-palette.tsx", "src/command-palette-ui.tsx", "public/api-client.js"]
 }

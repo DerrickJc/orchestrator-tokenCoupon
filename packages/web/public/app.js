@@ -136,21 +136,17 @@ function commandPaletteEntries() {
   return entries;
 }
 function renderCommandPalette() {
+  const ensureFallback = ensureCommandPaletteFallback();
+  if (!ensureFallback) return;
   const query = $("#command-palette-query").value.trim().toLocaleLowerCase();
   const entries = commandPaletteEntries().filter(entry => `${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(query));
   state.commandPaletteEntries = entries; state.commandPaletteIndex = Math.min(state.commandPaletteIndex || 0, Math.max(0, entries.length - 1));
-  if (entries.length) $("#command-palette-query").setAttribute("aria-activedescendant", `command-palette-option-${state.commandPaletteIndex}`);
-  else $("#command-palette-query").removeAttribute("aria-activedescendant");
-  if (globalThis.tokenCouponCommandPalette) {
-    globalThis.tokenCouponCommandPalette.render(entries, state.commandPaletteIndex, runCommandPaletteEntry);
-    return;
-  }
   const root = $("#command-palette-results"); root.replaceChildren();
   if (!entries.length) { const empty = document.createElement("p"); empty.className = "command-palette-empty"; empty.textContent = "没有匹配的页面或操作。"; root.append(empty); return; }
   entries.forEach((entry, index) => {
     const button = document.createElement("button"); button.type = "button"; button.id = `command-palette-option-${index}`; button.className = "command-palette-option"; button.setAttribute("role", "option"); button.setAttribute("aria-selected", String(index === state.commandPaletteIndex));
     const label = document.createElement("span"), hint = document.createElement("small"); label.textContent = entry.label; hint.textContent = entry.hint; button.append(label, hint);
-    button.addEventListener("click", () => runCommandPaletteEntry(entry)); root.append(button);
+    button.addEventListener("click", () => { $("#command-palette").close(); void runCommandPaletteEntry(entry); }); root.append(button);
   });
 }
 function moveCommandPaletteSelection(delta) {
@@ -161,25 +157,38 @@ function moveCommandPaletteSelection(delta) {
   $(`#command-palette-option-${state.commandPaletteIndex}`)?.scrollIntoView?.({ block: "nearest" });
 }
 async function runCommandPaletteEntry(entry) {
-  $("#command-palette").close();
   try { await entry.run(); } catch (error) { showToast(error.message, true); }
+}
+function ensureCommandPaletteFallback() {
+  const root = $("#command-palette-root");
+  if (!root || globalThis.tokenCouponCommandPalette) return !!root && !globalThis.tokenCouponCommandPalette;
+  if (!root.childElementCount) root.append($("#command-palette-fallback").content.cloneNode(true));
+  if (root.dataset.fallbackBound) return true;
+  root.dataset.fallbackBound = "true";
+  const dialog = $("#command-palette");
+  $("#command-palette-close").addEventListener("click", () => dialog.close());
+  $("#command-palette-query").addEventListener("input", () => { state.commandPaletteIndex = 0; renderCommandPalette(); });
+  $("#command-palette-query").addEventListener("keydown", event => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); moveCommandPaletteSelection(event.key === "ArrowDown" ? 1 : -1); return; }
+    if (event.key === "Enter") {
+      const entry = state.commandPaletteEntries?.[state.commandPaletteIndex];
+      if (entry) { event.preventDefault(); dialog.close(); void runCommandPaletteEntry(entry); }
+    }
+  });
+  dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
+  return true;
 }
 function openCommandPalette() {
   const dialog = $("#command-palette");
   if ([...document.querySelectorAll("dialog[open]")].some(open => open !== dialog)) return;
+  if (globalThis.tokenCouponCommandPalette) {
+    globalThis.tokenCouponCommandPalette.open(commandPaletteEntries(), entry => { void runCommandPaletteEntry(entry); });
+    return;
+  }
+  ensureCommandPaletteFallback();
   state.commandPaletteIndex = 0; $("#command-palette-query").value = ""; renderCommandPalette(); dialog.showModal(); $("#command-palette-query").focus();
 }
-$("#command-palette-close").addEventListener("click", () => $("#command-palette").close());
 $("#command-palette-open").addEventListener("click", openCommandPalette);
-$("#command-palette-query").addEventListener("input", () => { state.commandPaletteIndex = 0; renderCommandPalette(); });
-$("#command-palette-query").addEventListener("keydown", event => {
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); moveCommandPaletteSelection(event.key === "ArrowDown" ? 1 : -1); return; }
-  if (event.key === "Enter") {
-    const entry = state.commandPaletteEntries?.[state.commandPaletteIndex];
-    if (entry) { event.preventDefault(); void runCommandPaletteEntry(entry); }
-  }
-});
-$("#command-palette").addEventListener("click", event => { if (event.target === $("#command-palette")) $("#command-palette").close(); });
 window.addEventListener("keydown", event => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "k") return;
   if ([...document.querySelectorAll("dialog[open]")].length) return;

@@ -2,44 +2,70 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, it } from "vitest";
-import { PaletteResults } from "../src/command-palette-results.js";
+import { CommandPaletteUi, type PaletteRequest } from "../src/command-palette-ui.js";
 
 const testGlobals = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 testGlobals.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root | undefined;
+let dialog: HTMLDialogElement | undefined;
 let host: HTMLDivElement | undefined;
+
+function setup(request: PaletteRequest) {
+  dialog = document.createElement("dialog");
+  dialog.id = "command-palette";
+  host = document.createElement("div");
+  host.id = "command-palette-root";
+  dialog.append(host);
+  document.body.append(dialog);
+  dialog.showModal = function () { this.setAttribute("open", ""); };
+  dialog.close = function () {
+    this.removeAttribute("open");
+    this.dispatchEvent(new (this.ownerDocument.defaultView!.Event)("close"));
+  };
+  root = createRoot(host);
+  act(() => root?.render(createElement(CommandPaletteUi, { request })));
+}
 
 afterEach(() => {
   if (root) act(() => root?.unmount());
   root = undefined;
-  host?.remove();
+  dialog?.remove();
+  dialog = undefined;
   host = undefined;
 });
 
-it("renders filtered palette options with selection state and delegates the chosen action", () => {
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
+it("opens the dialog, filters entries and selects with arrow keys and Enter", () => {
   const selected: string[] = [];
-  const entries = [
-    { label: "计划 · 概览", hint: "查看当前计划", run: () => undefined },
-    { label: "任务 2 · 接口测试", hint: "等待执行", run: () => undefined },
-  ];
+  setup({
+    id: 1,
+    entries: [
+      { label: "连接中心", hint: "连接与网页授权", run: () => undefined },
+      { label: "工作区与计划", hint: "选择或新建工作区", run: () => undefined },
+    ],
+    onSelect: entry => selected.push(entry.label),
+  });
 
-  act(() => root?.render(createElement(PaletteResults, { entries, selectedIndex: 1, onSelect: entry => selected.push(entry.label) })));
+  expect(dialog?.open).toBe(true);
+  const input = host!.querySelector<HTMLInputElement>("#command-palette-query")!;
+  act(() => {
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setValue.call(input, "工作区");
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "工作区", inputType: "insertText" }));
+  });
+  expect([...host!.querySelectorAll('[role="option"]')].map(option => option.textContent)).toEqual(["工作区与计划选择或新建工作区"]);
 
-  const options = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
-  expect(options.map(option => option.textContent)).toEqual(["计划 · 概览查看当前计划", "任务 2 · 接口测试等待执行"]);
-  expect(options.map(option => option.getAttribute("aria-selected"))).toEqual(["false", "true"]);
-  act(() => options[1]?.click());
-  expect(selected).toEqual(["任务 2 · 接口测试"]);
+  act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+  act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+  expect(selected).toEqual(["工作区与计划"]);
+  expect(dialog?.open).toBe(false);
 });
 
-it("shows a concise empty state when the query has no matching page or action", () => {
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-  act(() => root?.render(createElement(PaletteResults, { entries: [], selectedIndex: 0, onSelect: () => undefined })));
-  expect(host.textContent).toBe("没有匹配的页面或操作。");
+it("shows a no-match state and closes on Escape", () => {
+  setup({ id: 2, entries: [], onSelect: () => undefined });
+  expect(host?.textContent).toContain("没有匹配的页面或操作。");
+  expect(dialog?.open).toBe(true);
+
+  act(() => dialog?.dispatchEvent(new Event("cancel", { bubbles: true, cancelable: true })));
+  expect(dialog?.open).toBe(false);
 });

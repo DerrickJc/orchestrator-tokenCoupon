@@ -20,9 +20,8 @@ export type CommandPaletteEntry = {
 };
 
 export type CommandPaletteBridge = {
-  render(
+  open(
     entries: CommandPaletteEntry[],
-    selectedIndex: number,
     onSelect: (entry: CommandPaletteEntry) => void,
   ): void;
 };
