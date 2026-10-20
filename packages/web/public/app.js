@@ -3244,19 +3244,29 @@ function renderAttemptContent() {
     show($("#attempt-diagnose"), diagnosable);
   }
   const orderedMessages = messages.filter(item => item.text.trim()).reverse();
-  const retained = new Set(orderedMessages.map(message => message.messageId));
-  for (const [id, element] of oldMessages) if (!retained.has(id)) element.remove();
-  if (orderedMessages.length && !oldMessages.size) box.replaceChildren();
-  for (const [index, message] of orderedMessages.entries()) {
-    const article = oldMessages.get(message.messageId) || document.createElement("article"); article.className = "attempt-message"; article.dataset.messageId = message.messageId;
-    if (!article.children.length) article.append(document.createElement("strong"), document.createElement("pre"));
-    const title = article.children[0], pre = article.children[1];
-    title.textContent = `${orderedMessages.length - index}.${index === 0 ? " 最新回复" : ""}${message.final ? " · 最终结论" : !message.completed ? " · 接收记录" : ""}`;
-    if (article.replyText !== message.text) { pre.replaceChildren(); appendHighlightedReply(pre, message.text); article.replyText = message.text; }
-    if (box.children[index] !== article) box.insertBefore(article, box.children[index] || null);
+  if (globalThis.tokenCouponAttemptMessages) {
+    const viewMessages = orderedMessages.map((message, index) => ({
+      messageId: message.messageId,
+      title: `${orderedMessages.length - index}.${index === 0 ? " 最新回复" : ""}${message.final ? " · 最终结论" : !message.completed ? " · 接收记录" : ""}`,
+      text: message.text,
+    }));
+    globalThis.tokenCouponAttemptMessages.render({ messages: viewMessages, emptyMessage: "尚无模型正文；可展开工具活动或原始事件查看。" });
+    box.scrollTop = messageAnchor?.isConnected ? messageAnchor.offsetTop - anchorOffset : scrollTop;
+  } else {
+    const retained = new Set(orderedMessages.map(message => message.messageId));
+    for (const [id, element] of oldMessages) if (!retained.has(id)) element.remove();
+    if (orderedMessages.length && !oldMessages.size) box.replaceChildren();
+    for (const [index, message] of orderedMessages.entries()) {
+      const article = oldMessages.get(message.messageId) || document.createElement("article"); article.className = "attempt-message"; article.dataset.messageId = message.messageId;
+      if (!article.children.length) article.append(document.createElement("strong"), document.createElement("pre"));
+      const title = article.children[0], pre = article.children[1];
+      title.textContent = `${orderedMessages.length - index}.${index === 0 ? " 最新回复" : ""}${message.final ? " · 最终结论" : !message.completed ? " · 接收记录" : ""}`;
+      if (article.replyText !== message.text) { pre.replaceChildren(); appendHighlightedReply(pre, message.text); article.replyText = message.text; }
+      if (box.children[index] !== article) box.insertBefore(article, box.children[index] || null);
+    }
+    if (!messages.length) box.textContent = "尚无模型正文；可展开工具活动或原始事件查看。";
+    box.scrollTop = messageAnchor?.isConnected ? messageAnchor.offsetTop - anchorOffset : scrollTop;
   }
-  if (!messages.length) box.textContent = "尚无模型正文；可展开工具活动或原始事件查看。";
-  box.scrollTop = messageAnchor?.isConnected ? messageAnchor.offsetTop - anchorOffset : scrollTop;
   const tools = $("#attempt-tools"), toolScroll = tools.scrollTop, rawScroll = $("#attempt-raw").scrollTop;
   const oldTools = new Map([...tools.querySelectorAll("details")].map(item => [item.dataset.eventKey, item]));
   const toolPage = activityPage(view, "tools", view.tools);

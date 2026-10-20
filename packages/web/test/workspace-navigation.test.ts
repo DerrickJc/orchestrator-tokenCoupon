@@ -2040,6 +2040,27 @@ it("publishes the current Attempt status and diagnosis callback to the React ove
   await expect.poll(() => h.visible("diagnosis-choice-dialog")).toBe(true);
 });
 
+it("publishes deduplicated final replies to the React Attempt message list in newest-first order", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  h.w.tokenCouponAttemptMessages = { render(model: any) { received = model; } } as any;
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-messages",
+      attempt: { runnerId: "codex", status: "succeeded" },
+      messages: new Map([
+        ["older", { text: "先完成接口设计", completed: true }],
+        ["latest", { text: "完成结论：全部测试通过", completed: true }],
+      ]),
+      finalText: "完成结论：全部测试通过", textStream: "", semanticMessages: true,
+      tools: [], raw: [], toolsPage: 0, rawPage: 0, notice: "", hasMore: false,
+    };
+    renderAttemptContent();
+  `);
+  expect(received.messages.map((message: any) => message.messageId)).toEqual(["latest", "older"]);
+  expect(received.messages[0]).toMatchObject({ title: "2. 最新回复 · 最终结论", text: "完成结论：全部测试通过" });
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };

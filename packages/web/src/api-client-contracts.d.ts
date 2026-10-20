@@ -330,6 +330,11 @@ export type AttemptOverviewModel = {
 export type AttemptOverviewBridge = {
   render(model: AttemptOverviewModel, onDiagnose: () => void): void;
 };
+export type AttemptMessageView = { messageId: string; title: string; text: string };
+export type AttemptMessagesModel = { messages: AttemptMessageView[]; emptyMessage: string };
+export type AttemptMessagesBridge = {
+  render(model: AttemptMessagesModel): void;
+};
 
 declare global {
   var tokenCouponClient: TokenCouponClient | undefined;
@@ -356,4 +361,5 @@ declare global {
   var tokenCouponPendingInteractionGuidance: PendingInteractionGuidanceBridge | undefined;
   var tokenCouponPendingElicitation: PendingElicitationBridge | undefined;
   var tokenCouponAttemptOverview: AttemptOverviewBridge | undefined;
+  var tokenCouponAttemptMessages: AttemptMessagesBridge | undefined;
 }
