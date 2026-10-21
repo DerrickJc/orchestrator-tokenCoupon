@@ -58,7 +58,8 @@ jobs:
         run: |
           $env:TOKEN_COUPON_BUNDLED_NODE = (node -p "process.execPath")
           $output = Join-Path $env:RUNNER_TEMP "token-coupon-desktop"
-          npm run desktop:installer -- --output $output
+          npm run build
+          node scripts/package-desktop.mjs --mode installer --output $output
 
       - name: Real Linux Electron GUI lifecycle
         if: runner.os == 'Linux'

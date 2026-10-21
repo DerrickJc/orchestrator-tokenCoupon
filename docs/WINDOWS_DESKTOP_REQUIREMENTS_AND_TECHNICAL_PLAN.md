@@ -1195,7 +1195,7 @@ node packages/cli/dist/main.js daemon job show --id <jobId>
 
 草稿 PR 的首次 Windows job 已通过依赖安装与类型检查，但全量 `npm test` 报告 143 个测试文件中 29 个失败、835 项中 110 项失败；失败集中在 Windows 路径别名、POSIX 进程/套接字夹具、临时目录 ACL 假设及超时。Linux job 的全量测试、Linux Electron 打包与 GUI 生命周期均通过。不能把这批 Windows 失败描述为安装器失败，也不能把被测试门禁跳过的 Windows 安装器/GUI 说成已通过。
 
-CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:windows-native` 中的平台专属路径、原生进程、Windows Mutex、目录选择和桌面配置测试，然后继续执行 NSIS 预览安装包和真实 Electron GUI 生命周期。该划分避免尚未移植的 POSIX 测试夹具挡住 Windows 原生检查；它不等于 Windows 全量回归通过。若 Windows 原生用例暴露产品缺陷，仍需在 Windows job 中修复后重跑。快捷隧道的 Windows 命名管道/本地网关行为、真实 coding agent、安装升级和普通用户账户权限矩阵仍单独待验证。
+CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:windows-native` 中的平台专属路径、原生进程、Windows Mutex、目录选择和桌面配置测试。第三轮运行中 Windows 原生测试已通过 10 个文件、20 项；NSIS 步骤因 PowerShell 下 `npm run ... -- --output <path>` 把 `--output` 识别成 npm 参数并丢失而失败，现改为直接调用打包脚本。此修正后的 Windows 安装器和 GUI 生命周期结果仍待 CI 重跑。该划分避免尚未移植的 POSIX 测试夹具挡住 Windows 原生检查；它不等于 Windows 全量回归通过。快捷隧道的 Windows 命名管道/本地网关行为、真实 coding agent、安装升级和普通用户账户权限矩阵仍单独待验证。
 
 ## 14. 剩余实施台账（2026-10-21）
 
