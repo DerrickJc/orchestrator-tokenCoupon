@@ -4,7 +4,19 @@
 
 项目已逐步扩展为包含计划管理、并行执行、worktree 隔离、会话恢复、Runner 交互与本机 Web 工作台的本地编排工具。
 
-Windows 安装式客户端的[需求与技术方案](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md)已整理，采用 Electron + Vite、共享前端和既有 daemon；目前仅为方案，桌面安装包与原生 Windows 后端适配尚未实施。下列命令仍为源码使用方式。
+Electron 桌面预览已具备本机后台启动、托盘、目录选择与通知桥接，并提供解包目录和 Windows NSIS 预览安装包的构建入口。[实施与验收状态](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md)区分已验证能力与待完成的 Windows 安装/GUI 验收。
+
+### 桌面预览构建
+
+在目标系统本机执行 `npm ci`。构建桌面资源需另备该系统/架构的官方 Node **22.12.0** 可执行文件；该运行时会随包携带。Windows PowerShell：
+
+```powershell
+$env:TOKEN_COUPON_BUNDLED_NODE = "C:\release-tools\node-v22.12.0-win-x64\node.exe"
+npm run desktop:package    # 生成可直接启动的桌面目录
+npm run desktop:installer  # 生成当前用户的 Windows NSIS 预览安装包
+```
+
+默认输出到 `.token-coupon/builds/` 下的独立目录；也可追加 `-- --output <新的绝对目录>`。每次构建会启动最终包内的 daemon 完成离线 smoke，并生成 `desktop-build.json`；已存在的输出目录不会被覆盖。可用 `--electron-dist <目录>` 复用同版本的官方 Electron 解压目录。安装包为未签名预览，默认不申请管理员权限、不自动发布或安装后启动，卸载保留用户数据和工作区。Windows 安装、升级和真实 Runner 仍需对应平台验收。
 
 ## 环境
 

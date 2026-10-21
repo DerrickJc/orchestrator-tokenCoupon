@@ -1090,7 +1090,23 @@ npm run desktop:stage-resources -- --resources-dir "C:\release-build\electron\re
 
 本地验证了 workflow 文件结构；真正的 Windows runner 结果需在该分支推送并创建 PR 或手动触发后取得。本机仍已通过 Linux staged runtime smoke 与 Windows Node Mock HTTP smoke；两者不能替代 GitHub Windows 作业，也没有生成签名安装包。
 
-## 14. 剩余实施台账（2026-10-20）
+### 13.82 Electron 解包目录与 Windows NSIS 预览构建（2026-10-21）
+
+新增 `desktop:package` 和 `desktop:installer`。稳定版 electron-builder 26.17.0 只打包实体化的桌面 dist 与共享 client 包；daemon、完整生产依赖及标准 Node 放在 ASAR 外的 `resources/token-coupon-runtime`。实际试包发现 electron-builder 的资源过滤会漏掉嵌套 node_modules，现由 afterPack 完整安装隔离运行时，并在最终目录上执行 HTTP smoke，任何缺件或身份不一致都使打包失败。输出已有目录时拒绝覆盖；失败产物保留，临时组装目录自动清理。
+
+Windows NSIS 配置为当前用户安装、不提权、不在安装后自动启动、卸载保留应用数据；构建强制 `publish=never`，预览不签名。`desktop-build.json` 记录平台、版本、build ID、smoke 结果和安装产物 SHA-256，并保留 `releaseReady=false`。这建立安装包构建能力，不代表已经安装到 Windows 或具备正式签名发布条件。
+
+```powershell
+$env:TOKEN_COUPON_BUNDLED_NODE = "C:\release-tools\node-v22.12.0-win-x64\node.exe"
+npm run desktop:package
+npm run desktop:installer
+```
+
+本机从官方 GitHub 发布下载 Electron 44.9.1 Linux x64 并核对官方清单，SHA-256 为 `994bc3664cc3ac55b50c21a58d345cf8322003d37f5439a81801e3267e6145e2`。实际生成 Linux Electron 解包目录，确认 app.asar 包含主进程、preload 和共享 client，最终包内 Node 22.12 daemon 的发现、鉴权、Mock 规划/审查/批准/运行、重启与记录恢复均通过。Windows NSIS 生成及安装仍待原生 Windows runner/实机证据。
+
+类型检查、打包定向测试 9 项与全量回归均通过：132 个文件通过、1 个 Windows 专用文件跳过；811 项通过、1 项跳过。这里的 Linux skip 不计作 Windows 验收通过。
+
+## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
 

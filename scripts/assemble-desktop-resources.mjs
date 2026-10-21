@@ -4,7 +4,7 @@ import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeF
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { stageDesktopRuntime } from "./stage-desktop-runtime.mjs";
+import { stageDesktopRuntime, validateDesktopBuildIdentity } from "./stage-desktop-runtime.mjs";
 
 function inside(root, candidate) {
   const value = relative(root, candidate);
@@ -72,24 +72,32 @@ function option(name) {
   return index < 0 ? undefined : process.argv[index + 1];
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const resourcesDirectory = option("--resources-dir") ?? process.env.TOKEN_COUPON_ELECTRON_RESOURCES;
-  if (!resourcesDirectory) throw new Error("desktop_resources_path_required：请传入 --resources-dir <Electron resources 绝对路径> 或设置 TOKEN_COUPON_ELECTRON_RESOURCES");
-  const result = await assembleDesktopRuntime(resourcesDirectory, option("--node") ?? process.env.TOKEN_COUPON_BUNDLED_NODE);
-  const nodeExecutable = join(result.directory, result.manifest.nodeExecutable);
-  const daemonEntry = join(result.directory, result.manifest.daemonEntry);
+/** Validate the daemon actually copied into an Electron application's resources. */
+export async function smokeDesktopResources(resourcesDirectory) {
+  const directory = await realpath(join(resourcesDirectory, "token-coupon-runtime"));
+  const manifest = JSON.parse(await readFile(join(directory, "runtime-manifest.json"), "utf8"));
+  const identity = validateDesktopBuildIdentity(manifest, manifest.applicationVersion);
+  const nodeExecutable = await checkedFile(directory, manifest.nodeExecutable, "nodeExecutable");
+  const daemonEntry = await checkedFile(directory, manifest.daemonEntry, "daemonEntry");
   const smokeScript = fileURLToPath(new URL("./desktop-daemon-smoke.mjs", import.meta.url));
   let smokeOutput;
   try {
     smokeOutput = execFileSync(nodeExecutable, [smokeScript, "--entry", daemonEntry,
-      "--expected-build-id", result.manifest.buildId, "--expected-version", result.manifest.applicationVersion], {
+      "--expected-build-id", identity.buildId, "--expected-version", identity.applicationVersion], {
       cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", timeout: 120_000, maxBuffer: 1024 * 1024,
     });
   } catch (error) {
     const diagnostic = Buffer.isBuffer(error.stderr) ? error.stderr.toString("utf8") : String(error.stderr ?? error.message ?? error);
     throw new Error(`desktop_runtime_smoke_failed：暂存资源已保留供排查；${diagnostic.slice(-2000)}`);
   }
-  process.stdout.write(smokeOutput);
+  return { manifest, output: smokeOutput };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const resourcesDirectory = option("--resources-dir") ?? process.env.TOKEN_COUPON_ELECTRON_RESOURCES;
+  if (!resourcesDirectory) throw new Error("desktop_resources_path_required：请传入 --resources-dir <Electron resources 绝对路径> 或设置 TOKEN_COUPON_ELECTRON_RESOURCES");
+  const result = await assembleDesktopRuntime(resourcesDirectory, option("--node") ?? process.env.TOKEN_COUPON_BUNDLED_NODE);
+  process.stdout.write((await smokeDesktopResources(resourcesDirectory)).output);
   console.log(JSON.stringify({ directory: result.directory, hostPlatform: result.manifest.hostPlatform, hostArch: result.manifest.hostArch,
     nodeExecutable: result.manifest.nodeExecutable, runtimeReady: result.manifest.runtimeReady, installerReady: false }));
 }

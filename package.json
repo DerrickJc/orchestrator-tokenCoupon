@@ -16,6 +16,8 @@
     "desktop": "npm run build && npm run start --workspace @token-coupon/desktop",
     "web:dev": "npm run dev --workspace @token-coupon/web",
     "desktop:stage-resources": "npm run build && node scripts/assemble-desktop-resources.mjs",
+    "desktop:package": "npm run build && node scripts/package-desktop.mjs",
+    "desktop:installer": "npm run build && node scripts/package-desktop.mjs --mode installer",
     "cli": "npm run build && node packages/cli/dist/main.js",
     "demo:phase3.5": "npm run build && node scripts/phase3.5-demo.mjs",
     "demo:phase3.5-bugfix": "npm run build && node scripts/phase3.5-bugfix-demo.mjs",
@@ -34,6 +36,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "electron-builder": "26.17.0",
     "jsdom": "^26.1.0",
     "typescript": "^6.0.0",
     "vite": "^8.1.0",
