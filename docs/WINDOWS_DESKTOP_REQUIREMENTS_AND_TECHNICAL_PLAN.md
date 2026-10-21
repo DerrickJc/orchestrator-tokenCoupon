@@ -1199,6 +1199,62 @@ CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:window
 
 最终运行 [Desktop runtime validation #39559204811](https://github.com/DerrickJc/orchestrator-tokenCoupon/actions/runs/39559204811) 的 Ubuntu 与 Windows job 均通过。Windows job 已验证原生测试、NSIS 预览包生成、最终包内 daemon 的身份发现/鉴权/Mock 规划审查批准执行/重启持久化，以及真实 Electron GUI 生命周期；Ubuntu 完整 Vitest 与 Linux 打包/GUI 测试通过。此前 Windows 全量 Vitest 曾有 29 个文件、110 项失败，主要依赖 POSIX 进程、路径和临时目录假设，因此当前 Windows job 有意运行平台专属测试集，不将其表述为 Windows 全量回归通过。CI 通过不等于人工安装器安装升级或真实 Runner 验收；快捷隧道 Windows 行为、真实 coding agent、安装升级和普通用户权限矩阵仍待独立验证。
 
+### 13.91 原生 Windows 快捷连接能力边界与构建命令修正（2026-10-21）
+
+常驻快捷连接仍使用 POSIX `gateway.sock`、目录权限与 socket 文件身份检查，因此原生 Windows 预览暂不开放该功能。状态接口返回 `quickTunnel.available=false` 和原因；前端禁用新建、复用及重测快捷连接的入口，保留固定 HTTPS 配置和本机 Agent。后台在组件下载、创建连接配置或启动隧道前返回 `remote_quick_tunnel_unsupported`，adapter 的直接启动/恢复也有同样的边界。旧配置在启动时保留原文并说明限制，不自动更换地址或撤销授权。
+
+原生 Windows 命名管道或受保护 loopback 适配与真实公网 OAuth 联调仍是后续工作。固定 HTTPS 入口保留不代表已取得该平台真实网页联调证据；其代理只可发布 MCP/OAuth 网关。回归新增保存配置不变、无组件启动副作用、固定 HTTPS 切换，以及前端禁用和说明展示；Windows 原生 CI 入口同时加入该用例。
+
+README 的自定义构建命令改为先 `npm run build`，再 `node scripts/package-desktop.mjs --mode installer --output "<新绝对路径>"`；不再引导 Windows 用户通过 `npm run` 转发命名参数和带空格路径。安装器仍是未签名预览，不自动安装或发布。
+
+### 13.92 Windows 全量测试失败清单与预览支持范围（2026-10-21）
+
+依据首次原生 Windows [运行 #39553864677](https://github.com/DerrickJc/orchestrator-tokenCoupon/actions/runs/39553864677)，逐条归集 110 项失败，分布于 29 个文件。下表路径相对 `packages/<分组>/test/`；归组是后续排查入口，不表示所有错误已证明仅由夹具导致，也不表示最近选定原生测试通过就关闭了原全量失败。
+
+| 文件 | 失败项 | 日志线索与当前处理边界 |
+| --- | ---: | --- |
+| cli/cli.test.ts | 4 | 超时、执行/编辑流程未完成；需 Windows CLI 全流程复验 |
+| core/claude-managed-runner.test.ts | 14 | 找不到 Claude 可执行文件；需移植 Windows 夹具并验证真实 Runner |
+| core/codex-runner.test.ts | 3 | 启动/交互超时与取消证据缺失；待逐项复验 |
+| core/dsh-runner.test.ts | 2 | 无 Windows 可执行扩展名的夹具被拒绝；DSH 不在本轮验收范围 |
+| core/execution-selection.test.ts | 1 | workspace 实际路径与输入不一致，被判定为链接 |
+| core/phase4-boundary.test.ts | 21 | 同上，掩盖后续 Git 边界断言；需要路径别名与真实链接分别验证 |
+| core/phase5-parallel.test.ts | 10 | 同上，未完成并行与交叉依赖流程 |
+| core/runner-diagnostics.test.ts | 1 | Runner 诊断超时；需平台可执行入口复验 |
+| core/session-models.test.ts | 1 | 未观察到预期的并行 Attempt 启动；待复验 |
+| core/session-recovery.test.ts | 9 | owner 被判为 unknown、恢复前置条件和路径不匹配；待平台身份/恢复复验 |
+| core/task-orchestrator.test.ts | 2 | 串行执行与重试超时；待复验 |
+| core/worktree-isolation.test.ts | 4 | workspace 路径别名拒绝，未完成隔离交付验收 |
+| daemon/attempt-diagnostics.test.ts | 3 | Windows 长短路径不一致及存量 Session 恢复；待复验 |
+| daemon/bounded-process-log.test.ts | 1 | 子进程退出码非预期；需平台夹具与日志行为复验 |
+| daemon/daemon-cli.test.ts | 2 | owner ACL/后台发现未通过；ACL 根因已有修复，原文件仍需复验 |
+| daemon/http-console.test.ts | 1 | 未达到预期任务状态；待复验 |
+| daemon/model-switch.test.ts | 4 | 未观察到预期运行状态/交互；待复验 |
+| daemon/native-picker.test.ts | 1 | 长短路径断言；已规范化 realpath，对应原生 CI 测试通过 |
+| daemon/pending-queue.test.ts | 1 | 测试操作未在时限内结束；待复验 |
+| daemon/persistent-tunnel.test.ts | 5 | POSIX 常驻隧道夹具/网关不适用于 Windows；现明确禁用原生 Windows 快捷连接 |
+| daemon/protocol-handshake.test.ts | 1 | owner 发现能力未就绪；ACL 修复后包内 smoke 通过，原文件仍需复验 |
+| daemon/quick-connection.test.ts | 3 | `gateway.sock` listen EACCES；现由平台能力门禁提前拒绝 |
+| daemon/runtime-stage.test.ts | 1 | Windows ACL 查询失败；包内 daemon smoke 已通过，原文件仍需复验 |
+| daemon/session-control.test.ts | 2 | 运行/取消的预期状态未出现；待复验 |
+| daemon/session-observation.test.ts | 2 | interrupted 被报告为 unavailable；待平台恢复诊断复验 |
+| daemon/system-settings.test.ts | 1 | Windows 文件 mode 为 0666，夹具断言 0600；应以 Windows ACL 验证隐私 |
+| daemon/task-results.test.ts | 1 | workspace 路径别名拒绝；待复验 |
+| daemon/workspace-tools.test.ts | 8 | 路径别名检查先于预期 Git 检查失败；待复验 |
+| desktop/managed-daemon.test.ts | 1 | ACL 导致后台启动核验超时；真实 GUI 已通过，原临时目录用例仍需复验 |
+| **合计** | **110** | **29 个文件；此历史失败清单不能当作当前已通过清单** |
+
+同次运行另有 6 项未处理异步错误：4 项 workspace 路径拒绝、1 项 Claude 可执行文件不可用、1 项常驻隧道启动失败；它们不另外计入上述 110 项。后续全量复验还须确认无未处理拒绝，不能只调整断言或忽略异常。
+
+| 预览范围 | 当前证据/限制 |
+| --- | --- |
+| Linux／WSL 后台及共享 Web | 完整 Linux 回归和 GUI smoke 通过；真实 Runner 按各阶段证据单列 |
+| 原生 Windows x64 桌面与 Mock 主流程 | 原生测试集、NSIS 构建、包内 daemon 与正常 sandbox GUI 生命周期通过 |
+| 原生 Windows 快捷连接 | 明确禁用；原生私有转发适配与网页 OAuth 联调待实现 |
+| 原生 Windows 固定 HTTPS | 入口保留；隔离假 probe 用例不替代公网/真实客户端联调 |
+| 原生 Windows 真实 Codex／Claude、worktree 并行、活动任务异常恢复 | 不以 Mock/原生测试子集宣称验收；逐项完成后再扩大支持范围 |
+| ARM64、人工安装升级/卸载、系统通知/原生弹窗、签名发布 | 没有完整验收证据；仍为后续台账 |
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。

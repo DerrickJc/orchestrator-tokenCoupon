@@ -4,7 +4,7 @@
 
 项目已逐步扩展为包含计划管理、并行执行、worktree 隔离、会话恢复、Runner 交互与本机 Web 工作台的本地编排工具。
 
-Electron 桌面预览已具备本机后台启动、托盘、目录选择与通知桥接，并提供解包目录和 Windows NSIS 预览安装包的构建入口。[实施与验收状态](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md)区分已验证能力与待完成的 Windows 安装/GUI 验收。
+Electron 桌面预览已具备本机后台启动、托盘、目录选择与通知桥接；Windows NSIS 预览构建、包内 daemon 与真实 Electron GUI 生命周期已通过原生 CI。人工安装升级和真实 Runner 仍待验收，详见[实施与验收状态](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md)。
 
 ### 桌面预览构建
 
@@ -16,7 +16,16 @@ npm run desktop:package    # 生成可直接启动的桌面目录
 npm run desktop:installer  # 生成当前用户的 Windows NSIS 预览安装包
 ```
 
-默认输出到 `.token-coupon/builds/` 下的独立目录；也可追加 `-- --output <新的绝对目录>`。每次构建会启动最终包内的 daemon 完成离线 smoke，并生成 `desktop-build.json`；已存在的输出目录不会被覆盖。可用 `--electron-dist <目录>` 复用同版本的官方 Electron 解压目录。安装包为未签名预览，默认不申请管理员权限、不自动发布或安装后启动，卸载保留用户数据和工作区。Windows 安装、升级和真实 Runner 仍需对应平台验收。
+默认输出到 `.token-coupon/builds/` 下的独立目录。自定义输出路径时，先构建再直接调用脚本，以保留 PowerShell 下的参数名和带空格路径：
+
+```powershell
+npm run build
+node scripts/package-desktop.mjs --mode installer --output "C:\release-output\Token Coupon Preview"
+```
+
+`--mode dir` 生成解包目录；在直接调用脚本时可追加 `--electron-dist "C:\release-tools\electron"`，复用同版本的官方 Electron 解压目录。每次构建会启动最终包内的 daemon 完成离线 smoke，并生成 `desktop-build.json`；输出目录必须是新的专用目录，已存在目录不会被覆盖。安装包为未签名预览，默认不申请管理员权限、不自动发布或安装后启动，卸载保留用户数据和工作区。Windows 安装、升级和真实 Runner 仍需对应平台验收。
+
+原生 Windows 当前禁用快捷隧道，页面显示限制原因，后台也会在下载或启动组件前拒绝该操作。本机 Agent 入口保留；网页 MCP 可使用已在外部配置的固定 HTTPS 网关，或使用 Linux／WSL 后台的快捷连接。固定 HTTPS 的原生 Windows 网页联调仍待验收；公网代理只能转发 MCP/OAuth 网关，不能发布本机控制台。
 
 ## 环境
 
