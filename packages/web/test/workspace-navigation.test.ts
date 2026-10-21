@@ -1337,6 +1337,23 @@ it("retests the existing quick address without recreating the connection, revoki
   expect(h.w.location.hash).toBe("#/connect");
 });
 
+it("disables unsupported Windows quick connections while keeping the fixed HTTPS entry available", async () => {
+  const h = await page();
+  const reason = "原生 Windows 暂不支持快捷连接。可继续使用本机 Agent 或固定 HTTPS 网关。";
+  h.setRemote({ quickTunnel: { available: false, reason }, mode: "quick_tunnel", configured: false, enabled: false, gateway: "stopped", transport: "stopped", busy: false });
+  h.element("refresh").click();
+  await expect.poll(() => (h.element("remote-quick") as HTMLButtonElement).disabled).toBe(true);
+  expect(h.element("remote-platform-support").textContent).toBe(reason);
+  expect(h.element("remote-status").textContent).toBe("快捷连接暂不支持");
+  expect((h.element("remote-save") as HTMLButtonElement).disabled).toBe(false);
+  (h.element("quick-consent") as HTMLInputElement).checked = true;
+  h.element("remote-quick").dispatchEvent(new h.w.Event("click")); expect(h.posts).toHaveLength(0);
+  h.setRemote({ mode: "fixed_https", enabled: true, configured: true, gateway: "running", transport: "ready", publicOrigin: "https://mcp.example.test", mcpUrl: "https://mcp.example.test/mcp" });
+  h.element("refresh").click();
+  await expect.poll(() => (h.element("remote-test") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("remote-status").textContent).toContain("公网可用");
+});
+
 it("explains a recovered persistent tunnel without implying an expired grant was restored", async () => {
   const h = await page({ ready: true });
   h.setRemote({ validGrants: 0, connectionProcess: { persistent: true, recovered: true } }); h.element("refresh").click();

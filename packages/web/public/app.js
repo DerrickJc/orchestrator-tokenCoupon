@@ -246,6 +246,11 @@ async function refreshRemoteConnection() {
   try {
     const status = await api("/api/v1/remote-connection");
     state.remoteStatus = status;
+    const quickUnavailable = status.quickTunnel?.available === false;
+    const quickReason = status.quickTunnel?.reason || "当前后台暂不支持快捷连接。可使用本机 Agent 或已有固定 HTTPS 网关。";
+    const blockedQuick = quickUnavailable && status.mode !== "fixed_https";
+    $("#remote-platform-support").textContent = quickReason;
+    show($("#remote-platform-support"), quickUnavailable);
     const badge = $("#remote-status");
     const phases = { stopped: "未连接", checking: "检查组件", downloading: "下载组件", verifying: "校验组件", starting: "启动网关", discovering: "建立隧道", probing: "测试公网连接", reconnecting: "正在重试", ready: "公网入口可用", disconnected: "连接已中断", error: "连接失败" };
     badge.textContent = status.transport === "ready" ? status.validGrants ? pendingWebTokenExchange(status) ? "公网可用 · 网页待完成连接" : "公网可用 · 网页授权有效" : "公网可用 · 网页待授权" : phases[status.transport] || "未连接";
@@ -284,14 +289,16 @@ async function refreshRemoteConnection() {
     }
     show($("#remote-url-wrap"), Boolean(status.mcpUrl)); show($("#remote-setup"), Boolean(status.mcpUrl));
     $("#remote-mcp-url").value = status.mcpUrl || "";
-    $("#remote-quick").disabled = state.remoteMutation || status.busy;
-    $("#remote-quick").textContent = status.enabled && status.mode === "quick_tunnel" && status.gateway === "running" ? "继续使用当前连接" : "新建快捷连接";
+    if (blockedQuick) { badge.textContent = "快捷连接暂不支持"; badge.className = "badge badge-neutral"; $("#remote-progress").textContent = "本机 Agent 规划、审查和执行可继续使用。"; }
+    $("#remote-quick").disabled = state.remoteMutation || status.busy || quickUnavailable;
+    $("#remote-quick").title = quickUnavailable ? quickReason : "";
+    $("#remote-quick").textContent = quickUnavailable ? "快捷连接暂不支持" : status.enabled && status.mode === "quick_tunnel" && status.gateway === "running" ? "继续使用当前连接" : "新建快捷连接";
     $("#remote-save").disabled = state.remoteMutation || status.busy;
     $("#remote-stop").disabled = state.remoteMutation || !status.enabled;
     show($("#remote-cancel"), !!status.busy); $("#remote-cancel").disabled = state.remoteMutation || !status.enabled;
-    $("#remote-test").disabled = state.remoteMutation || status.busy || !status.enabled || status.gateway !== "running";
+    $("#remote-test").disabled = state.remoteMutation || status.busy || !status.enabled || status.gateway !== "running" || blockedQuick;
     const checking = check && ["checking", "retrying"].includes(check.state);
-    const connectionError = checking ? "" : status.lastError || "";
+    const connectionError = checking || blockedQuick && status.lastError?.startsWith("remote_quick_tunnel_unsupported：") ? "" : status.lastError || "";
     $("#remote-error").textContent = connectionError; show($("#remote-error"), Boolean(connectionError));
     if (connectionError && connectionError !== state.lastRemoteError) showToast(connectionError, true, "remote-connection");
     if (!connectionError && (checking || status.transport === "ready") && $("#page-error").dataset.errorSource === "remote-connection") show($("#page-error"), false);
@@ -801,7 +808,8 @@ function renderRoute() {
 }
 function renderConnectionEntry() {
   const status = state.remoteStatus; if (!status) return;
-  const reusable = status.enabled && status.gateway === "running" && !!status.publicOrigin;
+  const blockedQuick = status.quickTunnel?.available === false && status.mode !== "fixed_https";
+  const reusable = !blockedQuick && status.enabled && status.gateway === "running" && !!status.publicOrigin;
   state.connectionMode ||= reusable ? "reuse" : "new";
   setConnectionTab(state.managingConnection ? "authorization" : state.connectionTab || "transport");
   for (const button of document.querySelectorAll("[data-connection-mode]")) button.classList.toggle("active", button.dataset.connectionMode === state.connectionMode);
@@ -815,8 +823,8 @@ function renderConnectionEntry() {
   $("#reuse-mcp-address").textContent = status.publicOrigin ? `${status.publicOrigin}/mcp` : "尚未取得地址";
   show($("#quick-address-policy"), status.mode === "quick_tunnel");
   $("#remote-reuse").textContent = status.transport === "ready" ? "继续：选择工作区" : "重测当前连接";
-  $("#remote-reuse").disabled = state.remoteMutation || status.busy || state.remoteUnavailable;
-  $("#reuse-test").disabled = state.remoteMutation || status.busy || state.remoteUnavailable || !status.enabled || status.gateway !== "running";
+  $("#remote-reuse").disabled = state.remoteMutation || status.busy || state.remoteUnavailable || blockedQuick;
+  $("#reuse-test").disabled = state.remoteMutation || status.busy || state.remoteUnavailable || !status.enabled || status.gateway !== "running" || blockedQuick;
   $("#reuse-copy-url").disabled = !status.mcpUrl || state.remoteUnavailable;
   $("#connection-next").disabled = status.transport !== "ready";
   show($("#remote-connection"), state.connectionMode === "new");
@@ -4822,6 +4830,7 @@ function confirmConnectionReplacement(port, mode) {
   return askConfirm("重新配置网页连接", "此操作会重新配置当前连接，地址可能变化，原网页授权可能失效。完成后请核对 MCP 地址，并按提示重新授权。", "继续配置");
 }
 $("#remote-quick").addEventListener("click", async () => {
+  if (state.remoteStatus?.quickTunnel?.available === false) { showToast(state.remoteStatus.quickTunnel.reason || "当前后台暂不支持快捷连接。", true); return; }
   let port;
   try {
     if (!$("#quick-consent").checked) throw new Error("请先确认使用 Cloudflare 和自动下载连接组件。");

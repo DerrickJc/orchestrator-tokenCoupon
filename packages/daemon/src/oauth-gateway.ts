@@ -18,6 +18,7 @@ import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick
 import { PersistentQuickTunnelAdapter } from "./persistent-tunnel.js";
 import { createProbeMcpServer, probeRemoteMcp, ProbeError, retryableProbeFailure, type PublicProbe } from "./remote-probe.js";
 import { ConnectionDiagnostics, type ConnectionObservation } from "./connection-diagnostics.js";
+import { assertQuickTunnelSupported, quickTunnelSupport } from "./connection-platform.js";
 
 const require = createRequire(import.meta.url);
 const express = require("express") as ExpressFactory;
@@ -50,6 +51,7 @@ interface StoredCode { digest: string; grantId: string; clientId: string; redire
 interface PersistedState { version: 1; clients: StoredClient[]; requests: AuthorizationRequest[]; grants: StoredGrant[]; codes: StoredCode[]; }
 
 export interface RemoteConnectionStatus {
+  quickTunnel: { available: boolean; reason?: string };
   configured: boolean; enabled: boolean; publicOrigin?: string; mcpUrl?: string; gateway: "stopped" | "running" | "error";
   gatewayAddress?: string; lastError?: string; pendingApprovals: number; validGrants: number;
   remoteClientVerified: boolean;
@@ -76,7 +78,7 @@ export interface RemoteConnectionStatus {
 }
 export type ConnectionPhase = "stopped" | "checking" | "downloading" | "verifying" | "starting" | "discovering" | "probing" | "ready" | "reconnecting" | "disconnected" | "error";
 interface ConnectionConfig { mode: "quick_tunnel" | "fixed_https"; publicOrigin?: string; previousOrigin?: string; enabled: boolean; port: number; workspaceId?: string; workspaceIds?: string[]; scopes?: RemoteMcpScope[]; connectionOnly?: boolean; }
-export interface ConnectionDependencies { component?: ComponentProvider; tunnel?: TunnelAdapter; probe?: PublicProbe; healthIntervalMs?: number; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number; }
+export interface ConnectionDependencies { platform?: NodeJS.Platform; component?: ComponentProvider; tunnel?: TunnelAdapter; probe?: PublicProbe; healthIntervalMs?: number; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number; }
 
 /** Owns the remote gateway and its separate, project-scoped OAuth grants. */
 export class RemoteMcpConnection {
@@ -119,8 +121,10 @@ export class RemoteMcpConnection {
   private probeCheck: RemoteConnectionStatus["probeCheck"];
   private readonly diagnostics: ConnectionDiagnostics;
   private readonly tokenExchangeContext = new AsyncLocalStorage<{ code?: string }>();
+  private readonly platform: NodeJS.Platform;
 
   constructor(private readonly service: ApplicationService, private readonly dataDirectory: string, private port = 4178, dependencies: ConnectionDependencies = {}) {
+    this.platform = dependencies.platform ?? process.platform;
     this.configPath = join(dataDirectory, "remote-mcp-connection.json");
     this.statePath = join(dataDirectory, "remote-mcp-oauth.json");
     this.component = dependencies.component ?? new CloudflaredComponent(dataDirectory);
@@ -190,7 +194,7 @@ export class RemoteMcpConnection {
     const grants = active.length;
     const pendingApprovals = this.state.requests.filter((request) => !request.decision && request.expiresAt > now).length;
     const busy = ["checking", "downloading", "verifying", "starting", "discovering", "probing", "reconnecting"].includes(this.phase);
-    const base: RemoteConnectionStatus = { configured: Boolean(this.config), enabled: Boolean(this.config?.enabled), gateway: this.server?.listening ? "running" : this.startupError ? "error" : "stopped", pendingApprovals, validGrants: grants, pendingTokenExchanges: active.filter(grant => !grant.refreshDigest && !grant.access.length).length, remoteClientVerified: false, mode: this.config?.mode ?? "quick_tunnel", transport: this.phase, busy, addressChanged: this.addressChanged };
+    const base: RemoteConnectionStatus = { quickTunnel: quickTunnelSupport(this.platform), configured: Boolean(this.config), enabled: Boolean(this.config?.enabled), gateway: this.server?.listening ? "running" : this.startupError ? "error" : "stopped", pendingApprovals, validGrants: grants, pendingTokenExchanges: active.filter(grant => !grant.refreshDigest && !grant.access.length).length, remoteClientVerified: false, mode: this.config?.mode ?? "quick_tunnel", transport: this.phase, busy, addressChanged: this.addressChanged };
     const authorizationHistory = [...this.state.requests].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(request => {
       const status: NonNullable<RemoteConnectionStatus["authorizationRequests"]>[number]["status"] = request.decision ?? (request.expiresAt <= now ? "expired" : "pending");
       return { requestId: request.requestId, clientId: request.clientId, clientName: request.clientName, createdAt: request.createdAt, expiresAt: request.expiresAt, status };
@@ -241,6 +245,7 @@ export class RemoteMcpConnection {
   }
 
   async startQuick(input: { consent: boolean; workspaceId?: string; connectionOnly?: boolean; workspaceIds?: string[]; scopes?: string[]; port?: number }): Promise<RemoteConnectionStatus> {
+    assertQuickTunnelSupported(this.platform);
     if (this.loadFailed) throw new Error("remote_connection_state_invalid：请先检查本地授权状态");
     if (input.consent !== true) throw new Error("remote_consent_required：请确认使用 Cloudflare 和自动下载官方连接组件");
     if (!input.workspaceId && input.connectionOnly !== true) throw new Error("oauth_workspace_required：请选择项目，或显式选择仅建立连接");

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { acquireLockCoordination, observeOwner } from "@token-coupon/core";
 import { networkFetch } from "./network-fetch.js";
 import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
+import { assertQuickTunnelSupported } from "./connection-platform.js";
 
 type ProcessOwner = NonNullable<Parameters<typeof observeOwner>[0]>;
 export interface TunnelRecord extends ProcessOwner {
@@ -92,6 +93,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   constructor(private readonly startupTimeoutMs = 55_000, private readonly pollIntervalMs = 1500) {}
 
   async recover(port: number, directory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime | undefined> {
+    assertQuickTunnelSupported();
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     try {
@@ -102,6 +104,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   }
 
   async start(executable: string, port: number, directory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime> {
+    assertQuickTunnelSupported();
     await mkdir(directory, { recursive: true, mode: 0o700 }); signal.throwIfAborted();
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     let record: TunnelRecord | undefined;

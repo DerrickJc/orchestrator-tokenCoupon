@@ -199,6 +199,7 @@ export type NativePickerCommandDto = { kind: "directory"; workspaceId?: never } 
 export interface NativePickerResultDto { cancelled: boolean; paths: string[]; }
 export type RemoteScopeDto = "repository:read" | "planning:read" | "planning:write" | "session:read" | "session:control";
 export interface RemoteConnectionStatusDto {
+  quickTunnel?: { available: boolean; reason?: string };
   configured: boolean; enabled: boolean; publicOrigin?: string; mcpUrl?: string; gateway: "stopped" | "running" | "error";
   gatewayAddress?: string; lastError?: string; pendingApprovals: number; validGrants: number; remoteClientVerified: boolean;
   pendingTokenExchanges?: number; mode?: "quick_tunnel" | "fixed_https"; transport?: string; busy?: boolean; workspaceId?: string; workspaceIds?: string[];
