@@ -37,7 +37,13 @@ jobs:
 
       - run: npm run typecheck
 
-      - run: npm test
+      - name: Full test suite on Linux
+        if: runner.os == 'Linux'
+        run: npm test
+
+      - name: Native Windows process, path and desktop tests
+        if: runner.os == 'Windows'
+        run: npm run test:windows-native
 
       - name: Package Linux desktop preview and smoke final runtime
         if: runner.os == 'Linux'

@@ -1191,6 +1191,12 @@ node packages/cli/dist/main.js daemon job show --id <jobId>
 
 采样字段参照实际安装的 Electron 类型及官方 [ProcessMetric](https://www.electronjs.org/docs/latest/api/structures/process-metric)、[MemoryInfo](https://www.electronjs.org/docs/latest/api/structures/memory-info)、[CPUUsage](https://www.electronjs.org/docs/latest/api/structures/cpu-usage) 定义，按 API 单位分别保留，CPU 首次读数不当作真实空闲用量。报告与截图位于 `/tmp/token-coupon-desktop-measurements-report-20261021/`；完整真实 Electron GUI 流程再次通过，另有文件字节/目录/链接循环统计回归通过。此次只修改验收工具，未改变产品调度或加入新的生产监测权限。
 
+### 13.90 Windows 原生 CI 测试范围调整（2026-10-21）
+
+草稿 PR 的首次 Windows job 已通过依赖安装与类型检查，但全量 `npm test` 报告 143 个测试文件中 29 个失败、835 项中 110 项失败；失败集中在 Windows 路径别名、POSIX 进程/套接字夹具、临时目录 ACL 假设及超时。Linux job 的全量测试、Linux Electron 打包与 GUI 生命周期均通过。不能把这批 Windows 失败描述为安装器失败，也不能把被测试门禁跳过的 Windows 安装器/GUI 说成已通过。
+
+CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:windows-native` 中的平台专属路径、原生进程、Windows Mutex、目录选择和桌面配置测试，然后继续执行 NSIS 预览安装包和真实 Electron GUI 生命周期。该划分避免尚未移植的 POSIX 测试夹具挡住 Windows 原生检查；它不等于 Windows 全量回归通过。若 Windows 原生用例暴露产品缺陷，仍需在 Windows job 中修复后重跑。快捷隧道的 Windows 命名管道/本地网关行为、真实 coding agent、安装升级和普通用户账户权限矩阵仍单独待验证。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
@@ -1199,7 +1205,7 @@ node packages/cli/dist/main.js daemon job show --id <jobId>
 | --- | --- | --- |
 | C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份及暂存包身份核对、Linux/Windows 原生运行时 CI 已完成代码；继续取得远端 Windows workflow 证据、安装升级后的版本对账 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
-| D：桌面预览 | 已实现受限附着、后台启动/安全停止、托盘/窗口恢复、通知和目录桥接、profile 隔离、解包与 NSIS 构建、双平台 GUI CI；Linux 实际解包与 GUI 生命周期已验证。继续取得 Windows 原生构建/安装、真实 Runner 和系统交互验收证据 | 支持矩阵内真实 Windows 无开发环境闭环；Linux/Xvfb 不等于 Windows 安装、正常沙箱、系统通知或原生弹窗验收 |
+| D：桌面预览 | 已实现受限附着、后台启动/安全停止、托盘/窗口恢复、通知和目录桥接、profile 隔离、解包与 NSIS 构建、双平台 GUI CI；Linux 实际解包与 GUI 生命周期已验证。继续取得 Windows 原生构建/安装、真实 Runner 和系统交互验收证据 | Windows CI 单独运行原生测试集，尚未通过 Windows 全量 Vitest；Linux/Xvfb 不等于 Windows 安装、正常沙箱、系统通知或原生弹窗验收 |
 | E：界面余项 | 系统主题、减少动画、键盘跳转及全局 Runner/网页授权/计划审查批准恢复入口已实现；计划待办按需有界分页。继续统一布局、补齐页面状态归属与辅助技术矩阵 | 逐步补齐 UI-01 至 UI-15；已验证的主题对比度和键盘入口不替代完整无障碍审计 |
 | F：既有质量主线 | CLI daemon 模式的既有计划查询、审查批准、执行控制与交互已实现；继续新建/修订、事件跟随及恢复诊断；关键任务产物 Review、成果追溯、可信用量仍待各自 core 主线 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
 | G：发布准备 | 用户资料、许可、安装升级与卸载、签名和渠道 | 干净 Windows、完整生产资源及兼容/回退报告 |
