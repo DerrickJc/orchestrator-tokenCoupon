@@ -422,12 +422,13 @@ it("reconciles a restarted daemon without replaying mutations or discarding loca
   h.w.eval("connectEvents();");
   expect(sources[1].url).toContain("after=2&epoch=restarted");
 });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; desktopReconnect?: boolean; desktopRecovery?: string; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopNotificationCalls: any[] = [];
   let desktopFolderResult: { canceled: boolean; path?: string } = { canceled: false, path: "C:\\Projects\\Selected" };
   let desktopNotificationsEnabled = false;
+  const desktopReconnectCalls: string[] = [], desktopRecoveryAcknowledged: string[] = [];
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
   if (options.desktopPicker) Object.assign(w, { tokenCouponDesktop: {
     getAttachment: async () => ({ origin: "http://127.0.0.1:4177", port: 4177, epoch: "desktop-test", profileId: "a".repeat(24), protocol: { major: 1, minor: 0 }, applicationVersion: "0.1.0", buildId: "test" }),
@@ -435,6 +436,14 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     showNotification: async (input: any) => { desktopNotificationCalls.push(input); return true; },
     getNotificationsEnabled: async () => desktopNotificationsEnabled,
     setNotificationsEnabled: async (enabled: boolean) => { desktopNotificationsEnabled = enabled; return enabled; },
+  } });
+  if (options.desktopReconnect || options.desktopRecovery) Object.assign(w, { tokenCouponDesktop: {
+    ...w.tokenCouponDesktop,
+    getNotificationsEnabled: async () => false,
+    reconnect: async (snapshot: string) => { desktopReconnectCalls.push(snapshot); throw new Error("isolated reconnect failure"); },
+    getConnectionState: async () => ({ phase: "connected" }),
+    getRecoveryState: async () => options.desktopRecovery && !desktopRecoveryAcknowledged.length ? { id: "recovery-test", snapshot: options.desktopRecovery } : undefined,
+    acknowledgeRecovery: async (id: string) => { desktopRecoveryAcknowledged.push(id); },
   } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
@@ -582,8 +591,60 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
   await expect.poll(() => (w as any).__testState.initialized).toBe(true);
-  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopNotificationCalls, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
+  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopNotificationCalls, desktopReconnectCalls, desktopRecoveryAcknowledged, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
+
+it("reconnects through desktop IPC and preserves drafts on failure without submitting business writes", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/draft", ready: true, desktopReconnect: true });
+  h.element("toggle-plan-edit").click();
+  const title = h.element("plan-text-editor").querySelector("input")!;
+  title.value = "未提交的计划标题"; title.dispatchEvent(new h.w.Event("input", { bubbles: true }));
+  (h.element("request-text") as HTMLTextAreaElement).value = "未提交需求";
+  (h.element("reply-text") as HTMLTextAreaElement).value = "未发送澄清";
+  h.w.localStorage.setItem("tc-run:project:first", "retained configuration");
+  h.w.localStorage.setItem("unrelated-secret", "must not transfer");
+  h.w.sessionStorage.setItem("tc-review-project", "review preference");
+  h.w.dispatchEvent(new h.w.CustomEvent("token-coupon:desktop-connection", { detail: { phase: "disconnected", error: "后台退出" } }));
+  expect(h.visible("desktop-connection-banner")).toBe(true);
+  h.element("reconnect").click();
+  await expect.poll(() => h.desktopReconnectCalls.length).toBe(1);
+  await expect.poll(() => h.element("desktop-connection-message").textContent).toContain("重连未完成");
+  expect(title.value).toBe("未提交的计划标题"); expect(h.posts).toHaveLength(0);
+  const saved = JSON.parse(h.desktopReconnectCalls[0]!);
+  expect(saved.storage.local).toContainEqual(["tc-run:project:first", "retained configuration"]);
+  expect(JSON.stringify(saved)).not.toContain("must not transfer");
+  expect(saved.requestText).toBe("未提交需求");
+  expect(saved.inputs.find((input: any) => input.kind === "reply").text).toBe("未发送澄清");
+  const plan = saved.inputs.find((input: any) => input.kind === "plan");
+  expect(JSON.parse(plan.text).title).toBe("未提交的计划标题");
+  plan.base.hash = "older-draft"; plan.base.revision = 99;
+  const restored = await page({ hash: saved.route, ready: true, desktopRecovery: JSON.stringify(saved) });
+  await expect.poll(() => restored.desktopRecoveryAcknowledged.length).toBe(1);
+  expect(restored.w.localStorage.getItem("tc-run:project:first")).toBe("retained configuration");
+  expect(restored.w.sessionStorage.getItem("tc-review-project")).toBe("review preference");
+  expect(restored.w.localStorage.getItem("unrelated-secret")).toBeNull();
+  expect((restored.element("request-text") as HTMLTextAreaElement).value).toBe("未提交需求");
+  expect((restored.element("reply-text") as HTMLTextAreaElement).value).toBe("未发送澄清");
+  expect(restored.element("plan-text-editor").querySelector("input")!.value).toBe("未提交的计划标题");
+  expect(restored.element("plan-edit-status").textContent).toContain("当前草案已更新");
+  expect((restored.w as any).__testState.editBase).toMatchObject({ hash: "older-draft", revision: 99 });
+  expect(restored.posts).toHaveLength(0);
+});
+
+it("retains recovery text for another plan until explicitly restored in the matching context", async () => {
+  const saved = JSON.stringify({ version: 1, route: "#/workspaces/project/plans/first/draft", requestText: "恢复的需求", inputs: [{ kind: "reply", workspaceId: "project", planningId: "second", text: "只属于第二个计划" }] });
+  const h = await page({ hash: "#/workspaces/project/plans/first/draft", ready: true, desktopRecovery: saved });
+  expect(h.desktopRecoveryAcknowledged).toHaveLength(0);
+  expect((h.element("reply-text") as HTMLTextAreaElement).value).not.toBe("只属于第二个计划");
+  (h.element("request-text") as HTMLTextAreaElement).value = "恢复后继续编辑的需求";
+  h.w.location.hash = "#/workspaces/project/plans/second/draft";
+  await expect.poll(() => (h.w as any).__testState.planning?.planningId).toBe("second");
+  h.element("desktop-restore-inputs").click();
+  await expect.poll(() => h.desktopRecoveryAcknowledged.length).toBe(1);
+  expect((h.element("reply-text") as HTMLTextAreaElement).value).toBe("只属于第二个计划");
+  expect((h.element("request-text") as HTMLTextAreaElement).value).toBe("恢复后继续编辑的需求");
+  expect(h.posts).toHaveLength(0);
+});
 
 it("keeps quick navigation usable when the compiled React entry is unavailable", async () => {
   const h = await page({ ready: true });

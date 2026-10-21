@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/p
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
 import { createClient } from "../packages/client/dist/index.js";
@@ -30,6 +31,7 @@ delete environment.ELECTRON_RUN_AS_NODE;
 let application;
 const pageErrors = [];
 let lastOrigin;
+let acceptanceFailure;
 const startupSamples = [];
 
 async function bounded(promise, label, timeoutMs = 20_000) {
@@ -199,6 +201,103 @@ async function verifyAppearance(page, origin) {
     assert(contrast.animationDuration < .001, "reduced-motion must disable continuous spinner animation");
     if (theme === "dark") assert.notEqual(contrast.background, "rgb(245, 246, 242)");
   }
+  return { workspaceId: workspace.workspaceId, planningId: todo.planningId };
+}
+
+async function verifySecondInstance(attachment) {
+  console.log("GUI smoke：检查相同/不同后台目录的第二次启动…");
+  await application.evaluate(({ dialog }) => {
+    globalThis.testOriginalMessageBox = dialog.showMessageBox;
+    globalThis.testProfileDialogs = [];
+    dialog.showMessageBox = async (...args) => {
+      globalThis.testProfileDialogs.push(args.at(-1));
+      return { response: 0, checkboxChecked: false };
+    };
+  });
+  async function second(directory) {
+    const child = spawn(executablePath, ["--data-dir", directory, ...(noSandbox ? ["--no-sandbox"] : [])], { env: environment, stdio: "ignore" });
+    try {
+      const code = await bounded(new Promise((resolveExit, reject) => { child.once("error", reject); child.once("exit", resolveExit); }), "second desktop instance", 20_000);
+      assert.equal(code, 0);
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+  }
+  try {
+    await second(profile);
+    assert.equal(await application.evaluate(() => globalThis.testProfileDialogs.length), 0);
+    const otherProfile = join(root, "另一个后台目录");
+    await second(otherProfile);
+    const deadline = Date.now() + 20_000;
+    while (!(await application.evaluate(() => globalThis.testProfileDialogs.length)) && Date.now() < deadline) await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
+    const [message] = await application.evaluate(() => globalThis.testProfileDialogs);
+    assert.equal(message.title, "后台目录未切换");
+    assert(message.detail.includes(profile) && message.detail.includes(otherProfile));
+    await assert.rejects(access(join(otherProfile, "daemon-owner.json")), { code: "ENOENT" });
+    assert.equal((await discoverOwnedDaemon(profile)).epoch, attachment.epoch);
+  } finally {
+    await application.evaluate(({ dialog }) => { dialog.showMessageBox = globalThis.testOriginalMessageBox; delete globalThis.testOriginalMessageBox; delete globalThis.testProfileDialogs; });
+  }
+}
+
+async function verifyLiveReconnect(page, attachment, plan) {
+  console.log("GUI smoke：保留窗口，模拟后台崩溃并恢复未提交输入…");
+  const route = `#/workspaces/${plan.workspaceId}/plans/${plan.planningId}/draft`;
+  await page.goto(`${attachment.origin}/${route}`);
+  await page.locator("#toggle-plan-edit").click();
+  const title = page.locator("#plan-text-editor input").first();
+  const unsentTitle = "重连保留的未提交标题";
+  await title.fill(unsentTitle);
+  await page.evaluate(() => {
+    for (const [id, value] of [["request-text", "尚未发送的新需求"], ["reply-text", "尚未发送的澄清"]]) {
+      const input = document.getElementById(id); input.value = value; input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  const path = `/api/v1/workspaces/${plan.workspaceId}/plannings/${plan.planningId}`;
+  const before = await (await localClient(attachment.origin)).api(path);
+  const verified = await discoverOwnedDaemon(profile), credential = await readDaemonOwnerCredential(profile);
+  assert.equal(verified.epoch, attachment.epoch);
+  const writes = [];
+  const record = request => { if (request.url().includes("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method())) writes.push(`${request.method()} ${new URL(request.url()).pathname}`); };
+  page.on("request", record);
+  process.kill(credential.owner.pid, "SIGKILL");
+  try {
+    await page.locator("#desktop-connection-banner").waitFor({ state: "visible", timeout: 30_000 });
+    await page.locator("#desktop-reconnect").click();
+    const deadline = Date.now() + 60_000;
+    let recovered = false;
+    while (Date.now() < deadline) {
+      try {
+        const current = await discoverOwnedDaemon(profile, { timeoutMs: 1000 });
+        if (current.epoch !== attachment.epoch && new URL(page.url()).origin === current.origin) { lastOrigin = current.origin; recovered = true; break; }
+      } catch { /* A killed owner remains stale until the managed restart claims the profile. */ }
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+    }
+    assert(recovered, "live authenticated daemon and page recovery timed out");
+    await page.waitForFunction(expected => document.querySelector("#plan-text-editor input")?.value === expected, unsentTitle, { timeout: 60_000 });
+    assert.equal(await page.locator("#request-text").inputValue(), "尚未发送的新需求");
+    assert.equal(await page.locator("#reply-text").inputValue(), "尚未发送的澄清");
+    const found = await page.evaluate(() => window.tokenCouponDesktop.getAttachment());
+    lastOrigin = found.origin;
+    assert.notEqual(found.epoch, attachment.epoch);
+    assert.equal(found.profileId, attachment.profileId);
+    assert.equal(new URL(page.url()).origin, found.origin);
+    assert.equal(new URL(page.url()).hash, route);
+    await page.waitForFunction(() => document.querySelector("#desktop-connection-message").textContent.includes("已恢复"));
+    assert.equal(await page.evaluate(() => window.tokenCouponDesktop.getRecoveryState()), undefined, "acknowledged drafts must leave no recovery buffer in main");
+    const after = await (await localClient(found.origin)).api(path);
+    assert.deepEqual(after.draft, before.draft, "unsaved changes must not be committed by reconnect");
+    assert.equal(after.execution, before.execution);
+    assert.deepEqual(writes, [], "reconnect must not replay any business POST");
+    await page.screenshot({ path: join(outputDirectory, "desktop-reconnected-drafts.png"), fullPage: false });
+    // Discard the test edit explicitly so the following normal quit does not hit the unsaved-edit guard.
+    await page.locator("#toggle-plan-edit").click();
+    await page.locator("#unsaved-plan-discard").click();
+    return found;
+  } catch (error) {
+    await page.screenshot({ path: join(outputDirectory, "desktop-reconnect-failed.png"), fullPage: false }).catch(() => {});
+    console.error("Reconnect diagnostic:", await page.evaluate(async () => ({ url: location.href, connection: await window.tokenCouponDesktop.getConnectionState(), attachment: await window.tokenCouponDesktop.getAttachment(), banner: document.querySelector("#desktop-connection-banner")?.textContent, text: document.body.innerText.slice(-3000) })).catch(() => "renderer unavailable"));
+    console.error("Test daemon log:", await readFile(join(desktopHome, "logs", "daemon.log"), "utf8").then(value => value.slice(-5000)).catch(() => "log unavailable"));
+    throw error;
+  } finally { page.off("request", record); }
 }
 
 async function stopDaemon() {
@@ -218,7 +317,6 @@ async function stopDaemon() {
 
 try {
   let { page, attachment } = await launch();
-  const firstEpoch = attachment.epoch;
   const isolation = await page.evaluate(() => ({ require: typeof window.require, process: typeof window.process }));
   assert.deepEqual(isolation, { require: "undefined", process: "undefined" });
   const preferences = await bounded(application.browserWindow(page).then(window => window.evaluate(instance => instance.webContents.getLastWebPreferences())), "inspect renderer isolation");
@@ -230,7 +328,10 @@ try {
   const frame = await iframe.asElement().contentFrame();
   assert(frame); assert.equal(await frame.evaluate(() => typeof window.tokenCouponDesktop), "undefined");
   await iframe.evaluate(element => element.remove());
-  await verifyAppearance(page, attachment.origin);
+  const todo = await verifyAppearance(page, attachment.origin);
+  await verifySecondInstance(attachment);
+  attachment = await verifyLiveReconnect(page, attachment, todo);
+  const firstEpoch = attachment.epoch;
   await page.screenshot({ path: join(outputDirectory, "desktop.png"), fullPage: false });
   await closeWindow();
   assert.equal((await discoverOwnedDaemon(profile)).epoch, firstEpoch, "closing desktop must preserve its detached daemon");
@@ -249,12 +350,16 @@ try {
   const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
+    liveDaemonReconnect: "passed", draftRecoveryNoReplay: "passed", secondInstanceProfileGuard: "passed",
     systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed", planningTodoNavigation: "passed",
     chromiumSandbox: noSandbox ? "disabled-for-linux-test" : "enabled", nativeWindowsAcceptance: false };
   await writeFile(join(outputDirectory, "desktop-gui-smoke.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify({ outputDirectory, ...report }));
+} catch (error) {
+  acceptanceFailure = error;
+  throw error;
 } finally {
-  try { await stopDaemon(); }
+  try { await stopDaemon().catch(error => { if (acceptanceFailure) console.error("Cleanup after failed acceptance:", error.message); else throw error; }); }
   finally { await closeWindow(); }
   await rm(root, { recursive: true, force: true });
 }

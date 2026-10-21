@@ -11,6 +11,7 @@ import { resolveDevelopmentDaemonRuntime, resolvePackagedDaemonRuntime } from ".
 import { startManagedDaemon } from "./managed-daemon.js";
 import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
 import { resolveDaemonProfileDirectory, resolveDesktopUserData, sameDaemonDirectory, secondInstanceDirectory } from "./desktop-profile.js";
+import { DesktopReconnector } from "./desktop-reconnect.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopUserData = resolveDesktopUserData(app.getPath("userData"), app.isPackaged);
@@ -27,6 +28,19 @@ let windowStatePath: string | undefined;
 let preferencesPath: string | undefined;
 let stateSaveTimer: NodeJS.Timeout | undefined;
 let quitting = false;
+const reconnector = new DesktopReconnector({
+  connect: connectDaemon,
+  expectedProfileId: () => attachment?.profileId,
+  async load(found, route) {
+    attachment = found;
+    if (!window || window.isDestroyed()) window = await createWindow(found.origin, route);
+    else await window.loadURL(`${found.origin}/${route}`);
+  },
+  changed(value) {
+    if (window && !window.isDestroyed()) window.webContents.send(DESKTOP_IPC.connectionState, value);
+    refreshTrayMenu();
+  },
+});
 
 async function findDaemon(): Promise<DesktopAttachment> {
   let lastError: unknown;
@@ -59,6 +73,14 @@ function assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
 
 function registerIpc(): void {
   ipcMain.handle(DESKTOP_IPC.attachment, event => { assertTrustedSender(event); return attachment; });
+  ipcMain.handle(DESKTOP_IPC.connectionState, event => { assertTrustedSender(event); return reconnector.connectionState; });
+  ipcMain.handle(DESKTOP_IPC.reconnect, async (event, snapshot: unknown) => {
+    assertTrustedSender(event);
+    if (typeof snapshot !== "string") throw new Error("desktop_recovery_state_invalid：请先保留未提交内容");
+    await reconnector.reconnect(snapshot);
+  });
+  ipcMain.handle(DESKTOP_IPC.recoveryState, event => { assertTrustedSender(event); return reconnector.recoverySnapshot; });
+  ipcMain.handle(DESKTOP_IPC.acknowledgeRecovery, (event, id: unknown) => { assertTrustedSender(event); if (typeof id === "string") reconnector.acknowledgeSnapshot(id); });
   ipcMain.handle(DESKTOP_IPC.notificationsEnabled, (event, enabled?: unknown) => {
     assertTrustedSender(event);
     if (enabled === undefined) return readNotificationPreference();
@@ -101,25 +123,32 @@ function writeNotificationPreference(enabled: boolean): void {
   renameSync(temporary, preferencesPath);
 }
 
+async function connectDaemon(): Promise<DesktopAttachment> {
+  try {
+    const found = await findDaemon();
+    if (attachment && found.epoch !== attachment.epoch) managedDaemon = undefined;
+    return found;
+  }
+  catch {
+    const runtime = app.isPackaged
+      ? resolvePackagedDaemonRuntime(process.resourcesPath)
+      : resolveDevelopmentDaemonRuntime(app.getAppPath(), process.env);
+    const started = await startManagedDaemon({ runtime, dataDirectory: profileDirectory,
+      logPath: join(app.getPath("userData"), "logs", "daemon.log"), discover: discoverDaemonOnce });
+    managedDaemon = started.child.exitCode === null && started.attachment.port === started.port ? started.child : undefined;
+    started.child.once("exit", () => {
+      if (managedDaemon !== started.child) return;
+      managedDaemon = undefined;
+      if (!quitting) reconnector.disconnected();
+      refreshTrayMenu();
+    });
+    return started.attachment;
+  }
+}
+
 async function connectOrExplain(): Promise<DesktopAttachment | undefined> {
   for (;;) {
-    try {
-      try { return await findDaemon(); }
-      catch {
-        const runtime = app.isPackaged
-          ? resolvePackagedDaemonRuntime(process.resourcesPath)
-          : resolveDevelopmentDaemonRuntime(app.getAppPath(), process.env);
-        const started = await startManagedDaemon({
-          runtime,
-          dataDirectory: profileDirectory,
-          logPath: join(app.getPath("userData"), "logs", "daemon.log"),
-          discover: discoverDaemonOnce,
-        });
-        managedDaemon = started.child.exitCode === null ? started.child : undefined;
-        started.child.once("exit", () => { if (managedDaemon === started.child) { managedDaemon = undefined; refreshTrayMenu(); } });
-        return started.attachment;
-      }
-    }
+    try { return await connectDaemon(); }
     catch (error) {
       const result = await dialog.showMessageBox({
         type: "warning", title: "Token Coupon 后台尚未就绪",
@@ -165,11 +194,23 @@ function refreshTrayMenu(): void {
   if (!tray) return;
   const items: Electron.MenuItemConstructorOptions[] = [
     { label: "打开 Token Coupon", click: showMainWindow },
+    { label: reconnector.connectionState.phase === "reconnecting" ? "正在重新连接后台…" : "重新连接后台", enabled: reconnector.connectionState.phase !== "reconnecting", click: requestTrayReconnect },
     { type: "separator" },
     { label: managedDaemon ? "退出应用（后台继续运行）" : "退出应用（不停止已连接后台）", click: () => { quitting = true; app.quit(); } },
   ];
   if (managedDaemon) items.push({ label: "停止本机后台并退出", click: () => { void stopManagedDaemonFromTray(); } });
   tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
+function requestTrayReconnect(): void {
+  showMainWindow();
+  if (window && attachment && !window.isDestroyed() && !window.webContents.isCrashed() && isTrustedRendererUrl(window.webContents.getURL(), attachment.origin)) {
+    window.webContents.send(DESKTOP_IPC.reconnectRequested);
+  } else {
+    void reconnector.reconnect().catch(error => {
+      void dialog.showMessageBox({ type: "warning", title: "后台重连未完成", message: "未提交内容仍保留，可从托盘再次重试。", detail: describeAttachmentFailure(error), buttons: ["知道了"], noLink: true });
+    });
+  }
 }
 
 async function stopManagedDaemonFromTray(): Promise<void> {
@@ -221,7 +262,7 @@ function installTray(): void {
   } catch { tray = undefined; }
 }
 
-async function createWindow(origin: string): Promise<BrowserWindow> {
+async function createWindow(origin: string, route = ""): Promise<BrowserWindow> {
   const target = new URL(origin);
   if (!isAllowedDaemonOrigin(target.origin)) throw new Error("desktop_daemon_origin_invalid：拒绝加载非本机后台页面");
   const workAreas = currentWorkAreas();
@@ -232,7 +273,8 @@ async function createWindow(origin: string): Promise<BrowserWindow> {
     icon: join(here, process.platform === "win32" ? "token-coupon.ico" : "token-coupon.png"),
     webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true },
   });
-  instance.webContents.on("will-frame-navigate", event => { if (!isTrustedRendererUrl(event.url, target.origin)) event.preventDefault(); });
+  instance.webContents.on("will-frame-navigate", event => { if (!isTrustedRendererUrl(event.url, attachment?.origin ?? target.origin)) event.preventDefault(); });
+  instance.webContents.on("will-prevent-unload", event => { if (reconnector.inFlight && reconnector.recoverySnapshot) event.preventDefault(); });
   instance.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   instance.once("ready-to-show", () => instance.show());
   instance.on("move", () => scheduleWindowBoundsSave(instance));
@@ -242,7 +284,8 @@ async function createWindow(origin: string): Promise<BrowserWindow> {
     if (tray && !quitting) { event.preventDefault(); instance.hide(); }
   });
   instance.on("closed", () => { if (window === instance) window = undefined; });
-  void instance.loadURL(target.origin);
+  window = instance;
+  await instance.loadURL(`${target.origin}/${route}`);
   return instance;
 }
 

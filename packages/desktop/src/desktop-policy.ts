@@ -13,6 +13,11 @@ export interface DesktopNotificationTarget { workspaceId: string; planningId: st
 
 export const DESKTOP_IPC = Object.freeze({
   attachment: "token-coupon:attachment",
+  reconnect: "token-coupon:reconnect",
+  reconnectRequested: "token-coupon:reconnect-requested",
+  connectionState: "token-coupon:connection-state",
+  recoveryState: "token-coupon:recovery-state",
+  acknowledgeRecovery: "token-coupon:acknowledge-recovery",
   chooseFolder: "token-coupon:choose-folder",
   notification: "token-coupon:notification",
   notificationsEnabled: "token-coupon:notifications-enabled",

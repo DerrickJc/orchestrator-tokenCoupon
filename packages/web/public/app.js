@@ -1103,8 +1103,101 @@ $("#system-settings-form").addEventListener("submit", async event => {
 });
 $("#system-settings-continue").addEventListener("click", () => { state.initialSetup = false; void navigate(functionPolicy("planning")?.priority === "web" ? "/connect" : "/workspaces"); });
 
+function recoveryStorageKey(key, kind) {
+  return kind === "local" ? key.startsWith("tc-run:") || key === "tc-runner-id" || key.startsWith("tc-model-") : key.startsWith("tc-review-") || key.startsWith("tc-planning-");
+}
+function captureDesktopRecovery() {
+  const storage = {};
+  for (const [kind, source] of [["local", localStorage], ["session", sessionStorage]]) {
+    storage[kind] = [];
+    for (let index = 0; index < source.length; index++) {
+      const key = source.key(index);
+      if (key && recoveryStorageKey(key, kind)) storage[kind].push([key, source.getItem(key)]);
+    }
+  }
+  const diagnosis = state.attemptDiagnosticContext;
+  const inputs = new Map((state.desktopRecoveryPending?.value.inputs || []).map(input => [`${input.kind}:${input.workspaceId || ""}:${input.planningId || ""}:${input.identity || ""}`, input]));
+  const remember = input => inputs.set(`${input.kind}:${input.workspaceId || ""}:${input.planningId || ""}:${input.identity || ""}`, input);
+  if (state.workspace && state.planning) remember({ kind: "reply", workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, text: $("#reply-text").value });
+  if (state.editingPlan && state.editBase) remember({ kind: "plan", workspaceId: state.editBase.workspaceId, planningId: state.editBase.planningId, base: state.editBase, text: $("#plan-editor").value });
+  for (const [identity, text] of state.desktopRecoveredDiagnoses || []) remember({ kind: "diagnosis", identity, text });
+  if (diagnosis) remember({ kind: "diagnosis", identity: diagnosis.identity, text: $("#attempt-diagnosis-reply")?.value ?? diagnosis.unsentText ?? "" });
+  return JSON.stringify({ version: 1, route: location.hash || "#/connect", requestText: $("#request-text").value, storage,
+    inputs: [...inputs.values()],
+  });
+}
+function desktopConnectionChanged(value) {
+  if (!window.tokenCouponDesktop?.reconnect) return;
+  const busy = value.phase === "reconnecting";
+  state.desktopReconnecting = busy;
+  $("#desktop-reconnect").disabled = busy; $("#reconnect").disabled = busy;
+  $("#reconnect").textContent = busy ? "正在重连…" : "重新连接后台";
+  const lost = value.phase === "disconnected";
+  show($("#desktop-connection-banner"), lost || busy || !!state.desktopRecoveryNotice);
+  show($("#desktop-reconnect"), lost || busy);
+  show($("#desktop-restore-inputs"), !!state.desktopRecoveryPending);
+  $("#desktop-connection-title").textContent = busy ? "正在重新连接后台" : lost ? "本机后台已失联" : "后台已重新连接";
+  $("#desktop-connection-message").textContent = value.error || (busy ? "正在核验后台身份并恢复页面。未提交内容暂存在内存中，不会自动保存、批准或重试任务。" : state.desktopRecoveryNotice || "");
+  if (lost || busy) { $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = busy ? "后台重新连接中" : "后台失联 · 可重新连接"; }
+}
+async function loadDesktopRecovery() {
+  if (!window.tokenCouponDesktop?.getRecoveryState) return;
+  const saved = await window.tokenCouponDesktop.getRecoveryState();
+  if (!saved) return;
+  if (state.desktopRecoveryPending?.id === saved.id) return;
+  const value = JSON.parse(saved.snapshot);
+  if (value?.version !== 1) return;
+  state.desktopRecoveryPending = { id: saved.id, value };
+  for (const [kind, target] of [["local", localStorage], ["session", sessionStorage]]) {
+    for (const entry of value.storage?.[kind] || []) {
+      if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string" && recoveryStorageKey(entry[0], kind)) target.setItem(entry[0], entry[1]);
+    }
+  }
+}
+async function restoreDesktopRecovery() {
+  const saved = state.desktopRecoveryPending;
+  if (!saved) return;
+  const value = saved.value;
+  if (!saved.globalRestored && typeof value.requestText === "string") { $("#request-text").value = value.requestText; globalThis.tokenCouponPlannerRequestComposer?.setValue(value.requestText); }
+  saved.globalRestored = true;
+  const samePlan = context => context?.workspaceId === state.workspace?.workspaceId && context?.planningId === state.planning?.planningId;
+  const pending = [];
+  for (const input of value.inputs || []) {
+    if (typeof input?.text !== "string") continue;
+    if (input.kind === "reply" && input.text) {
+      if (samePlan(input)) { $("#reply-text").value = input.text; globalThis.tokenCouponReplyComposer?.setValue(input.text); }
+      else pending.push(input);
+    } else if (input.kind === "plan" && input.base) {
+      if (samePlan(input) && samePlan(input.base) && state.planning?.draft && !state.planning.execution) {
+        state.editBase = input.base; state.savedPlanText = state.editBase.text;
+        $("#plan-editor").value = input.text; state.editingPlan = true;
+        renderTextEditor(); renderPlanEditControls(); previewPlanDiff();
+      } else pending.push(input);
+    } else if (input.kind === "diagnosis" && typeof input.identity === "string") {
+      state.desktopRecoveredDiagnoses ??= new Map(); state.desktopRecoveredDiagnoses.set(input.identity, input.text);
+    }
+  }
+  state.desktopRecoveryNotice = pending.length ? "后台已连接。部分未提交内容属于其他计划或原计划已进入执行；内容仍保留，请打开原计划后点击恢复未提交内容。" : "未提交的需求、澄清和草案已恢复。请核对最新状态；没有自动保存、批准、回答或重试任务。";
+  if (!pending.length) { await window.tokenCouponDesktop?.acknowledgeRecovery?.(saved.id); state.desktopRecoveryPending = null; }
+  else state.desktopRecoveryPending.value = { ...value, inputs: pending };
+  desktopConnectionChanged({ phase: "connected" });
+}
+async function reconnectDesktop() {
+  if (!window.tokenCouponDesktop?.reconnect) { state.reconnectAttempts = 0; await init(); return; }
+  if (state.desktopReconnecting) return;
+  try {
+    const snapshot = captureDesktopRecovery();
+    desktopConnectionChanged({ phase: "reconnecting" });
+    clearTimeout(state.reconnectTimer); state.eventSource?.close(); state.eventGeneration = (state.eventGeneration || 0) + 1;
+    await window.tokenCouponDesktop.reconnect(snapshot);
+  } catch (error) { desktopConnectionChanged({ phase: "disconnected", error: `重连未完成：${error.message}。内容保留，可再次重试。` }); }
+}
+window.addEventListener("token-coupon:desktop-reconnect", () => { void reconnectDesktop(); });
+window.addEventListener("token-coupon:desktop-connection", event => desktopConnectionChanged(event.detail));
+
 async function init() {
   try {
+    await loadDesktopRecovery();
     if (window.tokenCouponDesktop) {
       try {
         state.desktopNotificationsEnabled = await window.tokenCouponDesktop.getNotificationsEnabled();
@@ -1130,8 +1223,10 @@ async function init() {
     const firstUse = state.systemSettings && !state.systemSettings.initialized && !state.workspaces.length && !location.hash;
     state.initialSetup = !!firstUse;
     await applyRoute(firstUse ? "/settings" : location.hash.slice(1) || "/connect", true);
-    await maybeNavigateToAuthorization();
+    if (!state.desktopRecoveryPending) await maybeNavigateToAuthorization();
     state.initialized = true;
+    await restoreDesktopRecovery();
+    if (window.tokenCouponDesktop?.getConnectionState) desktopConnectionChanged(await window.tokenCouponDesktop.getConnectionState());
     connectEvents();
     configureGlobalPending(); void globalThis.tokenCouponGlobalPending?.refresh();
   } catch (error) { disconnected(error); }
@@ -1146,7 +1241,7 @@ function applyDaemonHandshake(health) {
     state.planningTodosSupported = health.capabilities?.planningTodos === 1;
     if (health.protocol && health.protocol.major !== 1) showToast("界面与后台协议不兼容，写操作已暂停。请更新后重新打开；当前仍可查看记录。", true);
 }
-function disconnected(error) { globalThis.tokenCouponGlobalPending?.unavailable(); $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; showToast(error.message || "无法连接本机服务", true); }
+function disconnected(error) { globalThis.tokenCouponGlobalPending?.unavailable(); $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; desktopConnectionChanged({ phase: "disconnected", error: error.message }); showToast(error.message || "无法连接本机服务", true); }
 function renderProviders() {
   const select = $("#planner-provider"), standalone = [], local = [], api = [];
   for (const provider of state.providers) {
@@ -1442,7 +1537,7 @@ function connectEvents() {
     if (generation !== state.eventGeneration) return;
     globalThis.tokenCouponGlobalPending?.unavailable();
     state.eventSource?.close(); state.eventSource = null; $("#connection-dot").classList.remove("online");
-    if (state.reconnectAttempts >= 5) { $("#connection-label").textContent = "需要重新连接"; return; }
+    if (state.reconnectAttempts >= 5) { $("#connection-label").textContent = "需要重新连接"; desktopConnectionChanged({ phase: "disconnected" }); return; }
     $("#connection-label").textContent = "正在重连";
     const delay = Math.min(16000, 1000 * (2 ** state.reconnectAttempts)) + Math.floor(Math.random() * 250);
     state.reconnectAttempts += 1; state.reconnectTimer = setTimeout(connectEvents, delay);
@@ -3690,6 +3785,7 @@ async function openAttemptDiagnosis() {
   if (!view || view.workspaceId !== state.workspace?.workspaceId || view.planningId !== state.planning?.planningId) return;
   const identity = `${view.workspaceId}:${view.planningId}:${view.attemptId}`;
   if (state.attemptDiagnosticContext?.identity !== identity) state.attemptDiagnosticContext = { identity, workspaceId: view.workspaceId, planningId: view.planningId, attemptId: view.attemptId, runnerId: view.attempt?.runnerId, modelId: view.attempt?.execution?.modelId };
+  if (state.desktopRecoveredDiagnoses?.has(identity)) { state.attemptDiagnosticContext.unsentText = state.desktopRecoveredDiagnoses.get(identity); state.desktopRecoveredDiagnoses.delete(identity); }
   const policy = functionPolicy("diagnosis");
   if (policy?.priority === "agent") await openLocalAttemptDiagnosis(state.attemptDiagnosticContext);
   else if (policy?.priority === "web") await exportAttemptDiagnosis(state.attemptDiagnosticContext);
@@ -4768,7 +4864,10 @@ $("#local-state-cancel").addEventListener("click", () => decideLocalInputNavigat
 $("#unsaved-local-state-dialog").addEventListener("cancel", event => { event.preventDefault(); decideLocalInputNavigation("cancel"); });
 window.addEventListener("beforeunload", (event) => { if (planHasChanges()) { event.preventDefault(); event.returnValue = ""; } });
 $("#cancel-job").addEventListener("click", async () => { if (!state.activeJob) return; try { await api(`/api/v1/jobs/${state.activeJob.jobId}/cancel`, { method: "POST", body: JSON.stringify({ workspaceId: state.activeJob.workspaceId }) }); $("#job-label").textContent = "已请求取消，正在等待 Runner 收尾"; } catch (error) { showToast(error.message, true); } });
-$("#refresh").addEventListener("click", () => { void refreshAll(); void refreshRemoteConnection(); void globalThis.tokenCouponGlobalPending?.refresh(); }); $("#reconnect").addEventListener("click", () => { state.reconnectAttempts = 0; void init(); }); $("#clear-log").addEventListener("click", () => { $("#event-log").replaceChildren(); });
+$("#refresh").addEventListener("click", () => { void refreshAll(); void refreshRemoteConnection(); void globalThis.tokenCouponGlobalPending?.refresh(); }); $("#reconnect").addEventListener("click", () => { void reconnectDesktop(); }); $("#clear-log").addEventListener("click", () => { $("#event-log").replaceChildren(); });
+$("#desktop-reconnect").addEventListener("click", () => { void reconnectDesktop(); });
+$("#desktop-restore-inputs").addEventListener("click", () => { void restoreDesktopRecovery(); });
+$("#desktop-connection-close").addEventListener("click", () => { show($("#desktop-connection-banner"), false); });
 $("#toast-close").addEventListener("click", () => { clearTimeout(state.toastTimer); show($("#toast"), false); });
 $("#budget-extension-confirm").addEventListener("click", () => void confirmBudgetExtension());
 $("#budget-extension-cancel").addEventListener("click", () => { $("#budget-extension-dialog").close(); state.budgetOperationId = null; });
