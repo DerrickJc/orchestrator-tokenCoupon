@@ -1,4 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
+$("#skip-main")?.addEventListener("click", () => $("#main-content")?.focus());
 const tokenCouponClient = globalThis.tokenCouponClient;
 if (typeof tokenCouponClient?.api !== "function" || typeof tokenCouponClient?.openEventStream !== "function") throw new Error("web_client_not_loaded：请先加载本机 HTTP/SSE 客户端模块");
 const { api, openEventStream } = tokenCouponClient;

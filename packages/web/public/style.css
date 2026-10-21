@@ -523,3 +523,89 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .command-palette-empty { margin:8px 4px; color:var(--muted); font-size:12px; }
 .command-palette-help { margin:10px 2px 0; color:var(--muted); font-size:11px; }
 .sidebar-footer-actions kbd { padding:1px 4px; border:1px solid var(--line); border-radius:4px; background:#f6f7f4; color:var(--muted); font:inherit; font-size:9px; }
+
+/* System appearance is shared by browser and Electron; no model or business state is stored here. */
+:root { color-scheme:light dark; --focus-ring:#476a35; }
+:where(button,a,input,select,textarea,summary,[tabindex]):focus-visible { outline:2px solid var(--focus-ring); outline-offset:3px; }
+.skip-main { position:fixed; left:16px; top:12px; z-index:150; transform:translateY(-180%); padding:10px 16px; border:2px solid var(--focus-ring); border-radius:8px; background:var(--paper); color:var(--ink); font:inherit; }
+.skip-main:focus { transform:none; }
+@media (prefers-reduced-motion:reduce) {
+  *, *::before, *::after { animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; scroll-behavior:auto!important; }
+}
+@media (prefers-color-scheme:dark) {
+  :root { color:#e5ecdf; background:#151b16; --ink:#e5ecdf; --muted:#b0bbaa; --line:#465242; --paper:#202820; --soft:#2c3929;
+    --green:#adc995; --green-dark:#bfd7ab; --amber:#efc783; --amber-bg:#3b2e1c; --red:#f2ada5; --red-bg:#3d2324;
+    --surface:#222d25; --focus-ring:#c2dfab; --shadow:0 10px 30px #0003; }
+  .sidebar { background:#192019; }
+  .brand-mark { background:#405b37; color:#fff; }
+  .workspace-item,.remote-scope,.workspace-form label,.settings-grid label,.remote-config-row label,.remote-workspace-label,
+  .draft-text-field,.draft-task-heading,.plan-field-preview strong,.plan-tools,.elicitation-field-heading { color:var(--ink); }
+  .hint,.muted,.eyebrow,.side-heading,.text-button,.task-sub,.task-meta,.empty-state,.journey,.journey button,.plan-tabs button,
+  .plan-card p,.finding p,.finding .basis,.summary-grid span,.review-overview p,.advanced-settings summary,.remote-scope-list legend,
+  .task-dependencies h4,.task-dependency-chips,.review-resolutions summary,.task-board-column>h4,.attempt-message>strong,
+  .foldout>summary,.metadata-details>summary,#remote-setup summary,#confirm-action-dialog p,#plan-next-action { color:var(--muted); }
+  .main input:not([type=checkbox]):not([type=radio]),dialog input:not([type=checkbox]):not([type=radio]),
+  .main textarea,dialog textarea,.main select,dialog select { background:#182018; border-color:var(--line); color:var(--ink); }
+  input[type=checkbox],input[type=radio] { accent-color:var(--green); }
+  dialog { background:var(--paper); color:var(--ink); border-color:var(--line); }
+  .card,.plan-card,.task-row,.finding,.interaction-card,.connection-client,.remote-approval-card,.handoff-card,
+  .workspace-check-cell,.run-config-fields,.run-config-choice,.task-board-column,.runner-question-option,.elicitation-field,
+  .approval-text-foldout,.approval-command,.approval-reason,.draft-version-status,.review-overview,.dag-preview,.dag-viewport,
+  .task-dag-scroll,.dag-preview-item,.dag-preview-more,.summary-grid>div,.session-progress,.session-control-status,
+  .execution-metric,.attempt-selection-context,.connection-current-address,.remote-consent { border-color:var(--line); }
+  .welcome { background:linear-gradient(112deg,var(--paper) 42%,#293426 100%); }
+  .welcome p,.welcome-orbit { color:var(--muted); }
+  .welcome-orbit span,.button-quiet,.code-editor,.task-row,.task-board .task-row,.plan-card,.connection-client,.remote-approval-card,
+  .handoff-card,.workspace-form,.authorization-workspace-form .workspace-form,.info-card,.file-entry,#file-preview,
+  .connection-address-copy code,.summary-grid>div,.draft-version-status,.review-overview,.read-budget-status,
+  .task-board-column,.dag-preview-item,.dag-preview-more,.dag-preview,.dag-mini-map,.dag-viewport,.task-dag-scroll,
+  .workspace-checkbox-grid .workspace-check-cell,.attempt-selection-context,.elicitation-field,.runner-question-option,
+  .runner-question-context,.execution-metric,.live-task-reply,.session-control-status,#planning-progress-raw pre,
+  .remote-scope-list.permissions .remote-scope-all-row,.sidebar-footer-actions kbd { background:var(--paper); color:var(--ink); }
+  .button-primary { background:#bfd7ab; color:#162110; }
+  .button-primary:hover:not(:disabled) { background:#d4e9c3; color:#162110; }
+  .button-quiet:hover,.workspace-item:hover,.workspace-item.active,.main-navigation .active,.main-navigation .workspace-item:hover,
+  .plan-tabs .active,.plan-tabs button:hover,.journey .active,.workspace-mode-switch .active,.plan-tool-link[aria-current=page],
+  .file-entry:hover,.git-tree-folder>summary:hover,.git-tree-file:hover,.command-palette-option:hover,
+  .command-palette-option[aria-selected=true],.runner-question-option:has(input:checked),
+  .workspace-checkbox-grid .workspace-check-cell:has(input:checked),.run-config-choice:has(input:checked) { background:var(--soft); color:var(--green-dark); border-color:var(--line); }
+  .summary-grid strong,.card-link,.handoff-card strong,.read-budget-status { color:var(--green-dark); }
+  .badge-neutral,.count-pill,.task-icon,.task-board-count,.dependency-node { background:#303c2d; color:#c4d1bc; }
+  .badge-success,.notice-success,.reply-success,.resolution-resolved,.dag-preview-item[data-status=succeeded],
+  .task-icon.succeeded,.git-readiness.git-ready,.job-bar[data-state=succeeded],.authorization-arrived,.authorization-arrival { background:#263d28; color:#c5e7ad; }
+  .notice-warn,.badge-warning,.step-pill,.remote-trust-note,.remote-consent,.resolution-open,.git-readiness,
+  .dependency-node[data-status=running],.dag-preview-item[data-status=running],.task-icon.running,.field-guidance,
+  .action-feedback[data-kind=validation],.remote-approval-card .field-guidance,.elicitation-destination,
+  .button-session-pause,.task-row.desktop-notification-focus { background:var(--amber-bg); color:var(--amber); border-color:#79623a; }
+  .badge-error,.page-error,.reply-error,.activity-error,.task-icon.failed,.task-icon.cancelled,
+  .dag-preview-item[data-status=failed],.dag-preview-item[data-status=cancelled],.dag-preview-item[data-status=interrupted],
+  .job-bar[data-state=failed],.job-bar[data-state=interrupted],.button-session-cancel { background:var(--red-bg); color:var(--red); border-color:#83514c; }
+  .field-error,.execution-metric[data-kind=errors] strong { color:var(--red); }
+  .execution-metric[data-kind=running] strong,.attempt-selection-context .is-history { color:var(--amber); }
+  .info-card p,.remote-approval-card .field-guidance.authorization-ready { color:var(--green-dark); }
+  .message.user { background:#2a402c; color:#deedd3; }
+  .message.assistant,.diff-box { background:#263027; color:var(--ink); }
+  .action-feedback,.selection-feedback,.git-readiness pre { background:var(--soft); color:var(--ink); }
+  .pending-approval-box,.pending-approval-box.has-pending .interaction-card { background:#1e2c3c; color:#e0ebf7; border-color:#728ca7; }
+  .pending-approval-box.has-pending { background:#263e5c; }
+  .pending-approval-box.has-pending .interaction-card .hint { color:#b7cce3; }
+  .approval-text-foldout,.approval-command,.approval-reason,.approval-guidance { background:#1b2a39; color:#d8e9f8; border-color:#647d96; }
+  .approval-text-foldout>summary,.approval-guidance summary,.approval-field-label,.interaction-card>a[href] { color:#bddcf5; }
+  .interaction-card pre { color:inherit; }
+  .event-entry[data-level=error] .event-content { background:var(--red-bg); color:var(--red); }
+  .event-entry[data-level=success] .event-content { color:#bee09f; }
+  .execution-floating-status { background:var(--paper); border-color:var(--line); }
+  .execution-floating-status:hover,.execution-floating-status:focus-visible { background:var(--soft); }
+  .dag-node rect { fill:#29352a; stroke:#83917b; }
+  .dag-node text { fill:var(--ink); }
+  .dag-node .dag-status { fill:var(--muted); }
+  .dag-node[data-status=running] rect { fill:var(--amber-bg); }
+  .dag-node[data-status=succeeded] rect { fill:#263d28; }
+  .dag-node[data-status=failed] rect,.dag-node[data-status=interrupted] rect,.dag-node[data-status=timed_out] rect,
+  .dag-node[data-status=cancelled] rect,.dag-node[data-status=unavailable] rect { fill:var(--red-bg); }
+  .dag-node[data-status=blocked]>rect { fill:#342c41; }
+  .dag-node[data-status=planned]>rect,.dag-node[data-status=created]>rect { fill:#25313b; }
+  .dag-detail-button rect,.dag-detail-button:hover rect,.dag-detail-button:focus rect { fill:#253d50; stroke:#84a9c9; }
+  .dag-node .dag-detail-button text { fill:#c9e3f8; }
+  .dag-incoming { color:#8bbced; } .dag-outgoing { color:#edb77f; }
+}

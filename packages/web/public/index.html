@@ -1,7 +1,7 @@
 <!DOCTYPE html><html lang="zh-CN"><head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>Token Coupon · 本机工作台</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/api-client.js"></script>
@@ -59,6 +59,7 @@
   <script type="module" src="/app.js"></script>
 </head>
 <body>
+  <button id="skip-main" type="button" class="skip-main">跳到主要内容</button>
   <div class="shell">
     <aside id="sidebar" class="sidebar"><button id="sidebar-close" class="button button-quiet mobile-only">关闭导航</button>
       <a class="brand" href="#/connect" aria-label="Token Coupon 首页"><span class="brand-mark">T</span><span>token coupon<small>本机 Agent 工作台</small></span></a>
@@ -70,7 +71,7 @@
       <details id="execution-preferences" class="foldout"><summary>桌面提醒</summary><div class="button-row"><button id="enable-notifications" type="button" class="button button-quiet">开启桌面提醒</button><span id="notification-status" class="hint" role="status">审批到达时显示页签提醒，可选择开启系统通知。</span></div></details><div class="sidebar-footer"><div class="sidebar-connection-state"><span id="connection-dot" class="status-dot"></span><span id="connection-label">连接中</span></div><div class="sidebar-footer-actions"><button id="command-palette-open" type="button" class="text-button" title="快速导航（Ctrl 或 ⌘ + K）">快速跳转 <kbd>Ctrl K</kbd></button><button id="refresh" type="button" class="text-button">刷新状态</button><button id="reconnect" type="button" class="text-button">重新连接</button></div></div>
     </aside>
 
-    <button id="nav-backdrop" class="navigation-backdrop" aria-label="关闭导航"></button><main class="main">
+    <button id="nav-backdrop" class="navigation-backdrop" aria-label="关闭导航"></button><main id="main-content" class="main" tabindex="-1">
       <header class="topbar"><button id="mobile-navigation" class="button button-quiet mobile-only" aria-controls="sidebar" aria-expanded="false">☰ 导航</button><div><div id="page-eyebrow" class="eyebrow">LOCAL WORKBENCH</div><h1 id="project-title">连接你的网页模型</h1><div id="project-path" class="muted small"></div></div><div class="top-actions"><button id="new-task" class="button button-primary" type="button" disabled="">网页规划／执行设置</button></div></header><section id="page-error" class="page-error hidden" role="alert" aria-live="assertive"><div><strong>操作未完成</strong><p id="page-error-message"></p></div><button id="page-error-dismiss" class="notification-dismiss" type="button" aria-label="关闭提示" title="关闭提示">×</button></section>
       <section id="action-feedback" class="action-feedback hidden" role="status"><strong id="action-feedback-title"></strong><p id="action-feedback-text"></p><button id="action-feedback-close" type="button" class="notification-dismiss" aria-label="关闭提示" title="关闭提示">×</button></section><section id="selection-feedback" class="selection-feedback hidden" role="status"></section><div id="operation-status-stack" class="operation-status-stack"><section id="job-bar" class="job-bar hidden" aria-live="polite"><span class="spinner"></span><span id="job-label">操作进行中</span><a id="job-plan-link" class="job-plan-link hidden" href="#">打开对应计划</a><button id="cancel-job" class="text-button">取消</button><button id="job-view-result" type="button" class="button button-quiet hidden">查看任务结果</button></section><section id="pending-action-banner" class="notice notice-warn hidden" role="status"><strong id="pending-action-label"></strong><button id="pending-action-open" class="button button-primary" type="button">查看待审批请求</button></section></div><div id="workspace-connection-summary" class="notice compact-status" role="status" aria-live="polite"></div><section id="connection-action-needed" class="notice notice-warn hidden" role="status"><strong id="connection-action-title"></strong><p id="connection-action-description"></p><div id="authorization-arrival" class="authorization-arrival hidden" role="status"><strong>已收到网页授权请求</strong><p id="authorization-arrival-description"></p><button id="authorization-arrival-open" class="button button-primary">打开本机授权</button></div><div class="button-row"><button id="connection-repair" class="button button-primary">更新网页连接并授权</button><button id="connection-copy-current" class="button button-quiet">复制当前 MCP 地址</button><button id="connection-verify-web" class="button button-quiet">复制网页验证提示</button></div></section><nav class="journey" aria-label="工作流程"><button data-route="/connect">01 · 连接</button><span>→</span><button data-route="/workspaces">02 · 工作区</button><span>→</span><span id="journey-plan">03 · Plan</span></nav>
       <section id="provider-notice" class="notice notice-warn hidden"></section>

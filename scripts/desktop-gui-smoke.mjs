@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
 import { createClient } from "../packages/client/dist/index.js";
@@ -69,18 +70,85 @@ async function closeWindow() {
   }
 }
 
+async function localClient(origin) {
+  const landing = await fetch(origin, { signal: AbortSignal.timeout(5000) }), cookie = landing.headers.getSetCookie()[0]?.split(";")[0];
+  await landing.body?.cancel();
+  assert(cookie, "test daemon must establish local authorization");
+  const client = createClient({ fetch: (path, options) => fetch(origin + path, { ...options, signal: AbortSignal.timeout(5000),
+    headers: { ...Object.fromEntries(new Headers(options?.headers)), Cookie: cookie, Origin: origin } }) });
+  await client.api("/api/v1/health");
+  return client;
+}
+
+async function verifyAppearance(page, origin) {
+  console.log("GUI smoke：检查键盘导航、真实任务页深浅色和减少动画偏好…");
+  await page.focus("#skip-main"); await page.keyboard.press("Enter");
+  assert.equal(await page.evaluate(() => document.activeElement.id), "main-content");
+  await page.locator("#system-settings-save").click();
+  await page.waitForFunction(() => document.querySelector("#system-settings-status").textContent.includes("已保存"));
+  const workspacePath = join(root, "中文 mock 任务"); await mkdir(workspacePath);
+  const client = await localClient(origin);
+  async function completed(job) {
+    const deadline = Date.now() + 60_000;
+    while (job.status === "running" && Date.now() < deadline) {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 50)); job = await client.api(`/api/v1/jobs/${job.jobId}`);
+    }
+    assert.equal(job.status, "succeeded", job.error); return job.result;
+  }
+  const workspace = await client.api("/api/v1/workspaces", { method: "POST", body: JSON.stringify({ path: workspacePath, label: "外观与键盘回归" }) });
+  const planned = await completed(await client.api(`/api/v1/workspaces/${workspace.workspaceId}/plannings`, { method: "POST",
+    body: JSON.stringify({ requestKey: randomUUID(), request: "离线问候函数与测试", provider: "mock", executionDefaults: { runnerId: "mock", mode: "managed" } }) }));
+  const planPath = `/api/v1/workspaces/${workspace.workspaceId}/plannings/${planned.planningId}`;
+  await completed(await client.api(`${planPath}/review`, { method: "POST", body: JSON.stringify({ requestKey: randomUUID(), reviewer: { mode: "mock" } }) }));
+  const draft = await client.api(planPath);
+  await completed(await client.api(`${planPath}/approve`, { method: "POST", body: JSON.stringify({ requestKey: randomUUID(), draftRevision: draft.draft.draftRevision }) }));
+  await completed(await client.api(`${planPath}/run`, { method: "POST", body: JSON.stringify({ requestKey: randomUUID(), isolation: "shared", maxParallel: 1 }) }));
+  // A hash-only goto keeps the old in-memory workspace list. Reload after API fixture creation.
+  await page.goto(`${origin}/?gui-smoke=appearance#/workspaces/${workspace.workspaceId}/plans/${planned.planningId}/execution`);
+  try { await page.waitForSelector("#task-list .task-row"); }
+  catch (error) {
+    await page.screenshot({ path: join(outputDirectory, "appearance-load-failed.png") });
+    console.error("Task view diagnostic:", await page.evaluate(() => ({ url: location.href, text: document.body.innerText.slice(-5000) })));
+    throw error;
+  }
+  for (const theme of ["light", "dark"]) {
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+    await page.waitForFunction(expected => matchMedia("(prefers-color-scheme: dark)").matches === (expected === "dark"), theme);
+    await page.evaluate(() => new Promise(resolveFrame => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))));
+    const contrast = await page.evaluate(() => {
+      const luminance = color => {
+        const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
+        return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+      };
+      const ratio = (a, b) => { const x = luminance(a), y = luminance(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); };
+      const rootStyle = getComputedStyle(document.documentElement), task = getComputedStyle(document.querySelector("#task-list .task-row"));
+      const select = getComputedStyle(document.querySelector("#system-settings-mode"));
+      const button = getComputedStyle(document.querySelector("#system-settings-save"));
+      const dagText = document.querySelector("#task-dependencies .dag-node text"), dagRect = document.querySelector("#task-dependencies .dag-node > rect");
+      const spinner = document.createElement("span"); spinner.className = "spinner"; document.body.append(spinner);
+      const duration = parseFloat(getComputedStyle(spinner).animationDuration); spinner.remove();
+      return { background: rootStyle.backgroundColor, taskColors: [task.color, task.backgroundColor], text: ratio(rootStyle.color, rootStyle.backgroundColor), task: ratio(task.color, task.backgroundColor),
+        select: ratio(select.color, select.backgroundColor), button: ratio(button.color, button.backgroundColor), animationDuration: duration,
+        ...(dagText && dagRect ? { dag: ratio(getComputedStyle(dagText).fill, getComputedStyle(dagRect).fill) } : {}) };
+    });
+    console.log(`GUI smoke：${theme} theme contrast`, contrast);
+    await page.screenshot({ path: join(outputDirectory, `desktop-${theme}.png`), fullPage: false });
+    await page.locator("#execution-task-panel").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: join(outputDirectory, `desktop-tasks-${theme}.png`), fullPage: false });
+    for (const part of ["text", "task", "select", "button"]) assert(contrast[part] >= 4.5, `${theme} ${part} text contrast ${contrast[part]}`);
+    if (contrast.dag !== undefined) assert(contrast.dag >= 4.5, `${theme} DAG contrast ${contrast.dag}`);
+    assert(contrast.animationDuration < .001, "reduced-motion must disable continuous spinner animation");
+    if (theme === "dark") assert.notEqual(contrast.background, "rgb(245, 246, 242)");
+  }
+}
+
 async function stopDaemon() {
   const ownerFile = join(profile, "daemon-owner.json");
   try { await access(ownerFile); } catch (error) { if (error.code === "ENOENT") return; throw error; }
   const owner = await discoverOwnedDaemon(profile, { timeoutMs: 1500 });
   console.log("GUI smoke：安全停止本次测试的后台…");
   if (lastOrigin) assert.equal(owner.origin, lastOrigin, "only the verified daemon started for this test may be stopped");
-  const landing = await fetch(owner.origin, { signal: AbortSignal.timeout(5000) }), cookie = landing.headers.getSetCookie()[0]?.split(";")[0];
-  await landing.body?.cancel();
-  assert(cookie, "test daemon must establish local authorization");
-  const client = createClient({ fetch: (path, options) => fetch(owner.origin + path, { ...options, signal: AbortSignal.timeout(5000),
-    headers: { ...Object.fromEntries(new Headers(options?.headers)), Cookie: cookie, Origin: owner.origin } }) });
-  await client.api("/api/v1/health");
+  const client = await localClient(owner.origin);
   await client.api("/api/v1/daemon/stop", { method: "POST", body: JSON.stringify({ confirmed: true, expectedEpoch: owner.epoch }) });
   for (let index = 0; index < 100; index++) {
     try { await access(ownerFile); } catch (error) { if (error.code === "ENOENT") return; throw error; }
@@ -103,6 +171,7 @@ try {
   const frame = await iframe.asElement().contentFrame();
   assert(frame); assert.equal(await frame.evaluate(() => typeof window.tokenCouponDesktop), "undefined");
   await iframe.evaluate(element => element.remove());
+  await verifyAppearance(page, attachment.origin);
   await page.screenshot({ path: join(outputDirectory, "desktop.png"), fullPage: false });
   await closeWindow();
   assert.equal((await discoverOwnedDaemon(profile)).epoch, firstEpoch, "closing desktop must preserve its detached daemon");
@@ -119,6 +188,7 @@ try {
   const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
+    systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed",
     chromiumSandbox: noSandbox ? "disabled-for-linux-test" : "enabled", nativeWindowsAcceptance: false };
   await writeFile(join(outputDirectory, "desktop-gui-smoke.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify({ outputDirectory, ...report }));
