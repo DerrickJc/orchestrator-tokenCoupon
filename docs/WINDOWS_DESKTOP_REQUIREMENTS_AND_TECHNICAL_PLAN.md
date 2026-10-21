@@ -1,6 +1,6 @@
 # Windows 客户端需求与技术方案
 
-日期：2026-10-19，实施记录更新至 2026-10-20。状态：**实施中；Electron 桌面附着、托盘、窗口恢复、开发模式随桌面启动后台及 Electron extraResources 运行时组装原型已建立，Linux x64 Node v22.12.0 packaged-entry 冒烟通过；Windows 目标资源打包、安装器和 Windows 桌面验收仍待完成。Windows 平台适配已完成部分基础能力，完整后台与安装验收仍待完成。Web 页面已具备 Vite 构建/静态分发基础和输入快捷键；快速导航、工作区/计划导航、规划方式选择器、执行 Runner 选择器、规划/执行/审查模型选择器及其目录状态/刷新控件、审查方式选择器、运行方式选择器、执行 Runner／模型配置方式选择器、并发/隔离/最终验证选择器、运行中任务换模型控件、系统设置的 Agent／网页路由选择器、计划页标签、概览、草案只读任务卡片、草案结构化编辑表单、草案差异视图、审查结果区、需求/澄清输入、对话记录、执行状态摘要、本次执行回复区、任务看板、DAG 预览面板及完整依赖图弹窗、DAG 任务详情、Session 控制、断点继续入口、待审批摘要及交互表单/动作、Attempt 状态摘要/选择器/记录读取控件、模型回复列表、工具活动列表/分页、原始事件正文/筛选/分页控件、诊断对话历史、诊断输入框、诊断历史/模型选择界面、网页证据导出弹窗和任务生成结果弹窗已由 React 管理。Runner／模型目录请求、响应竞态与配置提交、待审批卡片组装与生命周期、诊断模型目录请求与诊断请求调度和 Session 判定逻辑仍由原生 JavaScript 管理。尚未完成完整真实浏览器交互和 Windows 桌面验收。**
+日期：2026-10-19，实施记录更新至 2026-10-21。状态：**实施中。已实现共享 Web/React 界面、Electron 受限附着与后台启动、托盘/通知/目录桥接、桌面 profile 隔离、完整运行时组装及 NSIS 预览构建入口；Linux 实际 Electron 解包与 GUI 生命周期 smoke 已通过。Windows 原生安装包生成/安装、正常沙箱 GUI、真实 Runner 与升级验收仍待完成；界面统一、质量协作与正式发布仍有缺口，详见第 14 节。**
 
 本文整理需求讨论、开源项目检索与代码只读核查结果，并补充桌面前端设计和交互方案。代码核查是当时工作树的事实，不等同于已发布版本；实施前需重新记录代码基线和既有变更归属。
 
@@ -1105,6 +1105,18 @@ npm run desktop:installer
 本机从官方 GitHub 发布下载 Electron 44.9.1 Linux x64 并核对官方清单，SHA-256 为 `994bc3664cc3ac55b50c21a58d345cf8322003d37f5439a81801e3267e6145e2`。实际生成 Linux Electron 解包目录，确认 app.asar 包含主进程、preload 和共享 client，最终包内 Node 22.12 daemon 的发现、鉴权、Mock 规划/审查/批准/运行、重启与记录恢复均通过。Windows NSIS 生成及安装仍待原生 Windows runner/实机证据。
 
 类型检查、打包定向测试 9 项与全量回归均通过：132 个文件通过、1 个 Windows 专用文件跳过；811 项通过、1 项跳过。这里的 Linux skip 不计作 Windows 验收通过。
+
+### 13.83 真实 Electron GUI 启动、隔离 profile 与生命周期 smoke（2026-10-21）
+
+真实 Electron 试运行发现 ES module 顶层 `await app.whenReady()` 会阻塞 ready，导致窗口不出现；现已改成非阻塞 ready 回调，并注册启动错误反馈。桌面在取得单实例锁之前确定 userData 与 Chromium sessionData：开发模式使用独立 development 目录，安装模式沿用应用用户目录，测试可显式设置绝对路径 `TOKEN_COUPON_DESKTOP_HOME`。daemon 的 `--data-dir` 保持独立语义，不复制用户项目记录。
+
+新增 `desktop:smoke-gui`，用 Playwright Core 1.64.1 启动真实解包可执行文件与独立 profile：核对版本/build ID、页面 preload、主进程隔离参数、renderer 无 require/process、子 frame 无桥接、外部弹窗拒绝；保存通知偏好，退出 UI 后检查 daemon 仍在，重新打开复用同一 epoch；安全停止后再次打开产生新 epoch 且偏好保留。测试只处理自己创建并通过 owner 挑战核验的后台；退出以子进程真实 exit 为准，避免等待工具传输回执无限挂起。本机 DevTools 绕过代理，原生产品的模型网络配置不变。
+
+```powershell
+npm run desktop:smoke-gui -- --executable "C:\preview\win-unpacked\Token Coupon.exe" --output "C:\preview\gui-report"
+```
+
+Linux 以 Xvfb 对实际 Electron 44.9.1 解包目录完成上述三次启动与两次后台生命周期验证，全部通过。报告与截图位于本机 `/tmp/token-coupon-desktop-gui-report-final-20261021/`，不作为源码资源提交。该 Linux 测试明确使用 `--no-sandbox`，报告标为 `disabled-for-linux-test`；产品 BrowserWindow 的 sandbox/contextIsolation 仍开启，但本证据不等于 Chromium 沙箱或 Windows GUI 已验收。Windows CI 和实机必须使用正常沙箱设置。
 
 ## 14. 剩余实施台账（2026-10-21）
 

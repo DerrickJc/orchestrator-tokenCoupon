@@ -10,8 +10,13 @@ import { describeAttachmentFailure, DESKTOP_IPC, isAllowedDaemonOrigin, isDeskto
 import { resolveDevelopmentDaemonRuntime, resolvePackagedDaemonRuntime } from "./daemon-runtime.js";
 import { startManagedDaemon } from "./managed-daemon.js";
 import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
+import { resolveDesktopUserData } from "./desktop-profile.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const desktopUserData = resolveDesktopUserData(app.getPath("userData"), app.isPackaged);
+mkdirSync(join(desktopUserData, "chromium"), { recursive: true, mode: 0o700 });
+app.setPath("userData", desktopUserData);
+app.setPath("sessionData", join(desktopUserData, "chromium"));
 const defaultHome = app.getPath("home") || homedir();
 const profileDirectory = daemonProfileDirectory(process.argv, process.env, defaultHome);
 let window: BrowserWindow | undefined;
@@ -256,18 +261,24 @@ async function createWindow(origin: string): Promise<BrowserWindow> {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", showMainWindow);
-  await app.whenReady();
-  windowStatePath = join(app.getPath("userData"), "window-state.json");
-  preferencesPath = join(app.getPath("userData"), "desktop-preferences.json");
-  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  const current = await connectOrExplain();
-  if (!current) app.quit();
-  else {
-    attachment = current;
-    registerIpc();
-    window = await createWindow(current.origin);
-    installTray();
-  }
+  // Awaiting ready at ESM module top level prevents Electron from completing startup.
+  void app.whenReady().then(async () => {
+    windowStatePath = join(app.getPath("userData"), "window-state.json");
+    preferencesPath = join(app.getPath("userData"), "desktop-preferences.json");
+    session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    const current = await connectOrExplain();
+    if (!current) app.quit();
+    else {
+      attachment = current;
+      registerIpc();
+      window = await createWindow(current.origin);
+      installTray();
+    }
+  }).catch(error => {
+    dialog.showErrorBox("Token Coupon 启动失败", describeAttachmentFailure(error));
+    quitting = true;
+    app.quit();
+  });
   app.on("activate", () => { if (!window && attachment) void createWindow(attachment.origin).then(created => { window = created; }); else showMainWindow(); });
   app.on("before-quit", () => { quitting = true; if (stateSaveTimer) clearTimeout(stateSaveTimer); saveWindowBounds(); });
   app.on("will-quit", () => { tray?.destroy(); tray = undefined; });
