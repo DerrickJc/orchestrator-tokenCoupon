@@ -48,11 +48,18 @@ function safeDirectory($path) {
   foreach($rule in $acl.Access) { $sid=sidOf $rule.IdentityReference; if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed -and (([int]$rule.FileSystemRights -band $directoryDanger) -ne 0)) { return $false } }
   return $true
 }
-if (-not (safeFile $file)) { exit 4 }
-$cursor=Get-Item -LiteralPath $dir -Force
-$depth=0
-while ($null -ne $cursor -and $null -ne $cursor.Parent) { if (-not (safeDirectory $cursor.FullName)) { [Console]::Out.Write('directory-depth='+$depth); exit 5 }; $cursor=$cursor.Parent; $depth++ }
-[Console]::Out.Write('private')`;
+try {
+  $stage='owner-file'
+  if (-not (safeFile $file)) { exit 4 }
+  $cursor=Get-Item -LiteralPath $dir -Force
+  $depth=0
+  while ($null -ne $cursor -and $null -ne $cursor.Parent) {
+    $stage='directory-depth='+$depth
+    if (-not (safeDirectory $cursor.FullName)) { [Console]::Out.Write($stage); exit 5 }
+    $cursor=$cursor.Parent; $depth++
+  }
+  [Console]::Out.Write('private')
+} catch { [Console]::Out.Write('acl-probe-error='+$stage+';'+$_.Exception.GetType().Name); exit 6 }`;
   try {
     const result = await execFile(powershellPath(), encodedPowerShell(script), { windowsHide: true, timeout: 8000, maxBuffer: 4096 });
     if (result.stdout.trim() !== "private") throw new Error("daemon_discovery_profile_unprotected：Windows owner 文件 ACL 校验未返回可信结果");
@@ -61,7 +68,9 @@ while ($null -ne $cursor -and $null -ne $cursor.Parent) { if (-not (safeDirector
     const code = error && typeof error === "object" && "code" in error ? String((error as NodeJS.ErrnoException).code) : "unknown";
     const output = error && typeof error === "object" && "stdout" in error ? String((error as { stdout?: unknown }).stdout ?? "") : "";
     const depth = output.match(/directory-depth=(\d+)/)?.[1];
-    const reason = code === "4" ? "owner 文件 ACL 对其他用户开放" : code === "5" ? `profile 目录链允许其他用户替换${depth ? `（父目录层级 ${depth}）` : ""}` : "Windows ACL 查询失败";
+    const probeError = output.match(/acl-probe-error=([a-z-]+);([A-Za-z]+)/);
+    const reason = code === "4" ? "owner 文件 ACL 对其他用户开放" : code === "5" ? `profile 目录链允许其他用户替换${depth ? `（父目录层级 ${depth}）` : ""}`
+      : code === "6" && probeError ? `Windows ACL 检查失败（${probeError[1]}，${probeError[2]}）` : "Windows ACL 查询失败";
     throw new Error(`daemon_discovery_profile_unprotected：${reason}，拒绝信任本机后台`);
   }
 }
