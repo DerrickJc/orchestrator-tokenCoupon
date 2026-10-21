@@ -68,7 +68,7 @@ try {
     const code = error && typeof error === "object" && "code" in error ? String((error as NodeJS.ErrnoException).code) : "unknown";
     const output = error && typeof error === "object" && "stdout" in error ? String((error as { stdout?: unknown }).stdout ?? "") : "";
     const depth = output.match(/directory-depth=(\d+)/)?.[1];
-    const probeError = output.match(/acl-probe-error=([a-z-]+);([A-Za-z]+)/);
+    const probeError = output.match(/acl-probe-error=([a-z-]+(?:=\d+)?);([A-Za-z]+)/);
     const reason = code === "4" ? "owner 文件 ACL 对其他用户开放" : code === "5" ? `profile 目录链允许其他用户替换${depth ? `（父目录层级 ${depth}）` : ""}`
       : code === "6" && probeError ? `Windows ACL 检查失败（${probeError[1]}，${probeError[2]}）` : "Windows ACL 查询失败";
     throw new Error(`daemon_discovery_profile_unprotected：${reason}，拒绝信任本机后台`);
