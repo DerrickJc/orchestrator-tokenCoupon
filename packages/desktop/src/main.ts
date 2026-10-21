@@ -4,13 +4,13 @@ import { discoverOwnedDaemon } from "@token-coupon/client/node";
 import type { ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describeAttachmentFailure, DESKTOP_IPC, isAllowedDaemonOrigin, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl, type DesktopAttachment } from "./desktop-policy.js";
 import { resolveDevelopmentDaemonRuntime, resolvePackagedDaemonRuntime } from "./daemon-runtime.js";
 import { startManagedDaemon } from "./managed-daemon.js";
 import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
-import { resolveDesktopUserData } from "./desktop-profile.js";
+import { resolveDaemonProfileDirectory, resolveDesktopUserData, sameDaemonDirectory, secondInstanceDirectory } from "./desktop-profile.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopUserData = resolveDesktopUserData(app.getPath("userData"), app.isPackaged);
@@ -18,7 +18,7 @@ mkdirSync(join(desktopUserData, "chromium"), { recursive: true, mode: 0o700 });
 app.setPath("userData", desktopUserData);
 app.setPath("sessionData", join(desktopUserData, "chromium"));
 const defaultHome = app.getPath("home") || homedir();
-const profileDirectory = daemonProfileDirectory(process.argv, process.env, defaultHome);
+const profileDirectory = resolveDaemonProfileDirectory(process.argv, process.env, defaultHome);
 let window: BrowserWindow | undefined;
 let attachment: DesktopAttachment | undefined;
 let managedDaemon: ChildProcess | undefined;
@@ -27,18 +27,6 @@ let windowStatePath: string | undefined;
 let preferencesPath: string | undefined;
 let stateSaveTimer: NodeJS.Timeout | undefined;
 let quitting = false;
-
-function daemonProfileDirectory(args: readonly string[], environment: NodeJS.ProcessEnv, home: string): string {
-  const index = args.indexOf("--data-dir");
-  const argument = index >= 0 ? args[index + 1] : args.find(value => value.startsWith("--data-dir="))?.slice("--data-dir=".length);
-  const explicit = argument ?? environment.TOKEN_COUPON_DAEMON_HOME;
-  if (explicit !== undefined) {
-    if (!explicit.trim() || !isAbsolute(explicit)) throw new Error("desktop_data_directory_invalid：后台数据目录必须是非空绝对路径");
-    return resolve(explicit);
-  }
-  if (!home || !isAbsolute(home)) throw new Error("desktop_home_unavailable：无法确定用户主目录");
-  return join(home, ".token-coupon", "daemon");
-}
 
 async function findDaemon(): Promise<DesktopAttachment> {
   let lastError: unknown;
@@ -258,9 +246,18 @@ async function createWindow(origin: string): Promise<BrowserWindow> {
   return instance;
 }
 
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!app.requestSingleInstanceLock({ dataDirectory: profileDirectory })) app.quit();
 else {
-  app.on("second-instance", showMainWindow);
+  app.on("second-instance", (_event, args, _cwd, additionalData) => {
+    showMainWindow();
+    let detail: string;
+    try {
+      const requested = secondInstanceDirectory(args, additionalData, defaultHome);
+      if (sameDaemonDirectory(profileDirectory, requested)) return;
+      detail = `当前后台目录：${profileDirectory}\n本次请求目录：${requested}\n\n当前窗口保持原连接。请先退出桌面应用，再使用所需 --data-dir 启动；如需同时使用两个目录，为第二个窗口设置独立的 TOKEN_COUPON_DESKTOP_HOME。`;
+    } catch (error) { detail = describeAttachmentFailure(error); }
+    void dialog.showMessageBox({ type: "info", title: "后台目录未切换", message: "已打开当前窗口，没有切换到其他后台目录。", detail, buttons: ["保留当前连接"], noLink: true });
+  });
   // Awaiting ready at ESM module top level prevents Electron from completing startup.
   void app.whenReady().then(async () => {
     windowStatePath = join(app.getPath("userData"), "window-state.json");
