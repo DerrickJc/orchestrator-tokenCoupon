@@ -45,6 +45,22 @@ npm run cli -- task run --file examples/task.claude.json --accept-edits
 
 输入校验或文件读取失败时 CLI 返回退出码 `2`。`plan show` 和 `task show` 只读取 JSON 并打印内容，不启动 Runner。
 
+### CLI 与 Web／桌面共用后台
+
+已有后台运行时，显式使用 `daemon` 子命令连接同一实例。默认查找用户目录中的 `.token-coupon/daemon`，自定义后台可设置 `TOKEN_COUPON_DAEMON_HOME` 或附加 `--data-dir`。身份核验或连接失败会退出，不另起 Runner；原有直接执行命令保持原有模式。
+
+```bash
+node packages/cli/dist/main.js daemon status
+node packages/cli/dist/main.js daemon workspaces
+node packages/cli/dist/main.js daemon planning list --workspace-id <workspaceId>
+node packages/cli/dist/main.js daemon planning show --workspace-id <workspaceId> --planning-id <planningId>
+node packages/cli/dist/main.js daemon planning run --workspace-id <workspaceId> --planning-id <planningId> --isolation git-worktree --verification-task <taskId> --max-parallel 2
+node packages/cli/dist/main.js daemon pending
+node packages/cli/dist/main.js daemon job show --id <jobId>
+```
+
+运行仍要求有效审查和批准。写命令返回 Job 表示请求已接收，最终状态用 `job show` 核实；退出 CLI 后任务继续由后台处理。响应中断时先查看计划与回执，不能把命令退出当作任务失败。工具审批可使用 `daemon interaction respond --workspace-id <ID> --request <requestId> --decision allow-once`；拒绝用 `deny`，模型问题或 MCP 表单使用 `--reply-file` 提交带 `kind` 的结构化回答，也可在 Web／桌面处理。完整命令见 `daemon --help`。新建/修订计划、事件跟随和恢复诊断当前继续使用原入口，不会静默转为旧 CLI 直接执行。
+
 ### 手工计划与 Session（Phase 2）
 
 手工计划可以按依赖顺序串行执行。Session 快照和各次 Attempt 日志保存在当前 workspace 的 `.token-coupon/` 中；在项目根目录执行时，产物也留在项目目录下：

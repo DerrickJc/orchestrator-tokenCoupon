@@ -1142,6 +1142,24 @@ SSE 触发合并刷新，中心打开时每 15 秒兜底核对；断线/读取�
 
 类型检查、构建与全量回归通过：136 个文件通过、1 个 Windows 专用文件跳过，822 项通过、1 项跳过。新增测试覆盖跨项目归属、错误工作区回答拒绝、摘要隐私、102 项分页、取消竞态、无鉴权拒绝、后台重启与晚到请求、React 转义和跳转。实际 Electron 预览包再次通过 Mock 全流程、真实空态中心、明确标注的失效读取夹具跳转及三次启动生命周期。报告位于 `/tmp/token-coupon-desktop-pending-center-report-passed-20261021/`；Windows 原生验收边界沿用 13.83，不将读取夹具当作真实 Runner 审批证据。
 
+### 13.87 CLI 显式后台客户端（2026-10-21）
+
+新增 `token-coupon daemon …` 子命令，与原有直接执行模式明确区分。共享 Node 客户端先核验受保护的 owner 文件、进程启动身份和 HMAC 挑战，再建立本机 Cookie 会话并核对 health 的 epoch、profile 和 build ID；仅访问该 loopback 后台的 API，不扫描端口、不启动备用执行器、不改写锁、不自动重放写操作。后台离线或身份变化时返回错误；Cookie 和 owner token 不出现在状态输出。
+
+当前支持后台状态、工作区/计划查询、实时待处理分页、审查、按明确版本批准、按明确隔离模式运行、暂停/取消/继续、单任务重试、交付报告、Job 回执及交互回答。运行前读取当前 planHash/draftRevision 并交给后台复核，沿用审查和批准门禁；不提供隐式豁免。审批可直接用 `--decision allow-once|deny`，复杂问题/表单用带 kind 的 JSON 回答文件或在 Web/桌面处理。新建/修订、事件跟随和恢复诊断尚未迁移到此子命令，仍使用已有入口；不会静默转为直接执行。
+
+```bash
+node packages/cli/dist/main.js daemon status
+node packages/cli/dist/main.js daemon planning show --workspace-id <ID> --planning-id <ID>
+node packages/cli/dist/main.js daemon planning run --workspace-id <ID> --planning-id <ID> --isolation git-worktree --verification-task <taskId> --max-parallel 2
+node packages/cli/dist/main.js daemon pending
+node packages/cli/dist/main.js daemon job show --id <jobId>
+```
+
+共享后台目录默认沿用 `TOKEN_COUPON_DAEMON_HOME` 或用户目录 `.token-coupon/daemon`，自定义可追加 `--data-dir`。写命令输出请求标识及 Job；命令成功表示请求/读取成功，最终任务结果以 Job 和计划状态为准。响应丢失时先检查回执；相同 request-key 只可复用完全相同的请求。
+
+类型检查、构建及全量回归通过：138 个文件通过、1 个 Windows 专用文件跳过，827 项通过、1 项跳过。真实 HTTP 测试覆盖实际 CLI 子进程附着、同一后台的审查/批准/执行闭环、重复 key 返回同一 Job、后台身份变化拒绝、写入已生效但响应丢失时只发送一次，以及离线不新建 profile/owner。Windows fixture 已配置当前用户私有 ACL，但本机执行结果仍来自 Linux；Windows CI 结果未取得前不声称原生 CLI 验收通过。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
@@ -1152,5 +1170,5 @@ SSE 触发合并刷新，中心打开时每 15 秒兜底核对；断线/读取�
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
 | D：桌面预览 | 已实现受限附着、后台启动/安全停止、托盘/窗口恢复、通知和目录桥接、profile 隔离、解包与 NSIS 构建、双平台 GUI CI；Linux 实际解包与 GUI 生命周期已验证。继续取得 Windows 原生构建/安装、真实 Runner 和系统交互验收证据 | 支持矩阵内真实 Windows 无开发环境闭环；Linux/Xvfb 不等于 Windows 安装、正常沙箱、系统通知或原生弹窗验收 |
 | E：界面余项 | 系统深浅色、减少动画、键盘跳转和跨项目实时 Runner/网页授权待处理入口已实现并验证；继续统一布局，纳入计划批准/恢复事项，补齐页面状态归属与辅助技术矩阵 | 逐步补齐 UI-01 至 UI-15；已验证的主题对比度和键盘入口不替代完整无障碍审计 |
-| F：既有质量主线 | 关键任务产物 Review、成果追溯、可信用量、CLI daemon 模式 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
+| F：既有质量主线 | CLI daemon 模式的既有计划查询、审查批准、执行控制与交互已实现；继续新建/修订、事件跟随及恢复诊断；关键任务产物 Review、成果追溯、可信用量仍待各自 core 主线 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
 | G：发布准备 | 用户资料、许可、安装升级与卸载、签名和渠道 | 干净 Windows、完整生产资源及兼容/回退报告 |

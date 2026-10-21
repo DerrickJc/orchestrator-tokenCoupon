@@ -5,7 +5,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { promisify } from "node:util";
-import { daemonChallengePayload, type DaemonChallenge } from "./index.js";
+import { createClient, daemonChallengePayload, type DaemonChallenge } from "./index.js";
 
 const execFile = promisify(execFileCallback);
 export type DaemonOwnerCredential = {
@@ -188,4 +188,25 @@ export async function discoverOwnedDaemon(dataDirectory = join(homedir(), ".toke
   await verifyDaemonChallenge(challenge, credential, { nonce, origin });
   return { origin, port, epoch: challenge.epoch, profileId: challenge.profileId, protocol: challenge.protocol,
     applicationVersion: challenge.applicationVersion, buildId: challenge.buildId };
+}
+
+/** Attach only to the verified local owner; never start a replacement or retry a write. */
+export async function connectOwnedDaemon(dataDirectory?: string, options: { fetch?: typeof fetch; timeoutMs?: number } = {}) {
+  const attachment = await discoverOwnedDaemon(dataDirectory, options);
+  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const landing = await fetcher(attachment.origin, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(options.timeoutMs ?? 10_000) });
+  const cookie = landing.headers.getSetCookie().map(value => value.split(";", 1)[0]).find(value => value?.startsWith("tc_local="));
+  await landing.body?.cancel();
+  if (landing.status !== 200 || landing.redirected || !cookie) throw new Error("daemon_client_authorization_failed：本机后台未建立有效会话");
+  const client = createClient({ fetch: (async (path, request) => {
+    if (typeof path !== "string" || !path.startsWith("/api/v1/") || path.startsWith("//")) throw new Error("daemon_client_path_invalid：只允许本机 API 路径");
+    const headers = new Headers(request?.headers); headers.set("Cookie", cookie); headers.set("Origin", attachment.origin);
+    return fetcher(attachment.origin + path, { ...request, headers, redirect: "manual", cache: "no-store", signal: request?.signal ?? AbortSignal.timeout(options.timeoutMs ?? 10_000) });
+  }) as typeof fetch });
+  const health = await client.domain.health();
+  if (health.epoch !== attachment.epoch || health.profile.id !== attachment.profileId || health.buildId !== attachment.buildId) {
+    throw new Error("daemon_epoch_changed：附着期间后台身份已变化，请重新执行命令核对；未重放任何写操作");
+  }
+  if (client.connection().compatibility !== "compatible") throw new Error("daemon_client_incompatible：客户端与后台协议不兼容，请更新后重试");
+  return { attachment, client };
 }
