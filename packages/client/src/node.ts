@@ -39,7 +39,7 @@ function safeFile($path) {
   $script:stage='owner-file:reparse-check'
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
   $script:stage='owner-file:get-acl'
-  $acl=Get-Acl -LiteralPath $path
+  $acl=[IO.File]::GetAccessControl($path)
   $script:stage='owner-file:owner-sid'
   if ((sidOf $acl.Owner) -notin $allowed) { return $false }
   $script:stage='owner-file:access-rules'
@@ -52,7 +52,7 @@ function safeDirectory($path) {
   $script:stage='directory:reparse-check'
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
   $script:stage='directory:get-acl'
-  $acl=Get-Acl -LiteralPath $path
+  $acl=[IO.Directory]::GetAccessControl($path)
   foreach($rule in $acl.Access) { $script:stage='directory:access-rule-sid'; $sid=sidOf $rule.IdentityReference; if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed -and (([int]$rule.FileSystemRights -band $directoryDanger) -ne 0)) { return $false } }
   return $true
 }
