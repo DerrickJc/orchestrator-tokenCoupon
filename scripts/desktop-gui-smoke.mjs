@@ -112,10 +112,17 @@ async function verifyAppearance(page, origin) {
     throw error;
   }
   console.log("GUI smoke：检查全局待处理入口和失效请求定位…");
+  const todo = await completed(await client.api(`/api/v1/workspaces/${workspace.workspaceId}/plannings`, { method: "POST",
+    body: JSON.stringify({ requestKey: randomUUID(), request: "待审查的离线演示计划", provider: "mock", executionDefaults: { runnerId: "mock", mode: "managed" } }) }));
   await page.locator("#global-pending-open").click();
   await page.getByText("没有当前有效的 Runner 请求。", { exact: true }).waitFor();
   await page.locator("#global-pending-close").click();
   assert.equal(await page.evaluate(() => document.activeElement.id), "global-pending-open");
+  await page.locator("#global-pending-open").click();
+  await page.locator("#global-pending-dialog .global-pending-item").filter({ hasText: "草案待审查" }).click();
+  await page.waitForFunction(id => location.hash.endsWith(`/plans/${id}/review`), todo.planningId);
+  await page.goto(`${origin}/#/workspaces/${workspace.workspaceId}/plans/${planned.planningId}/execution`);
+  await page.waitForSelector("#task-list .task-row");
   // Deliberately stale read fixture: the UI must re-read the Plan rather than approve anything.
   const pendingRoute = "**/api/v1/pending?*";
   const currentHealth = await client.api("/api/v1/health");
@@ -208,7 +215,7 @@ try {
   const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
-    systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed",
+    systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed", planningTodoNavigation: "passed",
     chromiumSandbox: noSandbox ? "disabled-for-linux-test" : "enabled", nativeWindowsAcceptance: false };
   await writeFile(join(outputDirectory, "desktop-gui-smoke.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify({ outputDirectory, ...report }));

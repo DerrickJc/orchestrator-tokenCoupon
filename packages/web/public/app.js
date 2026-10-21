@@ -24,20 +24,31 @@ const statuses = { collecting: "收集中", draft_ready: "草案待处理", appr
 statuses.needs_input = "等待用户决策";
 const diagnosticStatuses = { running: "分析中", completed: "分析完成", failed: "分析失败", interrupted: "分析中断" };
 function configureGlobalPending() {
-  globalThis.tokenCouponGlobalPending?.configure({ epoch: state.daemonEpoch || "", supported: !!state.pendingQueueSupported,
+  globalThis.tokenCouponGlobalPending?.configure({ epoch: state.daemonEpoch || "", supported: !!state.pendingQueueSupported, planningSupported: !!state.planningTodosSupported,
     authorizations: state.pendingRemoteApprovals?.filter(item => new Date(item.expiresAt).getTime() > Date.now()).map(item => ({ requestId: item.requestId, label: item.clientName || "未命名网页客户端" })) || [],
     authorizationFresh: state.authorizationsFresh === true });
 }
-window.addEventListener("token-coupon:pending-open", async event => {
-  const item = event.detail;
+async function openGlobalPendingPlan(item, tab) {
   const navigation = state.navigationSequence;
   try {
     const workspaces = await api("/api/v1/workspaces");
     if (navigation !== state.navigationSequence) return;
     state.workspaces = workspaces; renderWorkspaces();
-    await navigate(`/workspaces/${encodeURIComponent(item.workspaceId)}/plans/${encodeURIComponent(item.planningId)}/execution`);
-  } catch (error) { showToast(error.message, true); return; }
-  if (state.planning?.planningId !== item.planningId || state.route?.tab !== "execution") return;
+    if (state.workspace?.workspaceId === item.workspaceId && !state.plannings.some(plan => plan.planningId === item.planningId)) {
+      const latest = await api(`/api/v1/workspaces/${encodeURIComponent(item.workspaceId)}/plannings/${encodeURIComponent(item.planningId)}`);
+      if (navigation !== state.navigationSequence) return false;
+      state.plannings.push(latest);
+    }
+    const samePlan = state.planning?.planningId === item.planningId;
+    await navigate(`/workspaces/${encodeURIComponent(item.workspaceId)}/plans/${encodeURIComponent(item.planningId)}/${tab}`);
+    if (samePlan && state.route?.planningId === item.planningId) await loadPlanning(item.planningId);
+  } catch (error) { showToast(error.message, true); return false; }
+  return state.planning?.planningId === item.planningId && state.route?.tab === tab;
+}
+window.addEventListener("token-coupon:planning-todo-open", event => { void openGlobalPendingPlan(event.detail, event.detail.tab); });
+window.addEventListener("token-coupon:pending-open", async event => {
+  const item = event.detail;
+  if (!await openGlobalPendingPlan(item, "execution")) return;
   const target = [...$("#interaction-list").querySelectorAll("[data-request-id]")].find(card => card.dataset.requestId === item.requestId);
   if (!target) { showToast("此请求已处理或失效，已打开所属计划的最新状态。"); void globalThis.tokenCouponGlobalPending?.refresh(); return; }
   target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: "center" });
@@ -1124,6 +1135,7 @@ function applyDaemonHandshake(health) {
     state.operationRoutingSupported = health.capabilities?.operationRouting === 1;
     state.plannerProgressSupported = health.capabilities?.plannerProgress === 1;
     state.pendingQueueSupported = health.capabilities?.pendingQueue === 1;
+    state.planningTodosSupported = health.capabilities?.planningTodos === 1;
     if (health.protocol && health.protocol.major !== 1) showToast("界面与后台协议不兼容，写操作已暂停。请更新后重新打开；当前仍可查看记录。", true);
 }
 function disconnected(error) { globalThis.tokenCouponGlobalPending?.unavailable(); $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; showToast(error.message || "无法连接本机服务", true); }

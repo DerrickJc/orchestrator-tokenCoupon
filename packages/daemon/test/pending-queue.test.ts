@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -59,10 +60,47 @@ it("protects the summary endpoint with local authorization and advertises compat
   await new Promise<void>(resolve => server.listen(port, "127.0.0.1", resolve)); cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())));
   const origin = `http://127.0.0.1:${port}`;
   expect((await fetch(`${origin}/api/v1/pending`)).status).toBe(403);
+  expect((await fetch(`${origin}/api/v1/pending/plans`)).status).toBe(403);
   const landing = await fetch(origin), cookie = landing.headers.getSetCookie()[0]!.split(";")[0]!; await landing.body?.cancel();
   const headers = { Cookie: cookie };
   const health = await fetch(`${origin}/api/v1/health`, { headers }).then(response => response.json()); expect(health.capabilities.pendingQueue).toBe(1);
   const value = await fetch(`${origin}/api/v1/pending`, { headers }).then(response => response.json()); expect(value).toEqual({ epoch: h.service.epoch, total: 0, items: [], nextOffset: null });
   expect((await fetch(`${origin}/api/v1/pending?offset=-1`, { headers })).status).toBe(400);
   expect((await fetch(`${origin}/api/v1/pending?offset=invalid`, { headers })).status).toBe(400);
+  expect((await fetch(`${origin}/api/v1/pending/plans?cursor=invalid`, { headers })).status).toBe(400);
+  expect((await fetch(`${origin}/api/v1/pending/plans`, { headers }).then(response => response.json())).epoch).toBe(h.service.epoch);
 });
+
+it("bounds Plan observations, keeps corrupt/unavailable records visible, and updates approval/completion from core", async () => {
+  const h = await fixture(), ids: string[] = [];
+  async function finished(job: { jobId: string }) {
+    await expect.poll(async () => (await h.service.getJob(job.jobId)).status).not.toBe("running");
+    const record = await h.service.getJob(job.jobId); expect(record.status, record.error).toBe("succeeded"); return record;
+  }
+  for (let i = 0; i < 6; i++) {
+    const job = await finished(await h.service.startPlanning(h.one.workspaceId, randomUUID(), { provider: "mock", request: `增加问候函数和测试 ${i}`, executionDefaults: { runnerId: "mock", mode: "managed" } }));
+    ids.push((job.result as { planningId: string }).planningId);
+  }
+  const corruptId = randomUUID(), path = join(h.one.path, ".token-coupon", "planners", corruptId);
+  await mkdir(path); await writeFile(join(path, "conversation.json"), "broken");
+  await rename(h.two.path, join(h.root, "moved"));
+  async function all() {
+    const items: Awaited<ReturnType<typeof h.service.planningTodos>>["items"] = [], warnings: string[] = []; let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const page = await h.service.planningTodos(cursor); expect(page.scanned).toBeLessThanOrEqual(5);
+      items.push(...page.items); warnings.push(...page.warnings.map(warning => warning.message));
+      if (!page.nextCursor) return { items, warnings }; cursor = page.nextCursor;
+    }
+    throw new Error("cursor failed to terminate");
+  }
+  const pending = await all(); expect(pending.items).toHaveLength(6); expect(new Set(pending.items.map(item => item.planningId)).size).toBe(6);
+  expect(pending.warnings).toHaveLength(2); expect(JSON.stringify(pending.items)).not.toMatch(/"messages"|"prompt"|"context"/);
+  const id = ids[0]!; await finished(await h.service.review(h.one.workspaceId, id, randomUUID()));
+  expect((await all()).items.find(item => item.planningId === id)?.stage).toBe("awaiting_approval");
+  const view = await h.service.planningView(h.one, id);
+  await finished(await h.service.approve(h.one.workspaceId, id, randomUUID(), view.draft!.draftRevision));
+  expect((await all()).items.find(item => item.planningId === id)?.tab).toBe("execution");
+  await finished(await h.service.run(h.one.workspaceId, id, randomUUID(), { isolation: "shared", maxParallel: 1 }));
+  expect((await all()).items.some(item => item.planningId === id)).toBe(false);
+  await expect(h.service.planningTodos(Buffer.from(JSON.stringify({ workspaceId: h.one.workspaceId, planningId: "../outside" })).toString("base64url"))).rejects.toThrow("pending_cursor_invalid");
+}, 15_000);

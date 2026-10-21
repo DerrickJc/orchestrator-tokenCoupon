@@ -105,6 +105,14 @@ export interface PendingQueueItemDto {
 export interface PendingQueueDto {
   epoch: string; total: number; items: PendingQueueItemDto[]; nextOffset: number | null;
 }
+export interface PlanningTodoDto {
+  workspaceId: string; workspaceLabel: string; planningId: string; title: string; revision: number;
+  stage: string; label: string; tab: "overview" | "review" | "execution";
+}
+export interface PlanningTodoPageDto {
+  epoch: string; items: PlanningTodoDto[]; scanned: number; nextCursor: string | null;
+  warnings: Array<{ workspaceLabel: string; planningId?: string; message: string }>;
+}
 export interface PlanningWorkflowDto { stage: string; label: string; detail: string; operationId?: string; role?: string; options: string[]; approvalNotice: string | null; }
 export interface HandoffSummaryDto { operationId: string; role?: string; pendingInputs?: number; owner?: { source?: string; expired: boolean } | null; [key: string]: unknown; }
 export interface ExternalOperationSummaryDto {
@@ -235,6 +243,7 @@ export function createDaemonApi(transport: ApiTransport) {
       if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("pending_offset_invalid：分页位置无效");
       return readJson<PendingQueueDto>(transport, `/api/v1/pending?offset=${offset}`);
     },
+    planningTodos: (cursor?: string) => readJson<PlanningTodoPageDto>(transport, `/api/v1/pending/plans${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
     job: (jobId: string) => readJson<JobDto>(transport, `/api/v1/jobs/${pathId(jobId)}`),
     settings: () => readJson<SettingsDto>(transport, "/api/v1/settings"),
     remoteConnection: () => readJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection"),

@@ -32,3 +32,14 @@ it("routes web authorizations by request ID separately", () => {
   act(() => host.querySelector<HTMLButtonElement>(".global-pending-item")!.click());
   expect(value.onAuthorization).toHaveBeenCalledWith("oauth"); expect(value.onOpen).not.toHaveBeenCalled();
 });
+
+it("labels partial Plan scans and opens recovery in its existing page without executing it", () => {
+  const onOpen = vi.fn(), onPage = vi.fn();
+  const item = { workspaceId: "w", workspaceLabel: "Project", planningId: "p", title: "Recover plan", revision: 4, stage: "execution_interrupted", label: "执行已中断，待恢复", tab: "execution" as const };
+  const value = model({ items: [], plans: { page: { epoch: "one", items: [item], scanned: 5, nextCursor: "next", warnings: [{ workspaceLabel: "Other", message: "目录不可读" }] }, pageIndex: 0, loading: false, error: null, onOpen, onPage } });
+  act(() => root.render(createElement(GlobalPending, { model: value })));
+  expect(host.textContent).toContain("并非全部计划总量"); expect(host.textContent).toContain("目录不可读");
+  act(() => host.querySelector<HTMLButtonElement>(".global-pending-item")!.click()); expect(onOpen).toHaveBeenCalledWith(item);
+  const next = [...host.querySelectorAll("button")].find(button => button.textContent === "继续检查更多计划")!;
+  act(() => next.click()); expect(onPage).toHaveBeenCalledWith(1);
+});

@@ -30,7 +30,8 @@ import type {
   ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
   RunnerOutput, TaskDefinition, TaskRunnerFactory, TaskRunnerFactoryOptions,
 } from "@token-coupon/core";
-import type { ExternalOperationSummaryDto, HandoffSummaryDto, PendingQueueDto, PlanningViewDto, SessionDiagnosisDto } from "@token-coupon/client";
+import type { ExternalOperationSummaryDto, HandoffSummaryDto, PendingQueueDto, PlanningTodoPageDto, PlanningViewDto, SessionDiagnosisDto } from "@token-coupon/client";
+import { planningTodo } from "./planning-pending.js";
 
 export interface WorkspaceEntry { workspaceId: string; path: string; label: string; addedAt: string; }
 export interface JobRecord {
@@ -581,6 +582,38 @@ export class ApplicationService {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.requestId.localeCompare(b.requestId));
     return { epoch: this.epoch, total: entries.length, items: entries.slice(offset, offset + 100),
       nextOffset: offset + 100 < entries.length ? offset + 100 : null };
+  }
+
+  async planningTodos(cursor?: string): Promise<PlanningTodoPageDto> {
+    let after: { workspaceId: string; planningId?: string } | undefined;
+    if (cursor !== undefined) {
+      try {
+        if (cursor.length > 256 || !/^[\w-]+$/.test(cursor)) throw new Error();
+        const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+        if (!value || typeof value !== "object" || !/^[0-9a-f]{16}$/.test(value.workspaceId) ||
+          value.planningId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.planningId)) throw new Error();
+        after = value;
+      } catch { throw new Error("pending_cursor_invalid：计划待办分页标识无效"); }
+    }
+    const workspaces = this.listWorkspaces().sort((a, b) => a.workspaceId.localeCompare(b.workspaceId));
+    const index = after ? workspaces.findIndex(workspace => workspace.workspaceId >= after!.workspaceId) : 0;
+    const workspace = index < 0 ? undefined : workspaces[index];
+    const result: PlanningTodoPageDto = { epoch: this.epoch, items: [], scanned: 0, nextCursor: null, warnings: [] };
+    if (!workspace) return result;
+    const encode = (value: { workspaceId: string; planningId?: string }) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const nextWorkspace = workspaces[index + 1];
+    result.nextCursor = nextWorkspace ? encode({ workspaceId: nextWorkspace.workspaceId }) : null;
+    try {
+      await this.getWorkspace(workspace.workspaceId);
+      const page = await new PlannerStore(workspace.path).listIdsPage(after?.workspaceId === workspace.workspaceId ? after.planningId : undefined);
+      result.scanned = page.planningIds.length;
+      if (page.nextAfter) result.nextCursor = encode({ workspaceId: workspace.workspaceId, planningId: page.nextAfter });
+      for (const planningId of page.planningIds) {
+        try { const item = planningTodo(await this.planningView(workspace, planningId)); if (item) result.items.push(item); }
+        catch { result.warnings.push({ workspaceLabel: workspace.label, planningId, message: "计划记录无法读取，请在工作区检查；未将其当作已完成。" }); }
+      }
+    } catch { result.warnings.push({ workspaceLabel: workspace.label, message: "工作区不可访问，请检查目录；未将其当作没有待办。" }); }
+    return result;
   }
 
   async submit(workspaceId: string, kind: string, requestKey: string, payload: unknown, action: (signal: AbortSignal, jobId: string) => Promise<unknown>): Promise<JobRecord> {
