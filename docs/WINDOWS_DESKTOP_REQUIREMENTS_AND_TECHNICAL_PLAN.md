@@ -1172,6 +1172,25 @@ node packages/cli/dist/main.js daemon job show --id <jobId>
 
 类型检查、构建及全量回归通过，831 项通过、1 项 Windows 专用检查跳过；随后新增的 2 项流程分类用例也通过。测试覆盖 6 个真实 Mock 草案跨页、损坏记录、移动目录、审查→批准→执行完成的列表变化、游标终止、晚到响应和导航回调。实际 Electron 预览包在页面加载后通过 API 新建另一计划，再从待处理中心打开其审查页；原计划任务页、失效请求、两种主题及三次启动生命周期均通过。报告位于 `/tmp/token-coupon-desktop-plan-todos-report-20261021/`，证据仍限定为 Linux/Xvfb 和 Mock，不代表 Windows 实机或真实模型审批验收。
 
+### 13.89 桌面预览体积、启动与进程资源初始样本（2026-10-21）
+
+`desktop:smoke-gui` 现在额外生成 `desktop-measurements.json`：统计实际解包目录、独立运行时和 app.asar 的逻辑文件字节，记录三次启动从创建进程到首窗口和 Web 控件可操作的时间；在结束后的空闲界面间隔 2 秒采集 Electron 各进程工作集与 CPU API 样本。目录统计不跟随链接，也不输出文件名或内容，设有条目上限；Linux 另核验本次后台 owner 后读取其 VmRSS。Windows 独立 daemon 的 OS 内存采样尚未实现，报告明确为 unavailable，不填 0。
+
+| 本机 Linux/Xvfb 样本 | 结果 |
+| --- | --- |
+| 完整解包目录逻辑体积 | 722,418,827 字节，约 689 MiB，7,565 个文件 |
+| 随包运行时逻辑体积 | 425,820,469 字节，约 406 MiB |
+| 桌面 app.asar | 69,345 字节 |
+| 隔离 profile 首次启动：窗口 / Web 可操作 | 1,338 / 1,526 ms |
+| 复用已有后台重新打开：窗口 / Web 可操作 | 211 / 361 ms |
+| 安全停止后台后再打开：窗口 / Web 可操作 | 1,317 / 1,518 ms |
+| Electron 四个已报告进程的工作集之和 | 559,228 KB；共享页可能被重复计算 |
+| 独立 daemon VmRSS | 127,684 kB；仅本次 Linux Node 进程 |
+
+该样本使用 Electron 44.9.1、随包 Node 22.12、Mock 任务和明确关闭 Chromium sandbox 的 Linux GUI 环境，没有实际模型、项目构建或隧道进程。启动时间包含测试控制器/附着开销，没有清空 OS 缓存；体积不等于安装器压缩大小或文件系统实际分配；工作集之和不等于独占物理内存。因此只建立可复测初始数据，不宣称“轻量已达标”、固定启动目标或 Windows 性能。主要体积项包含完整平台 Claude SDK 可执行组件，未为缩小样本删减必需资源。
+
+采样字段参照实际安装的 Electron 类型及官方 [ProcessMetric](https://www.electronjs.org/docs/latest/api/structures/process-metric)、[MemoryInfo](https://www.electronjs.org/docs/latest/api/structures/memory-info)、[CPUUsage](https://www.electronjs.org/docs/latest/api/structures/cpu-usage) 定义，按 API 单位分别保留，CPU 首次读数不当作真实空闲用量。报告与截图位于 `/tmp/token-coupon-desktop-measurements-report-20261021/`；完整真实 Electron GUI 流程再次通过，另有文件字节/目录/链接循环统计回归通过。此次只修改验收工具，未改变产品调度或加入新的生产监测权限。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。

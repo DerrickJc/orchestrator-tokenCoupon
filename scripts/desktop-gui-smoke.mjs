@@ -1,13 +1,14 @@
 // Real Electron GUI acceptance in an isolated profile. No Runner or paid model calls.
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
 import { createClient } from "../packages/client/dist/index.js";
-import { discoverOwnedDaemon } from "../packages/client/dist/node.js";
+import { discoverOwnedDaemon, readDaemonOwnerCredential } from "../packages/client/dist/node.js";
+import { directoryFootprint } from "./desktop-measurements.mjs";
 
 function option(name) { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; }
 const executablePath = option("--executable");
@@ -29,6 +30,7 @@ delete environment.ELECTRON_RUN_AS_NODE;
 let application;
 const pageErrors = [];
 let lastOrigin;
+const startupSamples = [];
 
 async function bounded(promise, label, timeoutMs = 20_000) {
   let timer;
@@ -37,10 +39,12 @@ async function bounded(promise, label, timeoutMs = 20_000) {
 }
 
 async function launch() {
+  const started = performance.now();
   console.log("GUI smoke：启动隔离桌面窗口…");
   application = await electron.launch({ executablePath, chromiumSandbox: !noSandbox,
     args: ["--data-dir", profile, ...(noSandbox ? ["--no-sandbox"] : [])], env: environment, timeout: 60_000 });
   const page = await application.firstWindow({ timeout: 60_000 });
+  const firstWindowMs = Math.round(performance.now() - started);
   console.log("GUI smoke：已取得窗口，等待页面与 preload…");
   page.setDefaultTimeout(20_000);
   page.on("pageerror", error => pageErrors.push(error.message));
@@ -52,7 +56,35 @@ async function launch() {
   assert.equal(attachment.buildId, manifest.buildId);
   assert.equal(await bounded(application.evaluate(({ app }) => app.isPackaged), "inspect packaged startup"), true);
   assert.equal(await bounded(application.evaluate(({ app }) => app.getPath("userData")), "inspect desktop profile"), resolve(desktopHome));
+  await page.waitForFunction(() => document.querySelector("#global-pending-open")?.disabled === false);
+  startupSamples.push({ scenario: startupSamples.length === 0 ? "isolated-profile-first-start" : startupSamples.length === 1 ? "existing-daemon-reopen" : "stopped-daemon-restart",
+    firstWindowMs, webControlsReadyMs: Math.round(performance.now() - started) });
   return { page, attachment };
+}
+
+async function measurements() {
+  const footprint = { application: await directoryFootprint(dirname(executablePath)),
+    runtime: await directoryFootprint(join(dirname(executablePath), "resources/token-coupon-runtime")),
+    asarBytes: (await stat(join(dirname(executablePath), "resources/app.asar"))).size };
+  await bounded(application.evaluate(({ app }) => app.getAppMetrics()), "prime Electron CPU sample");
+  await new Promise(resolveSample => setTimeout(resolveSample, 2000));
+  const electronProcesses = await bounded(application.evaluate(({ app }) => app.getAppMetrics().map(metric => ({
+    pid: metric.pid, type: metric.type, creationTime: metric.creationTime, workingSetKB: metric.memory.workingSetSize,
+    cpuPercentSincePreviousSample: metric.cpu.percentCPUUsage,
+  }))), "sample Electron resources");
+  let daemonResidentMemory = { available: false, reason: "本平台尚未实现独立后台 OS 内存采样" };
+  if (process.platform === "linux") {
+    const credential = await readDaemonOwnerCredential(profile);
+    const verified = await discoverOwnedDaemon(profile);
+    assert.equal(verified.origin, lastOrigin);
+    const status = await readFile(`/proc/${credential.owner.pid}/status`, "utf8");
+    const residentKB = Number(status.match(/^VmRSS:\s+(\d+)\s+kB$/m)?.[1]);
+    if (Number.isFinite(residentKB)) daemonResidentMemory = { available: true, residentKB };
+  }
+  return { format: 1, scope: "isolated-preview-mock-no-real-runner-or-tunnel", startupSamples, footprint,
+    electronProcesses, sumElectronWorkingSetKB: electronProcesses.reduce((sum, metric) => sum + metric.workingSetKB, 0),
+    cpuSampleIntervalMs: 2000, daemonResidentMemory,
+    caveats: ["启动读数包含测试控制器和后台附着开销，不是清空 OS 缓存的冷启动基准。", "文件逻辑字节不是安装器压缩体积或文件系统实际分配。", "各进程工作集之和可能重复计算共享页；未作为独占物理内存。", "未采集模型、项目构建与隧道进程；缺失平台项明确为未知。"] };
 }
 
 async function closeWindow() {
@@ -212,6 +244,8 @@ try {
   assert.notEqual(attachment.epoch, firstEpoch, "after safe shutdown a new daemon must have a new epoch");
   assert.equal(await page.evaluate(() => window.tokenCouponDesktop.getNotificationsEnabled()), true);
   assert.deepEqual(pageErrors, [], "the real renderer should load without JavaScript errors");
+  const resourceMeasurements = await measurements();
+  await writeFile(join(outputDirectory, "desktop-measurements.json"), `${JSON.stringify(resourceMeasurements, null, 2)}\n`);
   const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
