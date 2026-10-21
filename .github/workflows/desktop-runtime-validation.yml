@@ -65,7 +65,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          xvfb-run -a npm run desktop:smoke-gui -- \
+          xvfb-run -a node scripts/desktop-gui-smoke.mjs \
             --executable "$RUNNER_TEMP/token-coupon-desktop/linux-unpacked/token-coupon" \
             --output "$RUNNER_TEMP/token-coupon-desktop/gui-smoke" --no-sandbox
 
@@ -75,7 +75,8 @@ jobs:
         run: |
           $output = Join-Path $env:RUNNER_TEMP "token-coupon-desktop"
           $executable = Join-Path $output "win-unpacked\Token Coupon.exe"
-          npm run desktop:smoke-gui -- --executable $executable --output (Join-Path $output "gui-smoke")
+          $guiOutput = Join-Path $output "gui-smoke"
+          node scripts/desktop-gui-smoke.mjs --executable $executable --output $guiOutput
 
       - name: Collect preview installer and acceptance reports
         if: always()
