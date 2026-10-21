@@ -14,6 +14,7 @@ jobs:
   desktop-runtime:
     name: ${{ matrix.os }} · Node 22.12.0
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,17 +39,45 @@ jobs:
 
       - run: npm test
 
-      - name: Stage and smoke native desktop runtime
+      - name: Package Linux desktop preview and smoke final runtime
         if: runner.os == 'Linux'
         shell: bash
         run: |
           export TOKEN_COUPON_BUNDLED_NODE="$(node -p 'process.execPath')"
-          npm run desktop:stage-resources -- --resources-dir "$RUNNER_TEMP/token-coupon-electron-resources"
+          npm run desktop:package -- --output "$RUNNER_TEMP/token-coupon-desktop"
 
-      - name: Stage and smoke native desktop runtime
+      - name: Build Windows NSIS preview and smoke final runtime
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $env:TOKEN_COUPON_BUNDLED_NODE = (node -p "process.execPath")
-          $resources = Join-Path $env:RUNNER_TEMP "token-coupon-electron-resources"
-          npm run desktop:stage-resources -- --resources-dir $resources
+          $output = Join-Path $env:RUNNER_TEMP "token-coupon-desktop"
+          npm run desktop:installer -- --output $output
+
+      - name: Real Linux Electron GUI lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          xvfb-run -a npm run desktop:smoke-gui -- \
+            --executable "$RUNNER_TEMP/token-coupon-desktop/linux-unpacked/token-coupon" \
+            --output "$RUNNER_TEMP/token-coupon-desktop/gui-smoke" --no-sandbox
+
+      - name: Real Windows Electron GUI lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "token-coupon-desktop"
+          $executable = Join-Path $output "win-unpacked\Token Coupon.exe"
+          npm run desktop:smoke-gui -- --executable $executable --output (Join-Path $output "gui-smoke")
+
+      - name: Collect preview installer and acceptance reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-preview-${{ runner.os }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/token-coupon-desktop/desktop-build.json
+            ${{ runner.temp }}/token-coupon-desktop/gui-smoke/**
+            ${{ runner.temp }}/token-coupon-desktop/*-preview-setup.exe

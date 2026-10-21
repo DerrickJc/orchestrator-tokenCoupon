@@ -1118,6 +1118,12 @@ npm run desktop:smoke-gui -- --executable "C:\preview\win-unpacked\Token Coupon.
 
 Linux 以 Xvfb 对实际 Electron 44.9.1 解包目录完成上述三次启动与两次后台生命周期验证，全部通过。报告与截图位于本机 `/tmp/token-coupon-desktop-gui-report-final-20261021/`，不作为源码资源提交。该 Linux 测试明确使用 `--no-sandbox`，报告标为 `disabled-for-linux-test`；产品 BrowserWindow 的 sandbox/contextIsolation 仍开启，但本证据不等于 Chromium 沙箱或 Windows GUI 已验收。Windows CI 和实机必须使用正常沙箱设置。
 
+### 13.84 原生平台桌面包、GUI CI 与验收产物（2026-10-21）
+
+双平台 workflow 现在从仅暂存 runtime 扩展为生成实际 Electron 预览包：Linux 构建解包目录，Windows 构建当前用户 NSIS 安装器；两者都先在最终包中运行 daemon HTTP smoke，再启动真实桌面 GUI 生命周期测试。Linux 作业使用 Xvfb 并明确记录测试关闭 Chromium sandbox；Windows 作业不传该开关。作业限时 30 分钟，隔离测试不会调用真实模型或连接用户现有 profile。
+
+CI artifact `desktop-preview-<OS>-<SHA>` 保留 7 天，只收集安装器、`desktop-build.json`、隔离 GUI 报告与截图，不上传用户 profile 或运行凭据。Windows 人工验收时可直接下载 NSIS 预览安装器，对照报告 SHA-256，在非管理员、中文/空格路径、安装升级及卸载场景中检查。此配置尚未推送执行；远端结果取得前不能标记 Windows CI、NSIS 生成或实际安装已通过。Linux 等价打包与 GUI 命令已在本机完成。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
@@ -1126,7 +1132,7 @@ Linux 以 Xvfb 对实际 Electron 44.9.1 解包目录完成上述三次启动与
 | --- | --- | --- |
 | C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份及暂存包身份核对、Linux/Windows 原生运行时 CI 已完成代码；继续取得远端 Windows workflow 证据、安装升级后的版本对账 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
-| D：桌面预览 | 现有 daemon 附着、目录选择、托盘、窗口恢复、开发模式后台启动原型、持久提醒开关、通知点击任务定位、空闲时安全停止后台、Linux x64 extraResources 闭环及 Windows Node Mock smoke 已完成；继续原生 Windows 依赖/资源组装、其余宿主能力接线、安装资源与原生 Windows GUI 验收 | 支持矩阵内真实 Windows 无开发环境闭环；交叉 smoke 不等于 Windows 打包；通知、托盘、目录窗口与进程生命周期仍不能用 WSL 结果代替 |
+| D：桌面预览 | 已实现受限附着、后台启动/安全停止、托盘/窗口恢复、通知和目录桥接、profile 隔离、解包与 NSIS 构建、双平台 GUI CI；Linux 实际解包与 GUI 生命周期已验证。继续取得 Windows 原生构建/安装、真实 Runner 和系统交互验收证据 | 支持矩阵内真实 Windows 无开发环境闭环；Linux/Xvfb 不等于 Windows 安装、正常沙箱、系统通知或原生弹窗验收 |
 | E：界面余项 | 统一布局、全局待处理中心、页面状态归属、主题与辅助技术 | 逐步补齐 UI-01 至 UI-15，增加真实浏览器验收 |
 | F：既有质量主线 | 关键任务产物 Review、成果追溯、可信用量、CLI daemon 模式 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
 | G：发布准备 | 用户资料、许可、安装升级与卸载、签名和渠道 | 干净 Windows、完整生产资源及兼容/回退报告 |
