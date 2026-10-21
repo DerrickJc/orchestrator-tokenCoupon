@@ -1,6 +1,6 @@
 # Windows 客户端需求与技术方案
 
-日期：2026-10-19，实施记录更新至 2026-10-21。状态：**实施中。已实现共享 Web/React 界面、Electron 受限附着与后台启动、托盘/通知/目录桥接、桌面 profile 隔离、完整运行时组装及 NSIS 预览构建入口；Linux 实际 Electron 解包与 GUI 生命周期 smoke 已通过。Windows 原生安装包生成/安装、正常沙箱 GUI、真实 Runner 与升级验收仍待完成；界面统一、质量协作与正式发布仍有缺口，详见第 14 节。**
+日期：2026-10-19，实施记录更新至 2026-10-21。状态：**实施中。已实现共享 Web/React 界面、Electron 受限附着与后台启动、托盘/通知/目录桥接、桌面 profile 隔离、完整运行时组装及 NSIS 预览构建。Linux 与 Windows 原生 CI 均已通过平台测试、打包后 daemon smoke 和真实 Electron GUI 生命周期；Windows 安装器的人工安装/升级、真实 Runner 与用户桌面交互验收仍待完成。界面统一、质量协作与正式发布仍有缺口，详见第 14 节。**
 
 本文整理需求讨论、开源项目检索与代码只读核查结果，并补充桌面前端设计和交互方案。代码核查是当时工作树的事实，不等同于已发布版本；实施前需重新记录代码基线和既有变更归属。
 
@@ -1195,7 +1195,9 @@ node packages/cli/dist/main.js daemon job show --id <jobId>
 
 草稿 PR 的首次 Windows job 已通过依赖安装与类型检查，但全量 `npm test` 报告 143 个测试文件中 29 个失败、835 项中 110 项失败；失败集中在 Windows 路径别名、POSIX 进程/套接字夹具、临时目录 ACL 假设及超时。Linux job 的全量测试、Linux Electron 打包与 GUI 生命周期均通过。不能把这批 Windows 失败描述为安装器失败，也不能把被测试门禁跳过的 Windows 安装器/GUI 说成已通过。
 
-CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:windows-native` 中的平台专属路径、原生进程、Windows Mutex、目录选择和桌面配置测试。第三轮运行中 Windows 原生测试已通过 10 个文件、20 项；NSIS 步骤因 PowerShell 下 `npm run ... -- --output <path>` 把 `--output` 识别成 npm 参数并丢失而失败，现改为直接调用打包脚本。此修正后的 Windows 安装器和 GUI 生命周期结果仍待 CI 重跑。该划分避免尚未移植的 POSIX 测试夹具挡住 Windows 原生检查；它不等于 Windows 全量回归通过。快捷隧道的 Windows 命名管道/本地网关行为、真实 coding agent、安装升级和普通用户账户权限矩阵仍单独待验证。
+CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:windows-native` 中的平台专属路径、原生进程、Windows Mutex、目录选择和桌面配置测试。Windows 原生测试通过 10 个文件、20 项。后续 NSIS 验收先发现 owner ACL 校验依赖的 `Get-Acl` 在 CI PowerShell 环境不可用，改为调用 .NET 文件/目录 ACL API；再发现 Windows GUI smoke 通过 `npm run` 传带空格的 exe 路径时参数被拆成位置参数，改为直接调用 Node 脚本。
+
+最终运行 [Desktop runtime validation #39559204811](https://github.com/DerrickJc/orchestrator-tokenCoupon/actions/runs/39559204811) 的 Ubuntu 与 Windows job 均通过。Windows job 已验证原生测试、NSIS 预览包生成、最终包内 daemon 的身份发现/鉴权/Mock 规划审查批准执行/重启持久化，以及真实 Electron GUI 生命周期；Ubuntu 完整 Vitest 与 Linux 打包/GUI 测试通过。此前 Windows 全量 Vitest 曾有 29 个文件、110 项失败，主要依赖 POSIX 进程、路径和临时目录假设，因此当前 Windows job 有意运行平台专属测试集，不将其表述为 Windows 全量回归通过。CI 通过不等于人工安装器安装升级或真实 Runner 验收；快捷隧道 Windows 行为、真实 coding agent、安装升级和普通用户权限矩阵仍待独立验证。
 
 ## 14. 剩余实施台账（2026-10-21）
 
@@ -1203,9 +1205,9 @@ CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:window
 
 | 范围 | 后续工作 | 验证边界 |
 | --- | --- | --- |
-| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份及暂存包身份核对、Linux/Windows 原生运行时 CI 已完成代码；继续取得远端 Windows workflow 证据、安装升级后的版本对账 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
+| C：共享契约 | 共享客户端、协议/能力握手、重启对账、暂存布局、受保护 daemon 挑战协议、本机 Node 发现器、读/主流程写 DTO、Session 诊断脱敏、Electron main/preload 附着原型、daemon 构建身份及暂存包身份核对、Linux/Windows 原生运行时 CI 与 Windows 包内 daemon/GUI smoke 已通过；继续安装升级后的版本对账 | 真实 HTTP 与前端桥接回归；旧客户端兼容，不自动重放写操作；Electron 只能附着经本机 owner/HMAC/PID 启动身份核验的实例 |
 | B：发布与平台基础 | 用户数据目录、Mock 资源、Windows 命令发现/身份/锁/Job Object 进程树及原生 Windows Node 22.12 Mock HTTP 闭环已完成；继续真实 Runner 安装认证、私有转发和活跃任务恢复 | 各自隔离测试；原生 Windows Mock 闭环不等于真实 Agent 或安装版验收，未通过前保留“不支持/未验证” |
-| D：桌面预览 | 已实现受限附着、后台启动/安全停止、托盘/窗口恢复、通知和目录桥接、profile 隔离、解包与 NSIS 构建、双平台 GUI CI；Linux 实际解包与 GUI 生命周期已验证。继续取得 Windows 原生构建/安装、真实 Runner 和系统交互验收证据 | Windows CI 单独运行原生测试集，尚未通过 Windows 全量 Vitest；Linux/Xvfb 不等于 Windows 安装、正常沙箱、系统通知或原生弹窗验收 |
+| D：桌面预览 | 已实现受限附着、后台启动/安全停止、托盘/窗口恢复、通知和目录桥接、profile 隔离、解包与 NSIS 构建；Linux/Windows 包内 daemon 与 GUI 生命周期 CI 已验证。继续人工安装升级、真实 Runner 和系统交互验收 | Windows CI 单独运行原生测试集，未通过 Windows 全量 Vitest；CI GUI smoke 不覆盖人工安装升级、系统通知或原生弹窗验收 |
 | E：界面余项 | 系统主题、减少动画、键盘跳转及全局 Runner/网页授权/计划审查批准恢复入口已实现；计划待办按需有界分页。继续统一布局、补齐页面状态归属与辅助技术矩阵 | 逐步补齐 UI-01 至 UI-15；已验证的主题对比度和键盘入口不替代完整无障碍审计 |
 | F：既有质量主线 | CLI daemon 模式的既有计划查询、审查批准、执行控制与交互已实现；继续新建/修订、事件跟随及恢复诊断；关键任务产物 Review、成果追溯、可信用量仍待各自 core 主线 | core 快照、批准、恢复与执行门禁验证后才暴露功能 |
 | G：发布准备 | 用户资料、许可、安装升级与卸载、签名和渠道 | 干净 Windows、完整生产资源及兼容/回退报告 |
