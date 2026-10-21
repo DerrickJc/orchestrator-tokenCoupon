@@ -30,7 +30,7 @@ import type {
   ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
   RunnerOutput, TaskDefinition, TaskRunnerFactory, TaskRunnerFactoryOptions,
 } from "@token-coupon/core";
-import type { ExternalOperationSummaryDto, HandoffSummaryDto, PlanningViewDto, SessionDiagnosisDto } from "@token-coupon/client";
+import type { ExternalOperationSummaryDto, HandoffSummaryDto, PendingQueueDto, PlanningViewDto, SessionDiagnosisDto } from "@token-coupon/client";
 
 export interface WorkspaceEntry { workspaceId: string; path: string; label: string; addedAt: string; }
 export interface JobRecord {
@@ -571,6 +571,18 @@ export class ApplicationService {
       .filter((item) => item.workspaceId === workspaceId && (!planningId || item.planningId === planningId));
   }
 
+  pendingQueue(offset = 0): PendingQueueDto {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("pending_offset_invalid：分页位置无效");
+    const entries = [...this.pendingInteractions.values()]
+      .filter(entry => !entry.signal.aborted && this.workspaces.has(entry.value.workspaceId))
+      .map(({ value }) => ({ requestId: value.requestId, workspaceId: value.workspaceId,
+        workspaceLabel: this.workspaces.get(value.workspaceId)!.label, planningId: value.planningId,
+        taskId: value.owner.taskId, runnerId: value.owner.runnerId, kind: value.request.kind, createdAt: value.createdAt }))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.requestId.localeCompare(b.requestId));
+    return { epoch: this.epoch, total: entries.length, items: entries.slice(offset, offset + 100),
+      nextOffset: offset + 100 < entries.length ? offset + 100 : null };
+  }
+
   async submit(workspaceId: string, kind: string, requestKey: string, payload: unknown, action: (signal: AbortSignal, jobId: string) => Promise<unknown>): Promise<JobRecord> {
     if (!/^[0-9a-f-]{36}$/i.test(requestKey)) throw new Error("idempotency_key_invalid：请为每次操作提供 UUID requestKey");
     const workspace = await this.getWorkspace(workspaceId);
@@ -1006,6 +1018,7 @@ export class ApplicationService {
     await this.publish({ type: "interaction.requested", workspaceId, planningId, taskId: owner.taskId, payload: {
       ...value, request: safeElicitationAuditRequest(safeRequest),
     } });
+    if (signal.aborted) throw signal.reason ?? new Error("interaction_cancelled");
     return new Promise((resolve, reject) => {
       const onAbort = () => { this.pendingInteractions.delete(requestId); reject(signal.reason ?? new Error("interaction_cancelled")); };
       signal.addEventListener("abort", onAbort, { once: true });

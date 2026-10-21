@@ -218,7 +218,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
       sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: DAEMON_BUILD_INFO.applicationVersion, buildId: DAEMON_BUILD_INFO.buildId, protocol: API_PROTOCOL,
         profile: { id: profileId, kind: service.workspaceEnvironment().isWsl ? "wsl" : "native", platform: process.platform },
-        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, pendingQueue: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -277,6 +277,9 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const source = body.source === "chatgpt" || body.source === "claude" || body.source === "other" ? body.source : undefined;
       await options.remoteMcp.decideApproval(parts[2]!, { decision: body.decision, ...(workspaceIds ? { workspaceIds } : {}), ...(source ? { source } : {}), ...(workspaceId ? { workspaceId } : {}), ...(scopes ? { scopes } : {}) });
       sendJson(response, 200, { accepted: true }); return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/pending") {
+      sendJson(response, 200, service.pendingQueue(Number(url.searchParams.get("offset") ?? 0))); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, await service.planningProviderOptions()); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/providers/deepseek-api/models") { sendJson(response, 200, await service.plannerModels(url.searchParams.get("refresh") === "1")); return; }

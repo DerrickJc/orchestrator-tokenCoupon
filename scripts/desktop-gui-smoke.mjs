@@ -111,10 +111,30 @@ async function verifyAppearance(page, origin) {
     console.error("Task view diagnostic:", await page.evaluate(() => ({ url: location.href, text: document.body.innerText.slice(-5000) })));
     throw error;
   }
+  console.log("GUI smoke：检查全局待处理入口和失效请求定位…");
+  await page.locator("#global-pending-open").click();
+  await page.getByText("没有当前有效的 Runner 请求。", { exact: true }).waitFor();
+  await page.locator("#global-pending-close").click();
+  assert.equal(await page.evaluate(() => document.activeElement.id), "global-pending-open");
+  // Deliberately stale read fixture: the UI must re-read the Plan rather than approve anything.
+  const pendingRoute = "**/api/v1/pending?*";
+  const currentHealth = await client.api("/api/v1/health");
+  await page.route(pendingRoute, route => route.fulfill({ json: { epoch: currentHealth.epoch, total: 1, nextOffset: null, items: [{
+    requestId: "stale-read-fixture", workspaceId: workspace.workspaceId, workspaceLabel: "失效请求定位测试", planningId: planned.planningId,
+    taskId: "implement-request", runnerId: "mock", kind: "question", createdAt: new Date().toISOString(),
+  }] } }));
+  await page.locator("#global-pending-open").click();
+  const pendingItem = page.locator(".global-pending-item").filter({ hasText: "失效请求定位测试" });
+  await pendingItem.waitFor(); await pendingItem.click();
+  await page.getByText("此请求已处理或失效，已打开所属计划的最新状态。", { exact: true }).waitFor();
+  assert.equal(await page.locator("#global-pending-dialog").evaluate(element => element.open), false);
+  await page.unroute(pendingRoute);
   for (const theme of ["light", "dark"]) {
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await page.waitForFunction(expected => matchMedia("(prefers-color-scheme: dark)").matches === (expected === "dark"), theme);
-    await page.evaluate(() => new Promise(resolveFrame => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))));
+    // Electron may acknowledge the emulation before all documents' computed styles update.
+    await page.waitForFunction(expected => getComputedStyle(document.documentElement).backgroundColor ===
+      (expected === "dark" ? "rgb(21, 27, 22)" : "rgb(245, 246, 242)"), theme);
     const contrast = await page.evaluate(() => {
       const luminance = color => {
         const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
@@ -188,7 +208,7 @@ try {
   const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
-    systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed",
+    systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed",
     chromiumSandbox: noSandbox ? "disabled-for-linux-test" : "enabled", nativeWindowsAcceptance: false };
   await writeFile(join(outputDirectory, "desktop-gui-smoke.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify({ outputDirectory, ...report }));

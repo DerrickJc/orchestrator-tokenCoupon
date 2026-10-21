@@ -38,6 +38,15 @@ it("encodes planning identifiers before building observation URLs", async () => 
   expect(paths).toEqual(["/api/v1/workspaces/workspace/plannings/plan%2Fone/events"]);
 });
 
+it("reads bounded global pending pages and rejects invalid pagination before sending", async () => {
+  const paths: string[] = [];
+  const client = createClient({ fetch: (async input => { paths.push(String(input)); return Response.json({ epoch: health.epoch, total: 0, items: [], nextOffset: null }); }) as typeof fetch });
+  expect((await client.domain.pendingQueue(100)).items).toEqual([]);
+  expect(paths).toEqual(["/api/v1/pending?offset=100"]);
+  expect(() => client.domain.pendingQueue(-1)).toThrow("pending_offset_invalid");
+  expect(paths).toHaveLength(1);
+});
+
 it("requires the daemon handshake for typed mutations and never retries an accepted-unknown write", async () => {
   const calls: Array<{ path: string; method: string; epoch: string | null; body: string }> = [];
   const fetcher = (async (input, init) => {

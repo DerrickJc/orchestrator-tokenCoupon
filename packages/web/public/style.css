@@ -525,6 +525,15 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .sidebar-footer-actions kbd { padding:1px 4px; border:1px solid var(--line); border-radius:4px; background:#f6f7f4; color:var(--muted); font:inherit; font-size:9px; }
 
 /* System appearance is shared by browser and Electron; no model or business state is stored here. */
+.global-pending-list { display:grid; gap:8px; max-height:45vh; overflow:auto; overflow-anchor:none; }
+.global-pending-item { display:flex; justify-content:space-between; gap:16px; text-align:left; width:100%; background:var(--paper); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:12px; cursor:pointer; font:inherit; font-size:13px; }
+.global-pending-item:hover:not(:disabled) { background:var(--soft); }
+.global-pending-item > span { min-width:0; overflow-wrap:anywhere; }
+.global-pending-item small { display:block; color:var(--muted); margin-top:5px; }
+.global-pending-item time { font-size:11px; color:var(--muted); }
+.global-pending-item:disabled { cursor:default; opacity:.65; }
+#global-pending-open { margin-top:14px; justify-content:space-between; }
+@media(max-width:600px) { .global-pending-item { flex-direction:column; gap:6px; } }
 :root { color-scheme:light dark; --focus-ring:#476a35; }
 :where(button,a,input,select,textarea,summary,[tabindex]):focus-visible { outline:2px solid var(--focus-ring); outline-offset:3px; }
 .skip-main { position:fixed; left:16px; top:12px; z-index:150; transform:translateY(-180%); padding:10px 16px; border:2px solid var(--focus-ring); border-radius:8px; background:var(--paper); color:var(--ink); font:inherit; }

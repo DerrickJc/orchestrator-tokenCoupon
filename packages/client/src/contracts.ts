@@ -97,6 +97,14 @@ export interface PendingInteractionDto {
   owner: { attemptId: string; taskId: string; runnerId: string; cwd: string };
   request: { kind: "approval" | "question" | "elicitation"; title: string; summary: string; cwd?: string; operation?: Record<string, unknown>; questions?: Array<Record<string, unknown>>; decisions?: Array<"allow-once" | "deny">; elicitation?: Record<string, unknown> };
 }
+/** Global index only; full prompts and approval payloads stay on the owning Plan. */
+export interface PendingQueueItemDto {
+  requestId: string; workspaceId: string; workspaceLabel: string; planningId: string;
+  taskId: string; runnerId: string; kind: "approval" | "question" | "elicitation"; createdAt: string;
+}
+export interface PendingQueueDto {
+  epoch: string; total: number; items: PendingQueueItemDto[]; nextOffset: number | null;
+}
 export interface PlanningWorkflowDto { stage: string; label: string; detail: string; operationId?: string; role?: string; options: string[]; approvalNotice: string | null; }
 export interface HandoffSummaryDto { operationId: string; role?: string; pendingInputs?: number; owner?: { source?: string; expired: boolean } | null; [key: string]: unknown; }
 export interface ExternalOperationSummaryDto {
@@ -223,6 +231,10 @@ export function createDaemonApi(transport: ApiTransport) {
     planning: (workspaceId: string, planningId: string) => readJson<PlanningViewDto>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/plannings/${pathId(planningId)}`),
     planningEvents: (workspaceId: string, planningId: string) => readJson<{ events: DaemonEventDto[]; retainedWindow: boolean }>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/plannings/${pathId(planningId)}/events`),
     interactions: (workspaceId: string, planningId: string) => readJson<PendingInteractionDto[]>(transport, `/api/v1/workspaces/${pathId(workspaceId)}/interactions/${pathId(planningId)}`),
+    pendingQueue: (offset = 0) => {
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("pending_offset_invalid：分页位置无效");
+      return readJson<PendingQueueDto>(transport, `/api/v1/pending?offset=${offset}`);
+    },
     job: (jobId: string) => readJson<JobDto>(transport, `/api/v1/jobs/${pathId(jobId)}`),
     settings: () => readJson<SettingsDto>(transport, "/api/v1/settings"),
     remoteConnection: () => readJson<RemoteConnectionStatusDto>(transport, "/api/v1/remote-connection"),
