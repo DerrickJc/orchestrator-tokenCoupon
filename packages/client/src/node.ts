@@ -34,18 +34,26 @@ $allowed=@($current,'S-1-5-18','S-1-5-32-544')
 $directoryDanger=0xD0040
 function sidOf($identity) { try { if ($identity -is [Security.Principal.IdentityReference]) { return $identity.Translate([Security.Principal.SecurityIdentifier]).Value }; return ([Security.Principal.NTAccount]::new([string]$identity)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { return '' } }
 function safeFile($path) {
+  $script:stage='owner-file:get-item'
   $item=Get-Item -LiteralPath $path -Force
+  $script:stage='owner-file:reparse-check'
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+  $script:stage='owner-file:get-acl'
   $acl=Get-Acl -LiteralPath $path
+  $script:stage='owner-file:owner-sid'
   if ((sidOf $acl.Owner) -notin $allowed) { return $false }
-  foreach($rule in $acl.Access) { $sid=sidOf $rule.IdentityReference; if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed) { return $false } }
+  $script:stage='owner-file:access-rules'
+  foreach($rule in $acl.Access) { $script:stage='owner-file:access-rule-sid'; $sid=sidOf $rule.IdentityReference; if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed) { return $false } }
   return $true
 }
 function safeDirectory($path) {
+  $script:stage='directory:get-item'
   $item=Get-Item -LiteralPath $path -Force
+  $script:stage='directory:reparse-check'
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+  $script:stage='directory:get-acl'
   $acl=Get-Acl -LiteralPath $path
-  foreach($rule in $acl.Access) { $sid=sidOf $rule.IdentityReference; if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed -and (([int]$rule.FileSystemRights -band $directoryDanger) -ne 0)) { return $false } }
+  foreach($rule in $acl.Access) { $script:stage='directory:access-rule-sid'; $sid=sidOf $rule.IdentityReference; if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed -and (([int]$rule.FileSystemRights -band $directoryDanger) -ne 0)) { return $false } }
   return $true
 }
 try {
@@ -59,7 +67,7 @@ try {
     $cursor=$cursor.Parent; $depth++
   }
   [Console]::Out.Write('private')
-} catch { [Console]::Out.Write('acl-probe-error='+$stage+';'+$_.Exception.GetType().Name); exit 6 }`;
+} catch { $command=''; if ($_.Exception -is [System.Management.Automation.CommandNotFoundException]) { $command=$_.Exception.CommandName }; [Console]::Out.Write('acl-probe-error='+$stage+';'+$_.Exception.GetType().Name+';'+$command); exit 6 }`;
   try {
     const result = await execFile(powershellPath(), encodedPowerShell(script), { windowsHide: true, timeout: 8000, maxBuffer: 4096 });
     if (result.stdout.trim() !== "private") throw new Error("daemon_discovery_profile_unprotected：Windows owner 文件 ACL 校验未返回可信结果");
@@ -68,9 +76,9 @@ try {
     const code = error && typeof error === "object" && "code" in error ? String((error as NodeJS.ErrnoException).code) : "unknown";
     const output = error && typeof error === "object" && "stdout" in error ? String((error as { stdout?: unknown }).stdout ?? "") : "";
     const depth = output.match(/directory-depth=(\d+)/)?.[1];
-    const probeError = output.match(/acl-probe-error=([a-z-]+(?:=\d+)?);([A-Za-z]+)/);
+    const probeError = output.match(/acl-probe-error=([a-z-]+(?::[a-z-]+)?(?:=\d+)?);([A-Za-z]+);([A-Za-z0-9_-]*)/);
     const reason = code === "4" ? "owner 文件 ACL 对其他用户开放" : code === "5" ? `profile 目录链允许其他用户替换${depth ? `（父目录层级 ${depth}）` : ""}`
-      : code === "6" && probeError ? `Windows ACL 检查失败（${probeError[1]}，${probeError[2]}）` : "Windows ACL 查询失败";
+      : code === "6" && probeError ? `Windows ACL 检查失败（${probeError[1]}，${probeError[2]}${probeError[3] ? `：${probeError[3]}` : ""}）` : "Windows ACL 查询失败";
     throw new Error(`daemon_discovery_profile_unprotected：${reason}，拒绝信任本机后台`);
   }
 }
