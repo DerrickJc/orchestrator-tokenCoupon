@@ -1280,7 +1280,11 @@ R1 增加桌面断连提示、页面和托盘的“重新连接后台”入口�
 
 本机验证：全仓库类型检查与生产构建通过；桌面 profile、连接状态机、IPC 策略和工作区页面定向回归 164 项通过；Linux 全量回归 144 个测试文件、844 项通过，1 个 Windows 专属文件/2 项用例跳过。新增用例覆盖连接失败后手动重试、去重、profile 不符、加载失败、超限输入、按计划恢复、旧草案冲突与存储白名单。
 
-真实 Linux 打包客户端 GUI smoke 已验证：保留窗口并杀死本次隔离后台后，重新发现新 epoch/origin、恢复未提交需求/澄清/草案、没有业务写请求；相同目录重复启动复用，不同目录有原生提示且未创建另一后台。报告位于本次本机临时目录 `/tmp/token-coupon-desktop-reconnect-wait-20261021/desktop-gui-smoke.json`，含恢复页面截图。验收脚本已纳入 Linux/Windows 原生 CI，新增连接状态机测试已纳入 `test:windows-native`；此次 Windows CI 结果待后续回填，不以 Linux 通过代替原生 Windows 验证。
+真实 Linux 打包客户端 GUI smoke 已验证：保留窗口并杀死本次隔离后台后，重新发现新 epoch/origin、恢复未提交需求/澄清/草案、没有业务写请求；相同目录重复启动复用，不同目录调用原生提示且未创建另一后台。报告位于本次本机临时目录 `/tmp/token-coupon-desktop-reconnect-wait-20261021/desktop-gui-smoke.json`，含恢复页面截图。第二实例测试拦截原生消息框并核对内容，不代替人工弹窗外观与操作验收。
+
+修复提交 `0813526` 已通过 [Windows/Linux 原生 CI 39624633039](https://github.com/DerrickJc/orchestrator-tokenCoupon/actions/runs/39624633039)。Windows 专项为 12 个测试文件、28 项通过，并通过 NSIS 预览安装包构建、包内 daemon 闭环与启用 Chromium sandbox 的真实 GUI smoke；Linux 全量、打包及真实 GUI smoke 也通过。两端 GUI 均记录 `liveDaemonReconnect`、`draftRecoveryNoReplay`、`secondInstanceProfileGuard` 通过。此结果不是 Windows 全量 Vitest 通过，也不代表安装器已在干净 Windows 上完成人工安装升级或真实 Runner 验收。
+
+修复后复查了 main/preload 的 IPC 来源限制、重新附着调用链、重连失败与并发、草案原版本保留、跨计划输入归属和业务写请求路径；R1/R2 已关闭，本轮修复范围未发现新的阻塞缺陷。当前仍保留预览定位；第 14 节列出的平台和发布缺口继续保留。此次未合并到 `main`。
 
 ## 14. 剩余实施台账（2026-10-21）
 
