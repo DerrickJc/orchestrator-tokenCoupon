@@ -1390,6 +1390,26 @@ NSIS 外壳及归档头等另有少量开销。完整 Electron 与独立 Node �
 
 下载验收继续使用 Release `.exe` 和 `SHA256SUMS`。原有 Chrome Actions ZIP 任务不会自动切换来源；判断链路需先核对当前任务文件名与来源域名。小样本速度只证明当时网络表现，不能保证持续带宽；文档、日志和截图不得保存临时签名下载链接。
 
+### 13.98 原生 Windows 网页快捷连接实施方案
+
+本轮范围是补齐 Windows 桌面/daemon 的 Cloudflare Quick Tunnel，不实施 13.97 的包体积优化，不迁移框架。沿用现有连接、工作区权限、OAuth PKCE、MCP 工具和持久化格式；使用已有官方 Windows x64 cloudflared 按需安装与校验，不携带额外执行器或要求 WSL。
+
+架构为：网页 HTTPS → cloudflared → 常驻 supervisor 的 loopback 公网网关 → 私有 IPC → 业务 daemon 的 MCP/OAuth。Windows 私有 IPC 使用 `\\.\pipe\tc-gateway-<随机标识>`，Linux/WSL 继续使用受目录权限保护的 Unix socket。Windows 管道名称可被枚举，因此不能把名字当凭证；在同一连接中完成随机挑战和双向 HMAC 后才交给 HTTP，任何请求头、授权令牌或正文都不能先发送给未经验证的后端。管道不做 `lstat/isSocket`，路径只接受本应用的严格格式，拒绝任意文件、其他管道、URL 与 TCP 目标。
+
+常驻控制协议继续通过随机凭证和 loopback 控制端口执行 attach/detach/status/stop。Windows 用当前用户、SYSTEM/管理员受限 ACL 保护专用隧道目录、launch 与 supervisor 状态；不把 POSIX mode 位当成 Windows 权限验证。继续用 Windows Mutex 协调启动，记录 supervisor 和 cloudflared 子进程的实际创建时间；身份不可核验时不自动替换或结束未知进程。进程中断、地址变化与授权是否保留，沿用现有可核验恢复规则。
+
+实施顺序与建议提交：
+
+1. 私有 IPC/双向认证、Windows 专用目录权限及单元测试；`feat: add authenticated Windows private gateway transport`。
+2. 接入 gateway 与常驻隧道，修复 Windows 子进程身份，开放平台能力；保留 POSIX 老协议兼容。`feat: enable persistent quick connections on native Windows`。
+3. 原生 Windows/Linus 集成测试及包内 smoke、文档/界面边界说明；`test: verify native Windows quick connection lifecycle`。
+
+必须覆盖：无凭证/错误凭证/伪造后端在业务数据发送前失败；错误路径和畸形握手；握手超时、客户端中断、后台停止时清理；网关端口占用时不启动公网隧道；普通用户目录、中文/空格路径；重复启动只创建一个隧道；daemon 断开时返回 503、恢复后原地址可用；旧实例 detach 不解绑新实例；显式停止与启动中取消清理两个进程；supervisor 崩溃及 PID 复用不误杀；旧 WSL 路径和固定 HTTPS 回归。
+
+Windows CI 使用真实 Node 子进程、Named Pipe、Mutex、进程身份和 HTTP 转发，cloudflared 行为由明确标注的本地假组件隔离；另进行官方 cloudflared 的公网实际启动、元数据及 MCP 自检。真实 ChatGPT/Claude 登录、连接授权与工具调用需要对应网页账号配合，必须与模拟 OAuth 回归分开记录；网络/代理导致公网验证失败时给出实际错误，不能据此宣称网页联调已通过。Quick Tunnel 的无 SLA、地址随新隧道变化、不支持 SSE 等上游边界见 [Cloudflare 官方说明](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)，沿用 JSON 响应型 MCP，不把完整控制台代理到公网。
+
+只有实现、原生 CI 与运行验证完成后，才将历史的“原生 Windows 暂不支持”更新为准确能力说明。安装器发布另行确认，旧预览不自动具备新功能；失败时保留本机 Agent 与固定 HTTPS 配置，不自动撤销已有网页授权或新建替代连接。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
