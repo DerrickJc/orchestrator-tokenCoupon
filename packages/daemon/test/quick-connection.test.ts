@@ -228,7 +228,7 @@ describe("Quick Tunnel connection", () => {
     await restored.stop(); expect(restored.grants()).toHaveLength(0);
     const stopped = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => stopped.shutdown());
     await stopped.initialize(); expect(stopped.status().enabled).toBe(false);
-  }, 20_000);
+  }, persistentTimeout);
 
   it("retains dynamic OAuth client metadata for reauthorization and exposes only safe request history", async () => {
     const h = await fixture();
