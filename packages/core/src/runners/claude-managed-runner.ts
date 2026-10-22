@@ -1,6 +1,6 @@
-import { access } from "node:fs/promises";
-import { constants } from "node:fs";
-import { delimiter, join } from "node:path";
+import { resolveNativeExecutable, spawnNative } from "../native-command.js";
+import { resolveAgentExecutable } from "../agent-executable.js";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 import type { CanUseTool, PermissionResult, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -15,11 +15,7 @@ export interface ClaudeManagedSettings {
 }
 
 async function findExecutable(name: string): Promise<string> {
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    const candidate = join(directory, name);
-    try { await access(candidate, constants.X_OK); return candidate; } catch { /* continue PATH lookup */ }
-  }
-  throw new Error(`找不到 ${name} 可执行文件，请先安装并登录 Claude Code`);
+  return name === "claude" ? resolveAgentExecutable("claude-code") : resolveNativeExecutable(name, "Claude Code");
 }
 
 export class ClaudeManagedRunner implements Runner {
@@ -33,7 +29,7 @@ export class ClaudeManagedRunner implements Runner {
 
   async run(input: RunnerInput, context: RunnerContext): Promise<RunnerResult> {
     if (!context.requestInteraction) throw new Error("Claude managed 模式缺少人工交互 owner");
-    await findExecutable("claude");
+    const executable = await findExecutable("claude");
     const abortController = new AbortController();
     let started = false;
     let nativeOutcome: RunnerResult["nativeOutcome"] = "unknown";
@@ -52,6 +48,9 @@ export class ClaudeManagedRunner implements Runner {
     let executionError: string | undefined;
     let cleanupStatus: RunnerResult["cleanupStatus"] = "completed";
     let query: ReturnType<typeof claudeQuery> | undefined;
+    let nativeProcess: ChildProcessWithoutNullStreams | undefined;
+    let nativeExit: Promise<number | null> | undefined;
+    let nativeStderr = "";
     const closeQuery = () => {
       try { query?.close(); }
       catch (error) {
@@ -93,6 +92,7 @@ export class ClaudeManagedRunner implements Runner {
       prompt: input.prompt,
       options: {
         cwd: input.cwd,
+        pathToClaudeCodeExecutable: executable,
         ...(input.execution.modelId ? { model: input.execution.modelId } : {}),
         permissionMode: this.settings.permissionMode ?? "default",
         ...(this.settings.allowedTools ? { allowedTools: this.settings.allowedTools } : {}),
@@ -102,6 +102,15 @@ export class ClaudeManagedRunner implements Runner {
         persistSession: false,
         abortController,
         canUseTool,
+        ...(process.platform === "win32" ? { spawnClaudeCodeProcess: (options: import("@anthropic-ai/claude-agent-sdk").SpawnOptions) => {
+          const child = nativeProcess = spawnNative(options.command, options.args, {
+            ...(options.cwd ? { cwd: options.cwd } : {}), env: options.env, signal: options.signal,
+            stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+          });
+          nativeExit = new Promise(resolve => child.once("close", code => resolve(code)));
+          child.stderr.setEncoding("utf8").on("data", (chunk: string) => { nativeStderr = (nativeStderr + chunk).slice(-4096); context.onActivity?.(); });
+          return child;
+        } } : {}),
       },
     });
     if (abortController.signal.aborted) closeQuery();
@@ -151,6 +160,22 @@ export class ClaudeManagedRunner implements Runner {
     } finally {
       context.signal.removeEventListener("abort", cancelAndClose);
       closeQuery();
+      if (nativeProcess && nativeExit) {
+        const child = nativeProcess;
+        const forceStop = setTimeout(() => child.kill(), 2500);
+        let deadline: NodeJS.Timeout | undefined;
+        const result = await Promise.race([
+          nativeExit.then(code => ({ closed: true as const, code })),
+          new Promise<{ closed: false }>(resolve => { deadline = setTimeout(() => resolve({ closed: false }), 5000); }),
+        ]);
+        clearTimeout(forceStop); clearTimeout(deadline);
+        if (!result.closed) { cleanupStatus = "failed"; executionError ??= "Windows Claude 进程树退出尚未确认"; }
+        else if (result.code !== 0 && !abortController.signal.aborted) {
+          nativeOutcome = "failed";
+          executionError ??= `Windows Claude 退出码 ${result.code}：${redact(nativeStderr)}`;
+          await context.recordEvent?.({ type: "runner.native.finished", outcome: "failed", reason: executionError });
+        }
+      }
     }
     if (abortController.signal.aborted && nativeOutcome === "unknown") {
       nativeOutcome = "cancelled";

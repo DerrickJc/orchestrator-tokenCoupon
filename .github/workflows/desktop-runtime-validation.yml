@@ -1,0 +1,150 @@
+name: Desktop runtime validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - desktop-preview-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-runtime:
+    name: ${{ matrix.os }} · Node 22.12.0
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      TOKEN_COUPON_BUILD_ID: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.12.0
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - name: Full test suite on Linux
+        if: runner.os == 'Linux'
+        run: npm test
+
+      - name: Native Windows process, path and desktop tests
+        if: runner.os == 'Windows'
+        run: npm run test:windows-native
+
+      - name: Package Linux desktop preview and smoke final runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export TOKEN_COUPON_BUNDLED_NODE="$(node -p 'process.execPath')"
+          npm run desktop:package -- --output "$RUNNER_TEMP/token-coupon-desktop"
+
+      - name: Build Windows NSIS preview and smoke final runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:TOKEN_COUPON_BUNDLED_NODE = (node -p "process.execPath")
+          $output = Join-Path $env:RUNNER_TEMP "token-coupon-desktop"
+          npm run build
+          node scripts/package-desktop.mjs --mode installer --output $output
+
+      - name: Install optional Agents in a temporary profile (no model calls)
+        run: node scripts/agent-component-smoke.mjs --agent both --output "${{ runner.temp }}/token-coupon-desktop/agent-components.json"
+
+      - name: Private gateway and persistent connection lifecycle (local fixture)
+        run: node scripts/quick-connection-smoke.mjs --local --output "${{ runner.temp }}/token-coupon-desktop/quick-connection-local.json"
+
+      # External network evidence is separate from deterministic protocol/lifecycle tests.
+      - name: Native Windows public Quick Tunnel probe (network-dependent)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: node scripts/quick-connection-smoke.mjs --public --output "${{ runner.temp }}/token-coupon-desktop/quick-connection.json"
+
+      - name: Real Linux Electron GUI lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          xvfb-run -a node scripts/desktop-gui-smoke.mjs \
+            --executable "$RUNNER_TEMP/token-coupon-desktop/linux-unpacked/token-coupon" \
+            --output "$RUNNER_TEMP/token-coupon-desktop/gui-smoke" --no-sandbox
+
+      - name: Real Windows Electron GUI lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "token-coupon-desktop"
+          $executable = Join-Path $output "win-unpacked\Token Coupon.exe"
+          $guiOutput = Join-Path $output "gui-smoke"
+          node scripts/desktop-gui-smoke.mjs --executable $executable --output $guiOutput
+
+      - name: Collect preview installer and acceptance reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-preview-${{ runner.os }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/token-coupon-desktop/desktop-build.json
+            ${{ runner.temp }}/token-coupon-desktop/agent-components.json
+            ${{ runner.temp }}/token-coupon-desktop/quick-connection.json
+            ${{ runner.temp }}/token-coupon-desktop/quick-connection-local.json
+            ${{ runner.temp }}/token-coupon-desktop/gui-smoke/**
+            ${{ runner.temp }}/token-coupon-desktop/*-preview-setup.exe
+
+  publish-preview:
+    name: Publish verified Windows preview
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-preview-')
+    needs: desktop-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.12.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-preview-Windows-${{ github.sha }}
+          path: ${{ runner.temp }}/desktop-artifact
+      - name: Verify installer and prepare allowlisted release assets
+        env:
+          EXPECTED_BUILD_ID: ${{ github.sha }}
+        run: node scripts/prepare-desktop-release.mjs "$RUNNER_TEMP/desktop-artifact" "$RUNNER_TEMP/desktop-release" "$EXPECTED_BUILD_ID"
+      - name: Upload to a draft, then publish as prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/desktop-release"
+          installer="$(node -p '"Token-Coupon-" + require("./packages/desktop/package.json").version + "-x64-preview-setup.exe"')"
+          gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --latest=false \
+            --title "Token Coupon Windows preview · $RELEASE_TAG" \
+            --notes-file "$release_dir/RELEASE_NOTES.md" \
+            "$release_dir/$installer" "$release_dir/SHA256SUMS"
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          echo "### Windows preview download" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/$GH_REPO/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

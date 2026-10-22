@@ -3,6 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import type { RunnerContext, ProcessResult, RunnerOutput } from "../runner.js";
 
 export interface ChildProcessOptions {
+  spawn?: typeof spawn;
   executable: string;
   args: string[];
   cwd: string;
@@ -22,7 +23,7 @@ export function runChildProcess(options: ChildProcessOptions): Promise<ProcessRe
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(options.executable, options.args, {
+      child = (options.spawn ?? spawn)(options.executable, options.args, {
         cwd: options.cwd,
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",

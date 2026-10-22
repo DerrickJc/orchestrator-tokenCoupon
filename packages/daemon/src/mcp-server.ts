@@ -130,23 +130,23 @@ export function createMcpServer(service: ApplicationService, principal?: RemoteM
     if (Buffer.byteLength(JSON.stringify(input.reply), "utf8") > 64 * 1024) throw new Error("external_reply_invalid：最终回复最多 64 KiB");
     const job = await receipt(await service.external.submit(input.workspaceId, input.operationId, scopedRequestKey(input.requestKey), input.reply, actor(input.workspaceId), proof(input)));
     const operation = await service.external.context(input.workspaceId, input.operationId, false) as { planningId: string; role: string };
-    const view = job.status === "succeeded" ? await service.planningView(await service.getWorkspace(input.workspaceId), operation.planningId) as Record<string, unknown> : undefined;
+    const view = job.status === "succeeded" ? await service.planningView(await service.getWorkspace(input.workspaceId), operation.planningId) : undefined;
     return { job, operation, ...(view ? { workflow: view.workflow, draft: view.draft, review: view.review, confirmationState: view.confirmationState } : {}),
       nextAction: job.status === "succeeded"
-        ? operation.role === "plan" && view?.draft && view.status === "draft_ready" && !(view.review as { current?: boolean } | undefined)?.current
+        ? operation.role === "plan" && view?.draft && view.status === "draft_ready" && !view.review?.current
           ? "本轮默认继续审查一次：planning_query 一次读取最新计划与 handoffs，直接领取已有操作；复用已有 Review，未准备时 planning_prepare(role=review)，领取后按协议 external_submit。只有需用户取舍、宿主审批、权限、连接或额度阻断时暂停。不得仅准备就宣布审查完成。"
-          : operation.role === "review" ? "审查已落库。用普通回复汇总当前版本、具体问题及 A/B/C 下一步选项；用户可选择按建议修订／自定义／保留问题，批准和执行由 4177 完成。不要无限自动修订。" : (view?.review as { current?: boolean } | undefined)?.current ? "当前已有有效审查，不重复准备。用普通回复提供：A 查看差异，B 继续补充，C 前往 4177 批准。" : "用普通回复显示具体澄清与 A/B/C 方案、自定义入口，然后等待用户。"
+          : operation.role === "review" ? "审查已落库。用普通回复汇总当前版本、具体问题及 A/B/C 下一步选项；用户可选择按建议修订／自定义／保留问题，批准和执行由 4177 完成。不要无限自动修订。" : view?.review?.current ? "当前已有有效审查，不重复准备。用普通回复提供：A 查看差异，B 继续补充，C 前往 4177 批准。" : "用普通回复显示具体澄清与 A/B/C 方案、自定义入口，然后等待用户。"
         : job.status === "failed" ? "读取 diagnostic，复用当前 operationId、证据与领取凭证进行有界修正；过期才重新准备。" : "operation_query：提交仍在处理中，尚不能宣布结果成功。" };
   }));
   if (canUse("planning:read")) server.registerTool("planning_query", { description: "已有 workspaceId / planningId 时优先调用：一次核验项目授权并返回 workspace、草案、需求、当前审查、handoffs 与待提交操作；直接用 handoffs 中的 operationId 领取，无需重复 workspace_query / handoff_query。无 planningId 时仅列摘要。", inputSchema: z.object({ workspaceId, planningId: uuid.optional() }).strict(), annotations: readOnly }, (input) => guard("planning_query", async () => {
     requireAccess(input.workspaceId, "planning:read");
     const workspace = await service.getWorkspace(input.workspaceId);
     if (input.planningId) {
-      const view = await service.planningView(workspace, input.planningId) as Record<string, unknown>;
+      const view = await service.planningView(workspace, input.planningId);
       const { messages: _messages, turns: _turns, session: _session, localOperation: _localOperation, ...context } = view;
       return context;
     }
-    const plans = await service.listPlannings(input.workspaceId) as Array<Record<string, unknown>>;
+    const plans = await service.listPlannings(input.workspaceId);
     return { plannings: plans.map((plan) => ({ planningId: plan.planningId, title: plan.title, status: plan.status, revision: plan.revision, execution: plan.execution, externalOperations: plan.externalOperations })) };
   }));
   if (canUse("planning:read")) server.registerTool("operation_query", { description: "只读查询此获准项目中已接受的后台操作。请求断线后查询原 jobId，不盲目重新执行。", inputSchema: z.object({ workspaceId, jobId: uuid }).strict(), annotations: readOnly }, (input) => guard("operation_query", async () => {
@@ -163,12 +163,13 @@ export function createMcpServer(service: ApplicationService, principal?: RemoteM
     const workspace = await service.getWorkspace(input.workspaceId);
     const until = Date.now() + (input.waitMs ?? 0);
     for (;;) {
-      const view = await service.planningView(workspace, input.planningId) as { status: string; draft?: { draftRevision: number }; review?: { reviewId: string; current: boolean }; session?: { sessionId: string; status: string; tasks: Array<{ taskId: string; status: string; reasonCode?: string; attempts?: unknown[] }> }; interactions: Array<{ requestId: string }> };
+      const view = await service.planningView(workspace, input.planningId);
+      const session = view.session && "sessionId" in view.session ? view.session : undefined;
       const data = { planningStatus: view.status, draftRevision: view.draft?.draftRevision, review: view.review ? { reviewId: view.review.reviewId, current: view.review.current } : null,
-        sessionId: view.session?.sessionId, status: view.session?.status ?? "not_created", tasks: view.session?.tasks.map((task) => ({ taskId: task.taskId, status: task.status, reasonCode: task.reasonCode, attempts: task.attempts?.length ?? 0 })), waitingRequestIds: view.interactions.map(({ requestId }) => requestId) };
+        sessionId: session?.sessionId, status: session?.status ?? "not_created", tasks: session?.tasks.map((task) => ({ taskId: task.taskId, status: task.status, reasonCode: task.reasonCode, attempts: task.attempts.length })), waitingRequestIds: view.interactions.map(({ requestId }) => requestId) };
       const revision = createHash("sha256").update(JSON.stringify(data)).digest("hex");
       if (revision !== input.knownRevision || Date.now() >= until) return { ...data, revision, unchanged: revision === input.knownRevision,
-        ...(input.includeResult ? { session: view.session } : {}), nextAction: view.interactions.length ? "请用户在本地控制台处理审批/问答" : "按需继续 observe 或查看交付" };
+        ...(input.includeResult ? { session } : {}), nextAction: view.interactions.length ? "请用户在本地控制台处理审批/问答" : "按需继续 observe 或查看交付" };
       await new Promise((resolve) => setTimeout(resolve, Math.min(500, until - Date.now())));
     }
   }));

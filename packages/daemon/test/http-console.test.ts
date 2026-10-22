@@ -25,12 +25,22 @@ describe("local web console API", () => {
       const origin = `http://127.0.0.1:${port}`;
       const landing = await fetch(origin);
       expect(landing.status).toBe(200);
+      const webManifest = JSON.parse(await readFile(join(process.cwd(), "packages/web/dist/.vite/manifest.json"), "utf8")) as Record<string, { file?: string }>;
+      const builtScripts = [...new Set(Object.values(webManifest).map(entry => entry.file).filter((file): file is string => typeof file === "string" && file.endsWith(".js")))];
+      expect(builtScripts.length).toBeGreaterThan(1);
+      for (const asset of builtScripts) {
+        const response = await fetch(`${origin}/${asset}`);
+        expect(response.status, `missing built web asset ${asset}`).toBe(200);
+        expect(response.headers.get("content-type")).toContain("javascript");
+      }
       const cookie = landing.headers.getSetCookie()[0]?.split(";", 1)[0];
       expect(cookie).toContain("tc_local=");
       expect((await fetch(`${origin}/api/v1/health`)).status).toBe(403);
-      const health = await fetch(`${origin}/api/v1/health`, { headers: { Cookie: cookie! } }).then((response) => response.json()) as { workspaceEnvironment: { currentDirectory: string; platform: string } };
+      const health = await fetch(`${origin}/api/v1/health`, { headers: { Cookie: cookie! } }).then((response) => response.json()) as { workspaceEnvironment: { currentDirectory: string; platform: string }; capabilities: { daemonDiscovery: number } };
       expect(health.workspaceEnvironment.currentDirectory).toBe(process.cwd());
       expect(health.workspaceEnvironment.platform).toBe(process.platform);
+      expect(health.capabilities.daemonDiscovery).toBe(0);
+      expect((await fetch(`${origin}/api/v1/daemon-challenge?nonce=${"a".repeat(64)}`)).status).toBe(404);
       expect((await fetch(`${origin}/api/v1/runners/mock/models`)).status).toBe(403);
       const mockModels = await fetch(`${origin}/api/v1/runners/mock/models`, { headers: { Cookie: cookie! } }).then(response=>response.json());
       expect(mockModels).toMatchObject({ source: "mock", models: [], customAllowed: false });

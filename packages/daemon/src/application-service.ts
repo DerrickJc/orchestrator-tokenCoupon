@@ -1,20 +1,23 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { normalizeWorkspacePath, workspaceEnvironment } from "./workspace-path.js";
+import { resolveDaemonDataDirectory } from "./runtime-paths.js";
 import { workspaceGitStatus, prepareWorkspaceGit, previewGitCommit, commitWorkspaceGit, type GitCommitInput } from "./workspace-tools.js";
 import { readAttemptInfo, readAttemptEvents, readAttemptDiagnosticEvidence } from "./attempt-observation.js";
 import { AttemptDiagnosticStore, type AttemptDiagnosticRecord } from "./attempt-diagnostics.js";
 import { readTaskResults } from "./task-results.js";
 import { observeSession } from "./session-observation.js";
+import { publicJobRecord, publicSessionDiagnosis, publicSessionRecovery } from "./session-diagnosis.js";
 import { ExternalPlanningService } from "./external-planning.js";
 import { ModelCatalog, discoverPlannerModels, type ModelCatalogResult } from "./model-catalog.js";
 import { planningWorkflow } from "./planning-workflow.js";
 import { LocalAgentPlanner } from "./local-agent-planner.js";
 import { SystemSettingsStore, type FunctionName } from "./system-settings.js";
+import { AgentComponents } from "./agent-components.js";
 import { projectPlanningProgress, type PlanningProgress } from "./planning-progress.js";
 import {
   PlannerStore, SessionStore, ReviewStore, approvePlannerDraft, createDefaultRunnerRegistry, createPlanReviewer, validateVerificationTask, ensureRuntimeMetadataIgnored,
@@ -28,6 +31,8 @@ import type {
   ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
   RunnerOutput, TaskDefinition, TaskRunnerFactory, TaskRunnerFactoryOptions,
 } from "@token-coupon/core";
+import type { ExternalOperationSummaryDto, HandoffSummaryDto, PendingQueueDto, PlanningTodoPageDto, PlanningViewDto, SessionDiagnosisDto } from "@token-coupon/client";
+import { planningTodo } from "./planning-pending.js";
 
 export interface WorkspaceEntry { workspaceId: string; path: string; label: string; addedAt: string; }
 export interface JobRecord {
@@ -67,11 +72,12 @@ export class ApplicationService {
   private eventSequence = 0;
   private readonly modelCatalog = new ModelCatalog();
   private readonly settingsStore: SystemSettingsStore;
+  readonly agentComponents = new AgentComponents();
   private plannerModelsCache: { expires: number; result: Promise<ModelCatalogResult> } | undefined;
 
   constructor(options: ServiceOptions = {}) {
     this.runnerFactory = options.createRunner ?? daemonRunnerFactory;
-    this.dataDirectory = resolve(options.dataDirectory ?? process.env.TOKEN_COUPON_DAEMON_HOME ?? join(homedir(), ".token-coupon", "daemon"));
+    this.dataDirectory = resolveDaemonDataDirectory(options.dataDirectory);
     this.workspacesPath = join(this.dataDirectory, "workspaces.json");
     this.jobsDirectory = join(this.dataDirectory, "jobs");
     this.eventsPath = join(this.dataDirectory, "events.jsonl");
@@ -496,64 +502,69 @@ export class ApplicationService {
     return value;
   }
 
-  async listPlannings(workspaceId: string): Promise<unknown[]> {
+  async listPlannings(workspaceId: string): Promise<PlanningViewDto[]> {
     const workspace = await this.getWorkspace(workspaceId);
     const snapshots = await new PlannerStore(workspace.path).list();
     return Promise.all(snapshots.map((snapshot) => this.planningView(workspace, snapshot.planningId)));
   }
 
-  async planningView(workspace: WorkspaceEntry, planningId: string): Promise<unknown> {
+  async planningView(workspace: WorkspaceEntry, planningId: string): Promise<PlanningViewDto> {
     const loaded = await loadPlannerConversation(planningId, workspace.path);
-    let session: unknown;
+    let session: PlanningViewDto["session"];
     if (loaded.snapshot.execution) {
       try {
         const record = await new SessionStore(workspace.path).load(loaded.snapshot.execution.sessionId);
         const observation = await observeSession(workspace.path, record.snapshot);
         const request = await new SessionStore(workspace.path).readControlRequest(record.snapshot.sessionId);
         const pendingControl = request && request.executionId === record.snapshot.executionId && ["running", "pausing"].includes(record.snapshot.status) && !(record.snapshot.controlState?.requestId === request.requestId && record.snapshot.controlState.acknowledgedAt) ? request : undefined;
-        session = { ...record.snapshot, ...(pendingControl ? { pendingControl } : {}), models: await readSessionModels(workspace.path, record.snapshot.sessionId), savedStatus: record.snapshot.status, status: observation.status, health: observation.health, tasks: await Promise.all(record.snapshot.tasks.map(async task => {
+        const sessionValue = { ...record.snapshot, ...(pendingControl ? { pendingControl } : {}), models: await readSessionModels(workspace.path, record.snapshot.sessionId), savedStatus: record.snapshot.status, status: observation.status, health: observation.health, tasks: await Promise.all(record.snapshot.tasks.map(async task => {
           const latestId = task.activeAttemptId ?? task.attempts.at(-1)?.attemptId;
           const currentAttempt = latestId ? await readAttemptInfo(workspace.path, latestId).catch(() => null) : null;
           const definition = record.plan.tasks.find(entry => entry.task.id === task.taskId);
           const status = observation.tasks.get(task.taskId) ?? task.status;
-          return { ...task, savedStatus: task.status, status, title: definition?.task.title, dependsOn: definition?.dependsOn, execution: definition ? taskWithExecutionSelection(definition.task, record.snapshot.executionSelection).execution : undefined,
+          return { ...task, savedStatus: task.status, status,
+            ...(definition ? { title: definition.task.title, dependsOn: definition.dependsOn, execution: taskWithExecutionSelection(definition.task, record.snapshot.executionSelection).execution } : {}),
             currentAttempt: currentAttempt && status !== task.status && ["created", "running"].includes(currentAttempt.status) ? { ...currentAttempt, savedStatus: currentAttempt.status, status, reason: observation.health.message } : currentAttempt };
         })) };
-        session = JSON.parse(sanitizeOutput(JSON.stringify(session)));
+        session = JSON.parse(sanitizeOutput(JSON.stringify(sessionValue))) as PlanningViewDto["session"];
       }
       catch (error) { session = { status: "unavailable", error: safeError(error) }; }
     }
     const review = loaded.review ? { reviewId: loaded.review.reviewId, draftRevision: loaded.review.draftRevision, status: loaded.review.status, summary: loaded.review.summary,
-      findings: loaded.review.findings, resolutions: loaded.review.resolutions, ...(loaded.review.reviewerConfig ? { reviewerConfig: loaded.review.reviewerConfig } : {}), ...(loaded.review.reviewerReportedModel ? { reviewerReportedModel: loaded.review.reviewerReportedModel } : {}), current: !!loaded.reviewIsCurrent } : undefined;
-    const handoffs = await this.external.queryHandoffs(workspace.workspaceId, planningId);
-    const externalOperations = await this.external.list(workspace.workspaceId, planningId);
+      findings: loaded.review.findings, ...(loaded.review.resolutions ? { resolutions: loaded.review.resolutions } : {}), ...(loaded.review.reviewerConfig ? { reviewerConfig: loaded.review.reviewerConfig } : {}), ...(loaded.review.reviewerReportedModel ? { reviewerReportedModel: loaded.review.reviewerReportedModel } : {}), current: !!loaded.reviewIsCurrent } : undefined;
+    const handoffs = await this.external.queryHandoffs(workspace.workspaceId, planningId) as HandoffSummaryDto[];
+    const externalOperations = await this.external.list(workspace.workspaceId, planningId) as ExternalOperationSummaryDto[];
     const history = (await new ReviewStore(workspace.path).list(planningId)).filter(item => item.status === "succeeded" && item.reviewId !== review?.reviewId).slice(-3)
-      .map(item => ({ reviewId: item.reviewId, draftRevision: item.draftRevision, summary: item.summary, findings: item.findings, current: false }));
+      .map(item => ({ reviewId: item.reviewId, draftRevision: item.draftRevision, summary: item.summary, findings: item.findings, current: false as const }));
     const approvalHistory = [...this.jobs.values()].filter(job => job.workspaceId === workspace.workspaceId && job.kind === "planning.approve" && job.status === "succeeded" && (job.result as { planningId?: string } | undefined)?.planningId === planningId)
-      .slice(-3).map(job => ({ ...(job.result as { draftRevision: number }), recordedAt: job.updatedAt, historical: true }));
+      .slice(-3).map(job => ({ ...(job.result as { draftRevision: number }), recordedAt: job.updatedAt, historical: true as const }));
+    const localOperation = [...this.jobs.values()].filter(job => job.workspaceId === workspace.workspaceId && job.planningId === planningId && job.progress).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    const title = loaded.draft?.plan.title ?? loaded.snapshot.messages.find(item => item.role === "user")?.content.slice(0, 80);
     const workflow = planningWorkflow({ revision: loaded.snapshot.revision, status: loaded.snapshot.status,
       ...(loaded.draft ? { draft: loaded.draft } : {}), approval: loaded.snapshot.approval,
       ...(review ? { review } : {}), ...(loaded.reviewReadError ? { reviewReadError: loaded.reviewReadError } : {}),
-      ...(session ? { session: session as { status: string } } : {}), interactions: this.listInteractions(workspace.workspaceId, planningId),
+      ...(session ? { session: { status: session.status } } : {}), interactions: this.listInteractions(workspace.workspaceId, planningId),
       handoffs: handoffs as Parameters<typeof planningWorkflow>[0]["handoffs"], externalOperations: externalOperations as Parameters<typeof planningWorkflow>[0]["externalOperations"] });
     return {
       planningId: loaded.snapshot.planningId, status: loaded.snapshot.status, revision: loaded.snapshot.revision,
       createdAt: loaded.snapshot.createdAt,
-      localOperation: [...this.jobs.values()].filter(job => job.workspaceId === workspace.workspaceId && job.planningId === planningId && job.progress).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0],
+      ...(localOperation ? { localOperation } : {}),
       ...(loaded.snapshot.sourcePlanning ? { sourcePlanning: loaded.snapshot.sourcePlanning } : {}),
       workspace: { workspaceId: workspace.workspaceId, label: workspace.label },
       config: { provider: loaded.snapshot.config.provider, model: loaded.snapshot.config.model },
-      executionDefaults: loaded.snapshot.executionDefaults, planningAssessment: loaded.snapshot.planningAssessment,
-      requirements: loaded.snapshot.requirements, confirmationState: loaded.snapshot.confirmationState,
+      executionDefaults: loaded.snapshot.executionDefaults,
+      ...(loaded.snapshot.planningAssessment ? { planningAssessment: loaded.snapshot.planningAssessment } : {}),
+      ...(loaded.snapshot.requirements ? { requirements: loaded.snapshot.requirements } : {}), ...(loaded.snapshot.confirmationState ? { confirmationState: loaded.snapshot.confirmationState } : {}),
       messages: loaded.snapshot.messages.slice(-40), turns: loaded.snapshot.turns.slice(-20),
-      draft: loaded.draft, draftChanged: loaded.draft ? loaded.draft.draftRevision : null,
+      ...(loaded.draft ? { draft: loaded.draft } : {}), draftChanged: loaded.draft ? loaded.draft.draftRevision : null,
       verificationTasks: loaded.draft?.plan.tasks.map(entry => {
         try { validateVerificationTask(loaded.draft!.plan, entry.task.id); return { taskId: entry.task.id, title: entry.task.title, valid: true }; }
         catch (error) { return { taskId: entry.task.id, title: entry.task.title, valid: false, reason: safeError(error) }; }
       }) ?? [],
-      review, reviewReadError: loaded.reviewReadError, reviewHistory: history, approval: loaded.snapshot.approval, approvalHistory, workflow, execution: loaded.snapshot.execution, session,
+      ...(review ? { review } : {}), ...(loaded.reviewReadError ? { reviewReadError: loaded.reviewReadError } : {}), reviewHistory: history, approval: loaded.snapshot.approval, approvalHistory, workflow, execution: loaded.snapshot.execution,
+      ...(session ? { session } : {}),
       interactions: this.listInteractions(workspace.workspaceId, loaded.snapshot.planningId),
-      title: loaded.draft?.plan.title ?? loaded.snapshot.messages.find((item) => item.role === "user")?.content.slice(0, 80),
+      ...(title ? { title } : {}),
       handoffs, externalOperations,
     };
   }
@@ -561,6 +572,50 @@ export class ApplicationService {
   listInteractions(workspaceId: string, planningId?: string): PendingInteraction[] {
     return [...this.pendingInteractions.values()].map(({ value }) => value)
       .filter((item) => item.workspaceId === workspaceId && (!planningId || item.planningId === planningId));
+  }
+
+  pendingQueue(offset = 0): PendingQueueDto {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("pending_offset_invalid：分页位置无效");
+    const entries = [...this.pendingInteractions.values()]
+      .filter(entry => !entry.signal.aborted && this.workspaces.has(entry.value.workspaceId))
+      .map(({ value }) => ({ requestId: value.requestId, workspaceId: value.workspaceId,
+        workspaceLabel: this.workspaces.get(value.workspaceId)!.label, planningId: value.planningId,
+        taskId: value.owner.taskId, runnerId: value.owner.runnerId, kind: value.request.kind, createdAt: value.createdAt }))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.requestId.localeCompare(b.requestId));
+    return { epoch: this.epoch, total: entries.length, items: entries.slice(offset, offset + 100),
+      nextOffset: offset + 100 < entries.length ? offset + 100 : null };
+  }
+
+  async planningTodos(cursor?: string): Promise<PlanningTodoPageDto> {
+    let after: { workspaceId: string; planningId?: string } | undefined;
+    if (cursor !== undefined) {
+      try {
+        if (cursor.length > 256 || !/^[\w-]+$/.test(cursor)) throw new Error();
+        const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+        if (!value || typeof value !== "object" || !/^[0-9a-f]{16}$/.test(value.workspaceId) ||
+          value.planningId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.planningId)) throw new Error();
+        after = value;
+      } catch { throw new Error("pending_cursor_invalid：计划待办分页标识无效"); }
+    }
+    const workspaces = this.listWorkspaces().sort((a, b) => a.workspaceId.localeCompare(b.workspaceId));
+    const index = after ? workspaces.findIndex(workspace => workspace.workspaceId >= after!.workspaceId) : 0;
+    const workspace = index < 0 ? undefined : workspaces[index];
+    const result: PlanningTodoPageDto = { epoch: this.epoch, items: [], scanned: 0, nextCursor: null, warnings: [] };
+    if (!workspace) return result;
+    const encode = (value: { workspaceId: string; planningId?: string }) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const nextWorkspace = workspaces[index + 1];
+    result.nextCursor = nextWorkspace ? encode({ workspaceId: nextWorkspace.workspaceId }) : null;
+    try {
+      await this.getWorkspace(workspace.workspaceId);
+      const page = await new PlannerStore(workspace.path).listIdsPage(after?.workspaceId === workspace.workspaceId ? after.planningId : undefined);
+      result.scanned = page.planningIds.length;
+      if (page.nextAfter) result.nextCursor = encode({ workspaceId: workspace.workspaceId, planningId: page.nextAfter });
+      for (const planningId of page.planningIds) {
+        try { const item = planningTodo(await this.planningView(workspace, planningId)); if (item) result.items.push(item); }
+        catch { result.warnings.push({ workspaceLabel: workspace.label, planningId, message: "计划记录无法读取，请在工作区检查；未将其当作已完成。" }); }
+      }
+    } catch { result.warnings.push({ workspaceLabel: workspace.label, message: "工作区不可访问，请检查目录；未将其当作没有待办。" }); }
+    return result;
   }
 
   async submit(workspaceId: string, kind: string, requestKey: string, payload: unknown, action: (signal: AbortSignal, jobId: string) => Promise<unknown>): Promise<JobRecord> {
@@ -573,7 +628,7 @@ export class ApplicationService {
       const existing = JSON.parse(await readFile(idempotencyPath, "utf8")) as { jobId: string; requestHash: string };
       if (existing.requestHash !== requestHash) throw new Error("idempotency_conflict：相同 requestKey 已用于不同请求");
       const prior = this.jobs.get(existing.jobId) ?? JSON.parse(await readFile(join(this.jobsDirectory, `${existing.jobId}.json`), "utf8")) as JobRecord;
-      return prior;
+      return publicJobRecord(prior);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -587,7 +642,7 @@ export class ApplicationService {
       const existing = JSON.parse(await readFile(idempotencyPath, "utf8")) as { jobId: string; requestHash: string };
       if (existing.requestHash !== requestHash) throw new Error("idempotency_conflict：同一个 requestKey 已用于不同请求");
       const concurrent = this.jobs.get(existing.jobId);
-      if (concurrent) return concurrent;
+      if (concurrent) return publicJobRecord(concurrent);
       throw new Error("idempotency_in_progress：相同请求正在另一个请求处理中，请稍后查询");
     }
     this.jobs.set(job.jobId, job);
@@ -628,15 +683,22 @@ export class ApplicationService {
 
   async shutdown(): Promise<void> {
     for (const controller of this.jobControllers.values()) controller.abort(new Error("daemon 正在停止，请保存诊断后恢复"));
-    await Promise.allSettled([...this.workers]);
+    await Promise.allSettled([...this.workers, this.agentComponents.close()]);
+  }
+
+  daemonStopAssessment(): { canStop: boolean; activeJobs: Array<{ jobId: string; kind: string; planningId?: string }> } {
+    const activeJobs = [...this.jobs.values()].filter(job => job.status === "running")
+      .map(({ jobId, kind, planningId }) => ({ jobId, kind, ...(planningId ? { planningId } : {}) }));
+    const all = [...activeJobs, ...this.agentComponents.active()];
+    return { canStop: all.length === 0, activeJobs: all };
   }
 
   async getJob(jobId: string): Promise<JobRecord> {
     if (!/^[0-9a-f-]{36}$/i.test(jobId)) throw new Error("job_not_found：操作 ID 无效");
     const value = this.jobs.get(jobId);
-    if (value) return value;
+    if (value) return publicJobRecord(value);
     const path = join(this.jobsDirectory, `${jobId}.json`);
-    return JSON.parse(await readFile(path, "utf8")) as JobRecord;
+    return publicJobRecord(JSON.parse(await readFile(path, "utf8")) as JobRecord);
   }
 
   async cancelJob(jobId: string, workspaceId: string): Promise<JobRecord> {
@@ -873,11 +935,11 @@ export class ApplicationService {
     });
   }
 
-  async sessionDiagnosis(workspaceId: string, planningId: string): Promise<unknown> {
+  async sessionDiagnosis(workspaceId: string, planningId: string): Promise<SessionDiagnosisDto> {
     const workspace = await this.getWorkspace(workspaceId);
     const loaded = await loadPlannerConversation(planningId, workspace.path);
     if (!loaded.snapshot.execution) throw new Error("session_not_found：规划尚未创建执行 Session");
-    return diagnoseSession(workspace.path, loaded.snapshot.execution.sessionId);
+    return publicSessionDiagnosis(await diagnoseSession(workspace.path, loaded.snapshot.execution.sessionId));
   }
 
   async controlSession(workspaceId: string, planningId: string, requestKey: string, kind: "pause" | "cancel"): Promise<JobRecord> {
@@ -900,7 +962,7 @@ export class ApplicationService {
     return this.submit(workspaceId, "session.recover", requestKey, { planningId, sessionId: loaded.snapshot.execution.sessionId, confirmedStopped }, async () => {
       const result = await recoverSession({ workspace: workspace.path, sessionId: loaded.snapshot.execution!.sessionId, confirmedStopped });
       await this.publish({ type: "session.recovered", workspaceId, planningId, payload: { recoveryId: result.recoveryId, recovered: result.recovered, diagnosis: result.diagnosis.state } });
-      return result;
+      return publicSessionRecovery(result);
     });
   }
 
@@ -974,6 +1036,9 @@ export class ApplicationService {
   }
 
   eventsAfter(sequence: number): DaemonEvent[] { return this.eventTail.filter((event) => event.sequence > sequence); }
+  eventWindow(): { first: number; latest: number } {
+    return { first: this.eventTail[0]?.sequence ?? this.eventSequence + 1, latest: this.eventSequence };
+  }
   subscribe(listener: (event: DaemonEvent) => void): () => void { this.subscribers.add(listener); return () => this.subscribers.delete(listener); }
 
   private async waitForInteraction(workspaceId: string, planningId: string, requestId: string, request: RunnerInteractionRequest, owner: RunnerInteractionOwner, signal: AbortSignal): Promise<RunnerInteractionReply> {
@@ -989,6 +1054,7 @@ export class ApplicationService {
     await this.publish({ type: "interaction.requested", workspaceId, planningId, taskId: owner.taskId, payload: {
       ...value, request: safeElicitationAuditRequest(safeRequest),
     } });
+    if (signal.aborted) throw signal.reason ?? new Error("interaction_cancelled");
     return new Promise((resolve, reject) => {
       const onAbort = () => { this.pendingInteractions.delete(requestId); reject(signal.reason ?? new Error("interaction_cancelled")); };
       signal.addEventListener("abort", onAbort, { once: true });
@@ -1068,6 +1134,7 @@ function compactResult(value: unknown): unknown {
   return Object.fromEntries(Object.entries(item).filter(([key]) => !["snapshot", "draft", "review", "messages", "context"].includes(key)));
 }
 function safeError(error: unknown): string { return sanitizeOutput(error instanceof Error ? error.message : String(error)).slice(0, 2048); }
+
 function diagnosticModelChoice(runnerId: string, modelId?: string): { runnerId: "codex" | "claude-code"; modelId?: string } {
   if (runnerId !== "codex" && runnerId !== "claude-code") throw new Error("diagnostic_runner_invalid：请选择 Codex 或 Claude Code");
   if (modelId !== undefined && (!modelId.trim() || modelId.length > 200)) throw new Error("diagnostic_model_invalid");

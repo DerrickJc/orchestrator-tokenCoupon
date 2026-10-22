@@ -1,16 +1,11 @@
-import { access } from "node:fs/promises";
-import { constants } from "node:fs";
-import { delimiter, join } from "node:path";
+import { spawnNative } from "../native-command.js";
+import { resolveAgentExecutable } from "../agent-executable.js";
 import type { Runner, RunnerInput, RunnerContext, RunnerOutput } from "../runner.js";
 import { runChildProcess } from "./child-process.js";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 
 async function findExecutable(name: string): Promise<string> {
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    const candidate = join(directory, name);
-    try { await access(candidate, constants.X_OK); return candidate; } catch { /* continue PATH lookup */ }
-  }
-  throw new Error(`找不到 ${name} 可执行文件，请先安装并登录 Claude Code`);
+  return resolveAgentExecutable("claude-code");
 }
 
 export class ClaudeCodeRunner implements Runner {
@@ -89,7 +84,7 @@ export class ClaudeCodeRunner implements Runner {
     };
 
     return runChildProcess({
-      executable, args, cwd: input.cwd, input: input.prompt, context,
+      executable, args, cwd: input.cwd, input: input.prompt, context, spawn: spawnNative,
       onOutput: (chunk) => {
         if (chunk.stream === "stderr") { context.onOutput(chunk); return; }
         parseStdout(chunk.text);

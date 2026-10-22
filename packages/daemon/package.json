@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --project tsconfig.json",
+    "build": "tsc --project tsconfig.json && node scripts/write-build-info.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "start": "node dist/main.js"
   },
@@ -14,6 +14,7 @@
     "@token-coupon/core": "*",
     "express": "^5.2.1",
     "undici": "^7.30.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@token-coupon/client": "*"
   }
 }

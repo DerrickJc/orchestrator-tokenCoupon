@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawnNative } from "./native-command.js";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,8 +31,16 @@ export async function diagnoseNativeCli(executable: string, kind: "codex" | "cla
 
 function capture(executable: string, args: string[], cwd: string): Promise<{ ok: boolean; text: string }> {
   return new Promise((resolve) => {
-    execFile(executable, args, { cwd, timeout: 5_000, maxBuffer: 64 * 1024, windowsHide: true }, (error, stdout, stderr) => {
-      resolve({ ok: !error, text: `${stdout}\n${stderr}`.trim() });
-    });
+    let child;
+    try { child = spawnNative(executable, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true }); }
+    catch { resolve({ ok: false, text: "" }); return; }
+    let text = "", limited = false, settled = false;
+    const finish = (ok: boolean) => { if (settled) return; settled = true; clearTimeout(timer); resolve({ ok: ok && !limited, text: text.trim() }); };
+    const timer = setTimeout(() => { child.kill(); finish(false); }, 5000);
+    const append = (chunk: string) => { text += chunk; if (text.length > 64 * 1024) { text = text.slice(0, 64 * 1024); limited = true; child.kill(); } };
+    child.stdout.setEncoding("utf8").on("data", append);
+    child.stderr.setEncoding("utf8").on("data", append);
+    child.once("error", () => finish(false));
+    child.once("close", code => finish(code === 0));
   });
 }

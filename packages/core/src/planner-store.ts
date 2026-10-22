@@ -87,6 +87,19 @@ export class PlannerStore {
     return snapshots.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  /** Stable directory cursor for bounded global observations; does not read conversation bodies. */
+  async listIdsPage(after?: string, limit = 5): Promise<{ planningIds: string[]; nextAfter: string | null }> {
+    if (after !== undefined) this.validateId(after);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Planner 分页大小必须为 1–100");
+    const entries = await readdir(this.root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const ids = entries.filter(entry => entry.isDirectory() && isUuid(entry.name) && (!after || entry.name > after)).map(entry => entry.name).sort();
+    const planningIds = ids.slice(0, limit);
+    return { planningIds, nextAfter: ids.length > limit ? planningIds.at(-1)! : null };
+  }
+
   async save(snapshot: PlannerConversationSnapshot): Promise<void> {
     const current = await this.load(snapshot.planningId);
     if (snapshot.revision !== current.revision + 1) throw new Error("Planner 快照 revision 冲突");

@@ -1,3 +1,4 @@
+import { createClient } from "@token-coupon/client";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
@@ -5,18 +6,30 @@ import { afterEach, expect, it } from "vitest";
 
 const windows: Array<JSDOM> = [];
 afterEach(() => { for (const dom of windows.splice(0)) dom.window.close(); });
-async function page(options: { lateCodex?: boolean } = {}) {
-  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
-  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+async function page(options: { lateCodex?: boolean; reactModelSelectors?: boolean; reactReviewerMode?: boolean } = {}) {
+  const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: "http://127.0.0.1:4177/#/workspaces/workspace/plans/existing-plan", runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window;
   Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   const copied: string[] = []; Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
+  if (options.reactModelSelectors) Object.assign(w, { tokenCouponModelChoiceSelectors: { render(prefix: "planner" | "runner" | "reviewer", model: { choices: Array<{ id: string; label: string }>; selectedModelId: string }, onChange: (modelId: string) => void) {
+    const select = w.document.getElementById(`${prefix}-model-choice`) as HTMLSelectElement;
+    select.replaceChildren(...model.choices.map(choice => new w.Option(choice.label, choice.id)));
+    select.value = model.selectedModelId;
+    select.onchange = () => onChange(select.value);
+  } } });
+  if (options.reactReviewerMode) Object.assign(w, { tokenCouponReviewerModeSelector: { render(model: { options: Array<{ id: string; label: string }>; selectedMode: string }, onChange: (mode: string) => void) {
+    const select = w.document.getElementById("reviewer-mode") as HTMLSelectElement;
+    select.replaceChildren(...model.options.map(option => new w.Option(option.label, option.id)));
+    select.value = model.selectedMode;
+    select.onchange = () => onChange(select.value);
+  } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined;
   const existing = { planningId: "existing-plan", status: "collecting", revision: 1, config: { provider: "deepseek", model: "old" }, messages: [{ role: "user", content: "已有任务" }], externalOperations: [] };
-  const submitted: Array<Record<string, unknown>> = []; let resolveLate!: (reply: Response) => void;
+  const submitted: Array<Record<string, unknown>> = [], requests: string[] = []; let resolveLate!: (reply: Response) => void;
   w.fetch = async (raw: string, init?: RequestInit) => {
+    requests.push(String(raw));
     const url = new URL(raw, w.location.origin), path = url.pathname;
     if (init?.method === "POST" && path.endsWith("/plannings")) { submitted.push(JSON.parse(String(init.body))); return Response.json({ error: "test_request_captured" }, { status: 409 }); }
     if (path === "/api/v1/health") return Response.json({ epoch: "test-epoch", workspaceEnvironment: { currentDirectory: "/project" }, mcp: { url: "http://127.0.0.1:4177/mcp" } });
@@ -32,12 +45,22 @@ async function page(options: { lateCodex?: boolean } = {}) {
     if (path.endsWith("/plannings/existing-plan")) return Response.json(existing);
     throw new Error(`unexpected request: ${path}`);
   };
-  w.eval(script);
+  Object.assign(w, { createClient: () => createClient({ fetch: ((path, options) => w.fetch(String(path), options)) as typeof fetch, eventSource: (path) => new w.EventSource(path) }) });
+  w.eval(clientScript.replace(/^import .*;$/m, "")); w.eval(script);
   const element = (id: string) => w.document.getElementById(id)!;
   const choose = (id: string, value: string) => { (element(id) as HTMLSelectElement).value = value; element(id).dispatchEvent(new w.Event("change", { bubbles: true })); };
   await expect.poll(()=>element("planning-panel").classList.contains("hidden")).toBe(false);
-  return { w, element, choose, submitted, copied, completeLate: () => resolveLate(Response.json({ models: [{ id: "late-codex", label: "Late Codex" }], customAllowed: true })) };
+  return { w, element, choose, submitted, copied, requests, completeLate: () => resolveLate(Response.json({ models: [{ id: "late-codex", label: "Late Codex" }], customAllowed: true })) };
 }
+
+it("refreshes the selected Runner and Planner model catalogs without React", async () => {
+  const h = await page();
+  h.choose("planner-provider", "deepseek-api");
+  await expect.poll(() => (h.element("refresh-models") as HTMLButtonElement).disabled).toBe(false);
+  h.element("refresh-models").click();
+  await expect.poll(() => h.requests.some(path => path.includes("/runners/codex/models?") && path.includes("refresh=1"))).toBe(true);
+  expect(h.requests).toContain("/api/v1/providers/deepseek-api/models?refresh=1");
+});
 
 it("opens webpage planning settings and copies execution configuration without registering a local request", async () => {
   const h = await page(); h.element("new-task").click();
@@ -58,7 +81,7 @@ it("opens webpage planning settings and copies execution configuration without r
 });
 
 it("preserves custom model IDs per Runner and submits the selected Planner model", async () => {
-  const h = await page(); h.element("new-task-sidebar").click();
+  const h = await page({ reactModelSelectors: true }); h.element("new-task-sidebar").click();
   h.choose("runner-model-choice", "__custom__");
   (h.element("runner-model") as HTMLInputElement).value = "private-model";
   h.element("runner-model").dispatchEvent(new h.w.Event("change"));
@@ -86,4 +109,20 @@ it("does not replace a newly selected Runner with a late model response", async 
   await new Promise(resolve=>setTimeout(resolve,20));
   expect((h.element("runner-model-choice") as HTMLSelectElement).value).toBe("claude-code-fast");
   expect((h.element("runner-model") as HTMLInputElement).value).toBe("claude-code-fast");
+});
+
+it("uses the React model selector for the reviewer model catalog", async () => {
+  const h = await page({ reactModelSelectors: true });
+  h.choose("reviewer-mode", "deepseek-api");
+  await expect.poll(() => Array.from((h.element("reviewer-model-choice") as HTMLSelectElement).options).some(option => option.value === "deepseek-pro")).toBe(true);
+  h.choose("reviewer-model-choice", "deepseek-pro");
+  expect((h.element("reviewer-model") as HTMLInputElement).value).toBe("deepseek-pro");
+});
+
+it("routes reviewer-mode changes through the React selector and persists the selected method", async () => {
+  const h = await page({ reactReviewerMode: true });
+  expect((h.element("reviewer-mode") as HTMLSelectElement).options).toHaveLength(6);
+  h.choose("reviewer-mode", "deepseek-api");
+  await expect.poll(() => h.w.localStorage.getItem("tc-reviewer-mode")).toBe("deepseek-api");
+  await expect.poll(() => h.element("reviewer-mode-hint").textContent).toContain("DeepSeek Planner API");
 });

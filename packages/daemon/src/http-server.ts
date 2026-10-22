@@ -1,19 +1,66 @@
-import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationService } from "./application-service.js";
-import { RepositoryReader, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
+import { RepositoryReader, currentOwner, parseExecutionSelection, type ExecutionSelection, type RunnerInteractionReply } from "@token-coupon/core";
 import { createMcpHttpHandler } from "./mcp-server.js";
 import type { RemoteMcpConnection } from "./oauth-gateway.js";
 import { browseDirectories } from "./workspace-tools.js";
 import { pickNativePath, nativePickerCapability, normalizePickedPaths, type NativePickerKind, type NativePickerResult } from "./native-picker.js";
+import { API_PROTOCOL, daemonChallengePayload, EPOCH_HEADER, PROTOCOL_HEADER, type DaemonChallenge } from "@token-coupon/client";
+import { readDaemonOwnerCredential } from "@token-coupon/client/node";
+import { DAEMON_BUILD_INFO } from "./build-info.js";
+import { componentId } from "./agent-components.js";
 
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
+const WEB_BUILD_DIRECTORY = fileURLToPath(new URL("../../web/dist/", import.meta.url));
 
-export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult> }): Promise<Server> {
+type WebBuildEntry = { file?: unknown; css?: unknown; assets?: unknown };
+type WebBuild = { html: Buffer; assets: Map<string, string> };
+
+async function loadWebBuild(): Promise<WebBuild | undefined> {
+  let rawManifest: string;
+  try { rawManifest = await readFile(join(WEB_BUILD_DIRECTORY, ".vite", "manifest.json"), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const manifest = JSON.parse(rawManifest) as Record<string, WebBuildEntry>;
+  const assets = new Map<string, string>();
+  const add = (candidate: unknown) => {
+    if (typeof candidate !== "string" || candidate.startsWith("/") || candidate.includes("\\")) return;
+    const parts = candidate.split("/");
+    if (parts.some(part => !part || part === "." || part === "..")) return;
+    assets.set(`/${candidate}`, candidate);
+  };
+  for (const entry of Object.values(manifest)) {
+    add(entry.file);
+    if (Array.isArray(entry.css)) entry.css.forEach(add);
+    if (Array.isArray(entry.assets)) entry.assets.forEach(add);
+  }
+  return { html: await readFile(join(WEB_BUILD_DIRECTORY, "index.html")), assets };
+}
+
+function webAssetContentType(path: string): string {
+  const types: Record<string, string> = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".wasm": "application/wasm",
+  };
+  return types[extname(path).toLowerCase()] || "application/octet-stream";
+}
+
+export async function createLocalServer(service: ApplicationService, options: { port: number; host: string; dataDirectory: string; ownerToken?: string; remoteMcp?: RemoteMcpConnection; nativePicker?: (kind: NativePickerKind, signal?: AbortSignal) => Promise<NativePickerResult>; requestShutdown?: () => void }): Promise<Server> {
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") throw new Error("daemon_bind_forbidden：本阶段服务只允许监听 loopback");
   const tokenPath = join(options.dataDirectory, "browser-session-token");
   let token: string;
@@ -24,12 +71,28 @@ export async function createLocalServer(service: ApplicationService, options: { 
     await writeFile(tokenPath, token + "\n", { flag: "wx", mode: 0o600 });
   }
   const mcpHandler = await createMcpHttpHandler(service, options.dataDirectory);
+  const webBuild = await loadWebBuild();
+  const profileId = createHash("sha256").update(await realpath(options.dataDirectory)).digest("hex").slice(0, 24);
+  const discoveryOwner = options.ownerToken ? await currentOwner() : undefined;
   const expectedHost = `${options.host.includes(":") ? `[${options.host}]` : options.host}:${options.port}`;
   const expectedOrigin = `http://${expectedHost}`;
   const origins = new Set([expectedOrigin, ...(options.host === "127.0.0.1" || options.host === "localhost" ? [`http://127.0.0.1:${options.port}`, `http://localhost:${options.port}`] : [])]);
+  let discoveryReady = false;
+  let stopRequested = false, activeMutations = 0;
+  if (options.ownerToken) {
+    try {
+      const [credential, owner] = await Promise.all([readDaemonOwnerCredential(options.dataDirectory), currentOwner()]);
+      discoveryReady = credential.token === options.ownerToken && credential.owner.pid === owner.pid && credential.owner.hostname === owner.hostname && credential.owner.platform === owner.platform && credential.owner.processStart === owner.processStart;
+    } catch { /* Discovery remains unavailable unless the owner file and profile are protected. */ }
+  }
 
   const server = createServer((request, response) => {
-    void dispatch(request, response).catch((error: unknown) => sendError(response, error));
+    const path = new URL(request.url ?? "/", expectedOrigin).pathname;
+    const countedMutation = request.method !== "GET" && path !== "/api/v1/daemon/stop";
+    if (countedMutation) activeMutations++;
+    void dispatch(request, response).catch((error: unknown) => sendError(response, error)).finally(() => {
+      if (countedMutation) activeMutations--;
+    });
   });
 
   async function dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -47,13 +110,27 @@ export async function createLocalServer(service: ApplicationService, options: { 
       response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:");
       response.setHeader("Referrer-Policy", "no-referrer");
       response.setHeader("X-Content-Type-Options", "nosniff");
-      const html = await readFile(join(PUBLIC_DIRECTORY, "index.html"));
+      const html = webBuild?.html || await readFile(join(PUBLIC_DIRECTORY, "index.html"));
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); response.end(html); return;
     }
-    if (request.method === "GET" && ["/app.js", "/style.css"].includes(url.pathname)) {
-      const name = url.pathname.slice(1);
-      const body = await readFile(join(PUBLIC_DIRECTORY, name));
-      response.writeHead(200, { "Content-Type": name.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8", "Cache-Control": "no-cache" }); response.end(body); return;
+    const builtAsset = webBuild?.assets.get(url.pathname);
+    const sourceAsset = ["/api-client.js", "/app.js", "/style.css"].includes(url.pathname) ? url.pathname.slice(1) : undefined;
+    if (request.method === "GET" && (builtAsset || sourceAsset)) {
+      const relativePath = builtAsset || sourceAsset!;
+      const body = await readFile(join(builtAsset ? WEB_BUILD_DIRECTORY : PUBLIC_DIRECTORY, relativePath));
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.writeHead(200, { "Content-Type": webAssetContentType(relativePath), "Cache-Control": builtAsset ? "public, max-age=31536000, immutable" : "no-cache" }); response.end(body); return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/daemon-challenge") {
+      const nonce = url.searchParams.get("nonce") ?? "";
+      if (!/^[0-9a-f]{64}$/i.test(nonce)) { sendJson(response, 400, { error: "daemon_discovery_nonce_invalid" }); return; }
+      if (!discoveryReady || !options.ownerToken || !discoveryOwner?.processStart || !discoveryOwner.hostname || !discoveryOwner.platform) { sendJson(response, 404, { error: "daemon_discovery_unavailable：后台 owner 文件权限或进程身份无法验证" }); return; }
+      const origin = `http://${host!.toLowerCase()}`;
+      const unsigned: Omit<DaemonChallenge, "proof"> = { format: 1, nonce, origin, host: new URL(origin).host, port: options.port,
+        issuedAt: new Date().toISOString(), owner: { pid: discoveryOwner.pid, hostname: discoveryOwner.hostname, platform: discoveryOwner.platform, processStart: discoveryOwner.processStart },
+        epoch: service.epoch, profileId, protocol: API_PROTOCOL, applicationVersion: DAEMON_BUILD_INFO.applicationVersion, buildId: DAEMON_BUILD_INFO.buildId };
+      const proof = createHmac("sha256", options.ownerToken).update(daemonChallengePayload(unsigned)).digest("hex");
+      response.setHeader("Cache-Control", "no-store"); response.setHeader("X-Content-Type-Options", "nosniff"); sendJson(response, 200, { ...unsigned, proof }); return;
     }
     if (!url.pathname.startsWith("/api/v1/")) { sendJson(response, 404, { error: "not_found" }); return; }
     if (cookieValue(request.headers.cookie, "tc_local") !== token) {
@@ -62,8 +139,32 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method !== "GET") {
       if (!origins.has(request.headers.origin ?? "")) { sendJson(response, 403, { error: "local_origin_required：操作必须由本机控制台发起" }); return; }
       if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) { sendJson(response, 415, { error: "content_type_json_required" }); return; }
+      const protocol = request.headers[PROTOCOL_HEADER.toLowerCase()];
+      // Unversioned legacy clients keep their existing /api/v1 behavior.
+      if (protocol !== undefined && protocol !== String(API_PROTOCOL.major)) {
+        sendJson(response, 426, { error: "daemon_protocol_incompatible：界面与后台协议不兼容，请更新后重新打开；仍可查看记录" }); return;
+      }
+      if (protocol !== undefined && request.headers[EPOCH_HEADER.toLowerCase()] !== service.epoch) {
+        sendJson(response, 409, { error: "daemon_epoch_changed：后台已重启或尚未核对，请刷新状态后检查操作回执，再决定是否重新提交" }); return;
+      }
+    }
+    if (stopRequested && request.method !== "GET" && url.pathname !== "/api/v1/daemon/stop") {
+      sendJson(response, 503, { error: "daemon_stopping：后台已接受停止请求，不再接收新操作" }); return;
     }
     const parts = url.pathname.split("/").filter(Boolean).slice(2);
+    if (request.method === "POST" && url.pathname === "/api/v1/daemon/stop") {
+      const body = await readJsonBody(request);
+      if (body.confirmed !== true) { sendJson(response, 400, { error: "daemon_stop_confirmation_required：停止后台需要明确确认" }); return; }
+      if (body.expectedEpoch !== service.epoch) { sendJson(response, 409, { error: "daemon_epoch_changed：后台实例已变化，请刷新状态后重新确认" }); return; }
+      if (stopRequested) { sendJson(response, 409, { error: "daemon_stopping：后台已接受停止请求" }); return; }
+      if (activeMutations > 0) { sendJson(response, 409, { error: "daemon_busy：仍有写操作正在处理；请稍后重试", activeMutations }); return; }
+      const assessment = service.daemonStopAssessment();
+      if (!assessment.canStop) { sendJson(response, 409, { error: "daemon_busy：仍有运行中的操作；请等待完成或先处理任务", ...assessment }); return; }
+      stopRequested = true;
+      sendJson(response, 202, { accepted: true, status: "stopping", epoch: service.epoch });
+      response.once("finish", () => options.requestShutdown?.());
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/v1/native-picker") {
       const body = await readJsonBody(request);
       if (body.kind !== "directory" && body.kind !== "files") throw new Error("native_picker_kind_invalid");
@@ -116,7 +217,9 @@ export async function createLocalServer(service: ApplicationService, options: { 
       if (request.method === "POST") { sendJson(response, 200, await service.saveSystemSettings(await readJsonBody(request))); return; }
     }
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      sendJson(response, 200, { status: "ok", epoch: service.epoch, phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+      sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: DAEMON_BUILD_INFO.applicationVersion, buildId: DAEMON_BUILD_INFO.buildId, protocol: API_PROTOCOL,
+        profile: { id: profileId, kind: service.workspaceEnvironment().isWsl ? "wsl" : "native", platform: process.platform },
+        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, agentComponents: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, pendingQueue: 1, planningTodos: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -129,7 +232,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "POST" && url.pathname === "/api/v1/remote-connection/quick") {
       if (!options.remoteMcp) throw new Error("remote_connection_unavailable：MCP 远程连接服务未启动");
       const body = await readJsonBody(request);
-      const project = body.connectionOnly === true ? { connectionOnly: true } : { workspaceId: stringField(body.workspaceId, "workspaceId", 32) };
+      const project = body.connectionOnly === true ? { connectionOnly: true } : { workspaceId: stringField(body.workspaceId, "workspaceId", 32), ...(body.workspaceIds === undefined ? {} : { workspaceIds: stringArray(body.workspaceIds, "workspaceIds") }) };
       if (body.connectionOnly === true && (body.workspaceId !== undefined || body.workspaceIds !== undefined)) throw new Error("oauth_workspace_invalid：仅建立连接不能同时指定项目");
       const scopes = body.scopes === undefined ? undefined : stringArray(body.scopes, "scopes");
       const port = body.port === undefined ? undefined : integerField(body.port, "port", 1024);
@@ -176,9 +279,21 @@ export async function createLocalServer(service: ApplicationService, options: { 
       await options.remoteMcp.decideApproval(parts[2]!, { decision: body.decision, ...(workspaceIds ? { workspaceIds } : {}), ...(source ? { source } : {}), ...(workspaceId ? { workspaceId } : {}), ...(scopes ? { scopes } : {}) });
       sendJson(response, 200, { accepted: true }); return;
     }
+    if (request.method === "GET" && url.pathname === "/api/v1/pending") {
+      sendJson(response, 200, service.pendingQueue(Number(url.searchParams.get("offset") ?? 0))); return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/pending/plans") {
+      sendJson(response, 200, await service.planningTodos(url.searchParams.get("cursor") ?? undefined)); return;
+    }
     if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, await service.planningProviderOptions()); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/providers/deepseek-api/models") { sendJson(response, 200, await service.plannerModels(url.searchParams.get("refresh") === "1")); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/runners") { sendJson(response, 200, await service.runnerOptions()); return; }
+    if (request.method === "GET" && url.pathname === "/api/v1/agent-components") { sendJson(response, 200, await service.agentComponents.list()); return; }
+    if (request.method === "POST" && parts[0] === "agent-components" && parts.length === 3) {
+      const id = componentId(parts[1]!), body = await readJsonBody(request);
+      if (parts[2] === "install") { sendJson(response, 202, await service.agentComponents.install(id, body.confirmed === true)); return; }
+      if (parts[2] === "cancel") { service.agentComponents.cancel(id, stringField(body.operationId, "operationId", 36)); sendJson(response, 200, { accepted: true }); return; }
+    }
     if (request.method === "GET" && parts[0] === "runners" && parts.length === 3 && parts[2] === "models") {
       sendJson(response, 200, await service.runnerModels(parts[1]!, url.searchParams.get("workspaceId") ?? undefined, url.searchParams.get("refresh") === "1")); return;
     }
@@ -333,9 +448,13 @@ export async function createLocalServer(service: ApplicationService, options: { 
 
 function streamEvents(service: ApplicationService, request: IncomingMessage, response: ServerResponse, url: URL): void {
   const after = Number(request.headers["last-event-id"] ?? url.searchParams.get("after") ?? 0);
+  const epoch = url.searchParams.get("epoch");
+  const window = service.eventWindow();
+  const resetReason = epoch && epoch !== service.epoch ? "epoch_changed" : !Number.isSafeInteger(after) || after < 0 || after > window.latest ? "cursor_invalid" : after > 0 && after < window.first - 1 ? "window_lost" : undefined;
+  const replayFrom = resetReason ? 0 : after;
   response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
-  response.write(`event: hello\ndata: ${JSON.stringify({ epoch: service.epoch })}\n\n`);
-  for (const event of service.eventsAfter(Number.isSafeInteger(after) ? after : 0)) response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  response.write(`event: hello\ndata: ${JSON.stringify({ epoch: service.epoch, protocol: API_PROTOCOL, firstSequence: window.first, latestSequence: window.latest, replayFrom, ...(resetReason ? { resetReason } : {}) })}\n\n`);
+  for (const event of service.eventsAfter(replayFrom)) response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   const unsubscribe = service.subscribe((event) => { if (!response.destroyed) response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); });
   const keepalive = setInterval(() => { if (!response.destroyed) response.write(": keepalive\n\n"); }, 15_000); keepalive.unref();
   request.once("close", () => { clearInterval(keepalive); unsubscribe(); });

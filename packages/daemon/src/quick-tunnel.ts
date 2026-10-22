@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 
 export const PRESERVE_TUNNEL = "daemon_shutdown_preserve_tunnel";
-export interface TunnelRuntime { origin: string; stop(): Promise<void>; detach?(): Promise<void>; attach?(socketPath: string): Promise<void>; persistent?: boolean; }
+export interface TunnelRuntime { origin: string; stop(): Promise<void>; detach?(): Promise<void>; attach?(socketPath: string, gatewayToken?: string): Promise<void>; persistent?: boolean; }
 export interface TunnelAdapter {
   readonly persistentGateway?: boolean;
   start(executable: string, port: number, workingDirectory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime>;

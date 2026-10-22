@@ -1,11 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
-import { createServer, request as forward } from "node:http";
+import { createServer, request as forward, type Agent } from "node:http";
 import { lstat, readFile, unlink } from "node:fs/promises";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { currentOwner } from "@token-coupon/core";
+import { dirname, isAbsolute } from "node:path";
+import { currentOwner, processStart } from "@token-coupon/core";
 import { QuickTunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
 import { readTunnelRecord, tunnelRecordPath, writeTunnelRecord, type TunnelRecord } from "./persistent-tunnel.js";
+import { connectPrivateGateway, privateGatewayAgent, validatePrivateGateway } from "./private-gateway.js";
 
 // This process owns only the tunnel, never planning, OAuth, workspace permissions or execution.
 const launch = process.argv[2];
@@ -18,11 +18,11 @@ if (!isAbsolute(input.executable) || !Number.isInteger(input.port) || input.port
 const directory = dirname(launch), controller = new AbortController();
 let runtime: TunnelRuntime | undefined, stopping = false;
 let launching: Promise<TunnelRuntime> | undefined, stopTask: Promise<void> | undefined;
-let backendSocket: string | undefined;
+let backend: { socketPath: string; gatewayToken?: string; agent?: Agent } | undefined;
 const publicGateway = createServer((request, response) => {
   const unavailable = () => { if (response.headersSent) { response.destroy(); return; } response.writeHead(503, { "Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "2" }); response.end(JSON.stringify({ error: "backend_temporarily_unavailable", message: "业务服务重启中，请稍后重试原 MCP 连接。" })); };
-  if (!backendSocket || stopping) { unavailable(); return; }
-  const upstream = forward({ socketPath: backendSocket, path: request.url, method: request.method, headers: request.headers, agent: false }, incoming => {
+  if (!backend || stopping) { unavailable(); return; }
+  const upstream = forward({ socketPath: backend.socketPath, path: request.url, method: request.method, headers: request.headers, agent: backend.agent ?? false }, incoming => {
     response.writeHead(incoming.statusCode ?? 502, incoming.headers); incoming.pipe(response);
     incoming.once("error", () => response.destroy());
   });
@@ -41,13 +41,14 @@ const server = createServer((request, response) => {
     void (async () => {
       let body = "";
       for await (const chunk of request) { body += chunk; if (body.length > 4096) throw new Error("body_limit"); }
-      const { socketPath } = JSON.parse(body) as { socketPath: string };
-      if (typeof socketPath !== "string" || !isAbsolute(socketPath) || basename(socketPath) !== "gateway.sock" || dirname(dirname(socketPath)) !== resolve(tmpdir()) || !basename(dirname(socketPath)).startsWith("tc-gateway-")) throw new Error("socket_invalid");
+      const { socketPath, gatewayToken } = JSON.parse(body) as { socketPath: string; gatewayToken?: string };
+      await validatePrivateGateway(socketPath, gatewayToken, process.platform, request.url === "/attach");
       if (request.url === "/attach") {
-        const parent = await lstat(dirname(socketPath)), file = await lstat(socketPath);
-        if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077) || !file.isSocket() || file.isSymbolicLink() || process.getuid && parent.uid !== process.getuid()) throw new Error("socket_invalid");
-        backendSocket = socketPath;
-      } else if (backendSocket === socketPath) backendSocket = undefined;
+        if (gatewayToken) (await connectPrivateGateway(socketPath, gatewayToken)).destroy();
+        const previous = backend;
+        backend = { socketPath, ...(gatewayToken ? { gatewayToken, agent: privateGatewayAgent(socketPath, gatewayToken) } : {}) };
+        previous?.agent?.destroy();
+      } else if (backend?.socketPath === socketPath && backend.gatewayToken === gatewayToken) { backend.agent?.destroy(); backend = undefined; }
       response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(record));
     })().catch(() => { response.writeHead(422); response.end(); });
     return;
@@ -65,12 +66,10 @@ record = { ...await currentOwner(), version: 1, token: input.token, gatewayPort:
 await writeTunnelRecord(directory, record, true);
 const adapter = new QuickTunnelAdapter(45_000, async pid => {
   const owner = await currentOwner();
-  let processStart: string | undefined;
-  if (process.platform === "linux") {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8"); processStart = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
-  }
+  const childStart = await processStart(pid);
+  if (!childStart && ["linux", "win32"].includes(process.platform)) throw new Error("tunnel_child_identity_unavailable");
   const { processStart: _ownStart, ...identity } = owner;
-  record.child = { ...identity, pid, ...(processStart ? { processStart } : {}) };
+  record.child = { ...identity, pid, ...(childStart ? { processStart: childStart } : {}) };
   await writeTunnelRecord(directory, record);
 });
 async function stop() {
@@ -78,7 +77,7 @@ async function stop() {
   stopping = true;
   stopTask = (async () => {
     controller.abort(); await launching?.catch(() => undefined); await runtime?.stop();
-    backendSocket = undefined; publicGateway.closeAllConnections(); publicGateway.close();
+    backend?.agent?.destroy(); backend = undefined; publicGateway.closeAllConnections(); publicGateway.close();
     record.phase = "error";
     if ((await readTunnelRecord(directory))?.token === input.token) await unlink(tunnelRecordPath(directory));
   })();

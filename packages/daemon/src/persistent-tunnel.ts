@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireLockCoordination, observeOwner } from "@token-coupon/core";
 import { networkFetch } from "./network-fetch.js";
 import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
+import { assertQuickTunnelSupported } from "./connection-platform.js";
+import { prepareTunnelDirectory } from "./private-gateway.js";
 
 type ProcessOwner = NonNullable<Parameters<typeof observeOwner>[0]>;
 export interface TunnelRecord extends ProcessOwner {
@@ -37,10 +39,10 @@ export async function writeTunnelRecord(directory: string, item: TunnelRecord, c
   finally { await unlink(temporary).catch(() => undefined); }
 }
 
-export async function tunnelControl(record: TunnelRecord, action: "status" | "stop" | "attach" | "detach", signal?: AbortSignal, socketPath?: string): Promise<TunnelRecord> {
+export async function tunnelControl(record: TunnelRecord, action: "status" | "stop" | "attach" | "detach", signal?: AbortSignal, socketPath?: string, gatewayToken?: string): Promise<TunnelRecord> {
   const response = await networkFetch(`http://127.0.0.1:${record.controlPort}/${action}`, {
     method: "POST", headers: { Authorization: `Bearer ${record.token}`, "X-Token-Coupon-Tunnel": "1" },
-    ...(socketPath ? { body: JSON.stringify({ socketPath }) } : {}),
+    ...(socketPath ? { body: JSON.stringify({ socketPath, ...(gatewayToken ? { gatewayToken } : {}) }) } : {}),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(4000)]) : AbortSignal.timeout(4000), redirect: "error",
   });
   if (!response.ok) throw new Error("tunnel_control_unavailable：无法验证常驻连接进程，请检查连接组件；不会创建重复隧道");
@@ -53,6 +55,9 @@ export async function tunnelControl(record: TunnelRecord, action: "status" | "st
 
 async function liveRecord(directory: string): Promise<TunnelRecord | undefined> {
   const record = await readTunnelRecord(directory); if (!record) return undefined;
+  if (record.platform && record.platform !== process.platform || process.platform === "win32" && !record.platform) {
+    throw new Error("tunnel_platform_conflict：连接属于其他运行平台或缺少平台身份；请在原 Windows/WSL 后台停止，不能跨平台接管");
+  }
   const owner = await observeTunnelOwner(record);
   if (owner.state === "owner_exited" || owner.state === "owner_identity_changed") {
     // A killed supervisor may have left its child behind. Only signal a verified child.
@@ -86,13 +91,27 @@ async function observeTunnelOwner(owner: ProcessOwner) {
   return observation;
 }
 
+async function stopTunnel(record: TunnelRecord): Promise<void> {
+  await tunnelControl(record, "stop");
+  // The response precedes process exit. Windows keeps its cwd locked until exit,
+  // so reporting completion earlier races directory cleanup and a new launch.
+  const deadline = Date.now() + 5000;
+  do {
+    const owner = await observeTunnelOwner(record);
+    if (owner.state === "owner_exited" || owner.state === "owner_identity_changed") return;
+    await pause(40);
+  } while (Date.now() < deadline);
+  throw new Error("tunnel_stopping：连接进程仍在退出，请稍后重试；不会结束身份不明的进程");
+}
+
 /** A detached owner drains cloudflared output and survives application daemon restarts. */
 export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   readonly persistentGateway = true;
   constructor(private readonly startupTimeoutMs = 55_000, private readonly pollIntervalMs = 1500) {}
 
   async recover(port: number, directory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime | undefined> {
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    assertQuickTunnelSupported();
+    await prepareTunnelDirectory(directory);
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     try {
       const record = await liveRecord(directory); if (!record) return undefined;
@@ -102,7 +121,8 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   }
 
   async start(executable: string, port: number, directory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime> {
-    await mkdir(directory, { recursive: true, mode: 0o700 }); signal.throwIfAborted();
+    assertQuickTunnelSupported();
+    await prepareTunnelDirectory(directory); signal.throwIfAborted();
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     let record: TunnelRecord | undefined;
     let launch: string | undefined;
@@ -136,14 +156,15 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
       } while (Date.now() < deadline);
       throw new Error("tunnel_supervisor_timeout：常驻连接进程未能启动");
     } catch (error) {
-      if (record && signal.aborted && signal.reason !== PRESERVE_TUNNEL) await tunnelControl(record, "stop").catch(() => undefined);
+      if (record && signal.aborted && signal.reason !== PRESERVE_TUNNEL) await stopTunnel(record).catch(() => undefined);
       throw error;
     } finally { if (launch) await unlink(launch).catch(() => undefined); await release(); }
   }
 
   async stopSaved(directory: string): Promise<void> {
+    await prepareTunnelDirectory(directory);
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
-    try { const record = await liveRecord(directory); if (record) await tunnelControl(record, "stop"); }
+    try { const record = await liveRecord(directory); if (record) await stopTunnel(record); }
     finally { await release(); }
   }
 
@@ -156,9 +177,9 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
     }
     signal.throwIfAborted();
     if (record.phase !== "running" || !record.origin) throw new Error("tunnel_process_exited：常驻隧道已退出，请重新建立连接");
-    let detached = false, timer: ReturnType<typeof setTimeout> | undefined, backendSocket: string | undefined;
+    let detached = false, timer: ReturnType<typeof setTimeout> | undefined, backendSocket: string | undefined, backendToken: string | undefined;
     const unwatch = () => { detached = true; clearTimeout(timer); signal.removeEventListener("abort", cancelled); };
-    const detach = async () => { unwatch(); if (backendSocket) await tunnelControl(record, "detach", undefined, backendSocket); };
+    const detach = async () => { unwatch(); if (backendSocket) await tunnelControl(record, "detach", undefined, backendSocket, backendToken); };
     const cancelled = () => { unwatch(); };
     signal.addEventListener("abort", cancelled, { once: true });
     const check = async () => {
@@ -174,8 +195,8 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
     };
     timer = setTimeout(() => void check(), this.pollIntervalMs); timer.unref();
     return { origin: record.origin, persistent: true, detach,
-      attach: async socketPath => { await tunnelControl(record, "attach", undefined, socketPath); backendSocket = socketPath; },
-      stop: async () => { unwatch(); await tunnelControl(record, "stop"); },
+      attach: async (socketPath, gatewayToken) => { await tunnelControl(record, "attach", undefined, socketPath, gatewayToken); backendSocket = socketPath; backendToken = gatewayToken; },
+      stop: async () => { unwatch(); await stopTunnel(record); },
     };
   }
 }

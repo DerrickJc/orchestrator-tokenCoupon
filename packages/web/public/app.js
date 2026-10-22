@@ -1,8 +1,59 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null };
+$("#skip-main")?.addEventListener("click", () => $("#main-content")?.focus());
+const tokenCouponClient = globalThis.tokenCouponClient;
+if (typeof tokenCouponClient?.api !== "function" || typeof tokenCouponClient?.openEventStream !== "function") throw new Error("web_client_not_loaded：请先加载本机 HTTP/SSE 客户端模块");
+const { api, openEventStream } = tokenCouponClient;
+function bindTextareaEnterSubmit(textarea, submit) {
+  if (!textarea || textarea.dataset.enterSubmitBound) return;
+  textarea.dataset.enterSubmitBound = "true";
+  let composing = false;
+  let recentCompositionEnd = 0;
+  textarea.addEventListener("compositionstart", () => { composing = true; });
+  textarea.addEventListener("compositionend", () => { composing = false; recentCompositionEnd = performance.now(); });
+  textarea.addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (composing || event.isComposing || event.keyCode === 229 || event.which === 229) return;
+    event.preventDefault();
+    if (event.repeat || (recentCompositionEnd && performance.now() - recentCompositionEnd < 120) || textarea.disabled || textarea.readOnly) return;
+    if (textarea.form?.querySelector('button[type="submit"]:disabled')) return;
+    submit();
+  });
+}
+const state = { workspaces: [], workspace: null, plannings: [], planning: null, providers: [], runners: [], environment: null, activeJob: null, eventSource: null, lastEventId: 0, reconnectAttempts: 0, reconnectTimer: null, savedPlanText: "", editedPlanHash: "", toastTimer: null, budgetOperationId: null, remotePoll: null, remoteMutation: false, remoteFetching: false, remoteRefreshPending: false, remoteStatus: null, remoteApprovalsSignature: "", seenAuthorizationRequests: new Set(), authorizationCountdown: null, desktopNotificationsEnabled: false, modelChoiceSelections: { planner: "", runner: "", reviewer: "" } };
 const statuses = { collecting: "收集中", draft_ready: "草案待处理", approved: "已批准", execution_created: "执行已创建", succeeded: "已完成", failed: "失败", cancelled: "已取消", running: "运行中", paused: "已暂停", blocked: "等待处理", interrupted: "已中断", ready: "准备就绪", planned: "待执行", timed_out: "超时" };
 statuses.needs_input = "等待用户决策";
 const diagnosticStatuses = { running: "分析中", completed: "分析完成", failed: "分析失败", interrupted: "分析中断" };
+function configureGlobalPending() {
+  globalThis.tokenCouponGlobalPending?.configure({ epoch: state.daemonEpoch || "", supported: !!state.pendingQueueSupported, planningSupported: !!state.planningTodosSupported,
+    authorizations: state.pendingRemoteApprovals?.filter(item => new Date(item.expiresAt).getTime() > Date.now()).map(item => ({ requestId: item.requestId, label: item.clientName || "未命名网页客户端" })) || [],
+    authorizationFresh: state.authorizationsFresh === true });
+}
+async function openGlobalPendingPlan(item, tab) {
+  const navigation = state.navigationSequence;
+  try {
+    const workspaces = await api("/api/v1/workspaces");
+    if (navigation !== state.navigationSequence) return;
+    state.workspaces = workspaces; renderWorkspaces();
+    if (state.workspace?.workspaceId === item.workspaceId && !state.plannings.some(plan => plan.planningId === item.planningId)) {
+      const latest = await api(`/api/v1/workspaces/${encodeURIComponent(item.workspaceId)}/plannings/${encodeURIComponent(item.planningId)}`);
+      if (navigation !== state.navigationSequence) return false;
+      state.plannings.push(latest);
+    }
+    const samePlan = state.planning?.planningId === item.planningId;
+    await navigate(`/workspaces/${encodeURIComponent(item.workspaceId)}/plans/${encodeURIComponent(item.planningId)}/${tab}`);
+    if (samePlan && state.route?.planningId === item.planningId) await loadPlanning(item.planningId);
+  } catch (error) { showToast(error.message, true); return false; }
+  return state.planning?.planningId === item.planningId && state.route?.tab === tab;
+}
+window.addEventListener("token-coupon:planning-todo-open", event => { void openGlobalPendingPlan(event.detail, event.detail.tab); });
+window.addEventListener("token-coupon:pending-open", async event => {
+  const item = event.detail;
+  if (!await openGlobalPendingPlan(item, "execution")) return;
+  const target = [...$("#interaction-list").querySelectorAll("[data-request-id]")].find(card => card.dataset.requestId === item.requestId);
+  if (!target) { showToast("此请求已处理或失效，已打开所属计划的最新状态。"); void globalThis.tokenCouponGlobalPending?.refresh(); return; }
+  target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: "center" });
+});
+window.addEventListener("token-coupon:authorization-open", event => { void openAuthorizationRequest(event.detail); });
 const isWebMcp = value => ["chatgpt-mcp", "web-mcp", "claude-mcp"].includes(value);
 const labels = { codex: "Codex", "claude-code": "Claude Code", dsh: "DeepSeek Harness (dsh)", mock: "离线模拟" };
 Object.assign(state, { editingPlan: false, editBase: null, savingPlan: false, replying: false, unsavedDecision: null });
@@ -38,14 +89,6 @@ function renderAuthorizationOverview() {
   if (!names) { names = document.createElement("p"); names.id = "remote-mcp-names"; names.className = "hint"; root.after(names); }
   const known = [...grants].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   names.textContent = known.length ? `MCP 名称：${known.slice(0, 3).map(grant => grantMcpName(grant) || "待设置名称").join("、")}${known.length > 3 ? ` 等 ${known.length} 条授权` : ""}。可在授权卡片上设置与网页一致的名称。` : "MCP 名称：尚无授权连接。";
-}
-async function api(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body !== undefined) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, { ...options, headers, credentials: "same-origin", cache: "no-store" });
-  const data = response.status === 204 ? null : await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
-  return data;
 }
 function key() { return crypto.randomUUID(); }
 function showToast(message, isError = false, source = "general") {
@@ -93,6 +136,102 @@ function setConnectionTab(tab) {
 function esc(value) { return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]); }
 function shortId(value) { return value ? `${value.slice(0, 8)}…` : ""; }
 function show(el, visible = true) { el.classList.toggle("hidden", !visible); }
+function commandPaletteEntries() {
+  const entries = [
+    { label: "连接中心", hint: "连接与网页授权", run: () => navigate("/connect") },
+    { label: "工作区与计划", hint: "选择或新建工作区", run: () => navigate("/workspaces") },
+    { label: "系统设置", hint: "规划、审查、修订与诊断默认方式", run: () => navigate("/settings") },
+    { label: "刷新状态", hint: "重新读取当前工作区和计划", run: () => refreshAll() },
+  ];
+  if (state.workspace) entries.push({ label: `新建计划 · ${state.workspace.label}`, hint: "打开规划设置，不会立即提交", run: () => startNewTask() });
+  if (state.workspace && state.planning) {
+    const title = state.planning.draft?.plan?.title || state.planning.title || "当前计划";
+    entries.push(
+      { label: `${title} · 概览`, hint: "查看计划状态和下一步", run: () => planTab("overview") },
+      { label: `${title} · 草案`, hint: "查看或编辑当前计划", run: () => planTab("draft") },
+      { label: `${title} · 审查与修订`, hint: "审查、修订或核对报告", run: () => planTab("review") },
+      { label: `${title} · 执行与结果`, hint: "查看任务、DAG 和执行状态", run: () => planTab("execution") },
+    );
+    if (state.planning.interactions?.length) entries.push({ label: `处理待审批与回答 · ${state.planning.interactions.length} 项`, hint: title, run: async () => { await planTab("execution"); if (state.route?.tab === "execution") requestAnimationFrame(() => $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" })); } });
+    const runtimeTasks = state.planning.session?.tasks || [];
+    for (const item of state.planning.draft?.plan?.tasks || []) {
+      const task = item.task, runtime = runtimeTasks.find(candidate => candidate.taskId === task.id);
+      const execution = runtime?.currentAttempt?.execution || runtime?.execution || task.execution || {};
+      const status = statuses[runtime?.status] || runtime?.status || "待执行";
+      entries.push({
+        label: `任务 ${task.id} · ${task.title || task.id}`,
+        hint: `${status} · ${execution.runnerId || "Runner 未设置"} / ${runtime?.currentAttempt?.reportedModel || execution.modelId || "默认模型"}`,
+        run: async () => { await planTab("execution"); if (state.route?.tab === "execution") showDagTaskDetails(task.id); },
+      });
+    }
+  }
+  return entries;
+}
+function renderCommandPalette() {
+  const ensureFallback = ensureCommandPaletteFallback();
+  if (!ensureFallback) return;
+  const query = $("#command-palette-query").value.trim().toLocaleLowerCase();
+  const entries = commandPaletteEntries().filter(entry => `${entry.label} ${entry.hint}`.toLocaleLowerCase().includes(query));
+  state.commandPaletteEntries = entries; state.commandPaletteIndex = Math.min(state.commandPaletteIndex || 0, Math.max(0, entries.length - 1));
+  const root = $("#command-palette-results"); root.replaceChildren();
+  if (!entries.length) { const empty = document.createElement("p"); empty.className = "command-palette-empty"; empty.textContent = "没有匹配的页面或操作。"; root.append(empty); return; }
+  entries.forEach((entry, index) => {
+    const button = document.createElement("button"); button.type = "button"; button.id = `command-palette-option-${index}`; button.className = "command-palette-option"; button.setAttribute("role", "option"); button.setAttribute("aria-selected", String(index === state.commandPaletteIndex));
+    const label = document.createElement("span"), hint = document.createElement("small"); label.textContent = entry.label; hint.textContent = entry.hint; button.append(label, hint);
+    button.addEventListener("click", () => { $("#command-palette").close(); void runCommandPaletteEntry(entry); }); root.append(button);
+  });
+}
+function moveCommandPaletteSelection(delta) {
+  const entries = state.commandPaletteEntries || [];
+  if (!entries.length) return;
+  state.commandPaletteIndex = (state.commandPaletteIndex + delta + entries.length) % entries.length;
+  renderCommandPalette();
+  $(`#command-palette-option-${state.commandPaletteIndex}`)?.scrollIntoView?.({ block: "nearest" });
+}
+async function runCommandPaletteEntry(entry) {
+  try { await entry.run(); } catch (error) { showToast(error.message, true); }
+}
+function ensureCommandPaletteFallback() {
+  const root = $("#command-palette-root");
+  if (!root || globalThis.tokenCouponCommandPalette) return !!root && !globalThis.tokenCouponCommandPalette;
+  if (!root.childElementCount) root.append($("#command-palette-fallback").content.cloneNode(true));
+  if (root.dataset.fallbackBound) return true;
+  root.dataset.fallbackBound = "true";
+  const dialog = $("#command-palette");
+  $("#command-palette-close").addEventListener("click", () => dialog.close());
+  $("#command-palette-query").addEventListener("input", () => { state.commandPaletteIndex = 0; renderCommandPalette(); });
+  $("#command-palette-query").addEventListener("keydown", event => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); moveCommandPaletteSelection(event.key === "ArrowDown" ? 1 : -1); return; }
+    if (event.key === "Enter") {
+      const entry = state.commandPaletteEntries?.[state.commandPaletteIndex];
+      if (entry) { event.preventDefault(); dialog.close(); void runCommandPaletteEntry(entry); }
+    }
+  });
+  dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
+  return true;
+}
+function openCommandPalette() {
+  const dialog = $("#command-palette");
+  if ([...document.querySelectorAll("dialog[open]")].some(open => open !== dialog)) return;
+  if (globalThis.tokenCouponCommandPalette) {
+    globalThis.tokenCouponCommandPalette.open(commandPaletteEntries(), entry => { void runCommandPaletteEntry(entry); });
+    return;
+  }
+  ensureCommandPaletteFallback();
+  state.commandPaletteIndex = 0; $("#command-palette-query").value = ""; renderCommandPalette(); dialog.showModal(); $("#command-palette-query").focus();
+}
+$("#command-palette-open").addEventListener("click", openCommandPalette);
+window.addEventListener("keydown", event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "k") return;
+  if ([...document.querySelectorAll("dialog[open]")].length) return;
+  event.preventDefault(); openCommandPalette();
+});
+window.addEventListener("keydown", event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "s") return;
+  if (!state.editingPlan || state.savingPlan || [...document.querySelectorAll("dialog[open]")].length) return;
+  event.preventDefault();
+  if (planHasChanges()) void savePlanEditor();
+});
 
 const remoteScopeLabels = {
   "repository:read": "读取项目文件（只读调研）",
@@ -107,6 +246,11 @@ async function refreshRemoteConnection() {
   try {
     const status = await api("/api/v1/remote-connection");
     state.remoteStatus = status;
+    const quickUnavailable = status.quickTunnel?.available === false;
+    const quickReason = status.quickTunnel?.reason || "当前后台暂不支持快捷连接。可使用本机 Agent 或已有固定 HTTPS 网关。";
+    const blockedQuick = quickUnavailable && status.mode !== "fixed_https";
+    $("#remote-platform-support").textContent = quickReason;
+    show($("#remote-platform-support"), quickUnavailable);
     const badge = $("#remote-status");
     const phases = { stopped: "未连接", checking: "检查组件", downloading: "下载组件", verifying: "校验组件", starting: "启动网关", discovering: "建立隧道", probing: "测试公网连接", reconnecting: "正在重试", ready: "公网入口可用", disconnected: "连接已中断", error: "连接失败" };
     badge.textContent = status.transport === "ready" ? status.validGrants ? pendingWebTokenExchange(status) ? "公网可用 · 网页待完成连接" : "公网可用 · 网页授权有效" : "公网可用 · 网页待授权" : phases[status.transport] || "未连接";
@@ -145,14 +289,16 @@ async function refreshRemoteConnection() {
     }
     show($("#remote-url-wrap"), Boolean(status.mcpUrl)); show($("#remote-setup"), Boolean(status.mcpUrl));
     $("#remote-mcp-url").value = status.mcpUrl || "";
-    $("#remote-quick").disabled = state.remoteMutation || status.busy;
-    $("#remote-quick").textContent = status.enabled && status.mode === "quick_tunnel" && status.gateway === "running" ? "继续使用当前连接" : "新建快捷连接";
+    if (blockedQuick) { badge.textContent = "快捷连接暂不支持"; badge.className = "badge badge-neutral"; $("#remote-progress").textContent = "本机 Agent 规划、审查和执行可继续使用。"; }
+    $("#remote-quick").disabled = state.remoteMutation || status.busy || quickUnavailable;
+    $("#remote-quick").title = quickUnavailable ? quickReason : "";
+    $("#remote-quick").textContent = quickUnavailable ? "快捷连接暂不支持" : status.enabled && status.mode === "quick_tunnel" && status.gateway === "running" ? "继续使用当前连接" : "新建快捷连接";
     $("#remote-save").disabled = state.remoteMutation || status.busy;
     $("#remote-stop").disabled = state.remoteMutation || !status.enabled;
     show($("#remote-cancel"), !!status.busy); $("#remote-cancel").disabled = state.remoteMutation || !status.enabled;
-    $("#remote-test").disabled = state.remoteMutation || status.busy || !status.enabled || status.gateway !== "running";
+    $("#remote-test").disabled = state.remoteMutation || status.busy || !status.enabled || status.gateway !== "running" || blockedQuick;
     const checking = check && ["checking", "retrying"].includes(check.state);
-    const connectionError = checking ? "" : status.lastError || "";
+    const connectionError = checking || blockedQuick && status.lastError?.startsWith("remote_quick_tunnel_unsupported：") ? "" : status.lastError || "";
     $("#remote-error").textContent = connectionError; show($("#remote-error"), Boolean(connectionError));
     if (connectionError && connectionError !== state.lastRemoteError) showToast(connectionError, true, "remote-connection");
     if (!connectionError && (checking || status.transport === "ready") && $("#page-error").dataset.errorSource === "remote-connection") show($("#page-error"), false);
@@ -183,13 +329,14 @@ async function refreshRemoteApprovals() {
   let requests; let grants;
   const grantVersion = state.grantVersion || 0;
   try { [requests, grants] = await Promise.all([api("/api/v1/remote-connection/approvals"), api("/api/v1/remote-connection/grants")]); }
-  catch { state.authorizationsFresh = false; return; }
+  catch { state.authorizationsFresh = false; configureGlobalPending(); return; }
   state.authorizationsFresh = true;
   requests = [...requests].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   grants = [...grants].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   if (grantVersion !== (state.grantVersion || 0)) grants = state.grants || [];
   state.grants = grants;
   state.pendingRemoteApprovals = requests;
+  configureGlobalPending();
   const root = $("#remote-approvals");
   const signature = JSON.stringify([requests, state.workspaces.map(({ workspaceId, label }) => ({ workspaceId, label }))]);
   // Preserve each request's selections when another browser submits a request.
@@ -610,11 +757,15 @@ async function applyRoute(path, replace = false) {
       state.planToolsExpanded ??= new Map(); state.planToolsExpanded.set(`${route.workspaceId}:${route.planningId}`, true);
     }
     renderRoute(); renderPlanningList();
-    if (route.page === "settings") renderSystemSettings();
+    if (route.page === "settings") { renderSystemSettings(); void refreshAgentComponents(); }
     if (route.page === "new" && (previous?.page !== "new" || previous.workspaceId !== route.workspaceId || state.resetPlanningPolicy)) { applyPlanningPolicy(); state.resetPlanningPolicy = false; }
     if (route.page === "plan" && state.planning) { renderReviewerControls(state.planning); renderRequirements(); renderReview(); renderPlanOverview(); renderPlanWorkflowBanner(); }
     if (route.page === "plan" && previous?.page === "plan" && previous.planningId === route.planningId && previous.tab !== route.tab) $(`#${route.tab}-tab`)?.scrollIntoView({ block: "start" });
-    if (route.page === "new" && previous?.page !== "new") (isWebMcp($("#planner-provider").value) ? $("#copy-web-planning") : $("#request-text")).focus();
+    if (route.page === "new" && previous?.page !== "new") {
+      if (isWebMcp($("#planner-provider").value)) $("#copy-web-planning").focus();
+      else if (globalThis.tokenCouponPlannerRequestComposer) globalThis.tokenCouponPlannerRequestComposer.focus();
+      else $("#request-text").focus();
+    }
   } catch (error) {
     if (sequence !== state.navigationSequence) return;
     showToast(error.message, true); state.route = { page: "workspaces" }; state.routeHash = "/workspaces";
@@ -642,7 +793,8 @@ function renderRoute() {
   if (composer.parentElement !== host) host.append(composer);
   show(composer, route.page === "new" || route.page === "plan");
   for (const panel of document.querySelectorAll("[data-plan-panel]")) show(panel, panel.dataset.planPanel === route.tab);
-  for (const button of document.querySelectorAll("[data-plan-tab]")) { const selected = button.dataset.planTab === route.tab || button.dataset.planTab === "execution" && ["models", "attempts"].includes(route.tab); button.classList.toggle("active", selected); button.setAttribute("aria-current", selected ? "page" : "false"); }
+  if (globalThis.tokenCouponPlanTabs) globalThis.tokenCouponPlanTabs.render(route.tab || "overview", tab => void planTab(tab));
+  else for (const button of document.querySelectorAll("[data-plan-tab]")) { const selected = button.dataset.planTab === route.tab || button.dataset.planTab === "execution" && ["models", "attempts"].includes(route.tab); button.classList.toggle("active", selected); button.setAttribute("aria-current", selected ? "page" : "false"); }
   document.title = route.page === "plan" ? `${state.planning?.draft?.plan?.title || "Plan"} · Token Coupon` : `${$("#project-title").textContent} · Token Coupon`;
   closeNavigation();
   renderExecutionFloatingStatus();
@@ -656,7 +808,8 @@ function renderRoute() {
 }
 function renderConnectionEntry() {
   const status = state.remoteStatus; if (!status) return;
-  const reusable = status.enabled && status.gateway === "running" && !!status.publicOrigin;
+  const blockedQuick = status.quickTunnel?.available === false && status.mode !== "fixed_https";
+  const reusable = !blockedQuick && status.enabled && status.gateway === "running" && !!status.publicOrigin;
   state.connectionMode ||= reusable ? "reuse" : "new";
   setConnectionTab(state.managingConnection ? "authorization" : state.connectionTab || "transport");
   for (const button of document.querySelectorAll("[data-connection-mode]")) button.classList.toggle("active", button.dataset.connectionMode === state.connectionMode);
@@ -670,8 +823,8 @@ function renderConnectionEntry() {
   $("#reuse-mcp-address").textContent = status.publicOrigin ? `${status.publicOrigin}/mcp` : "尚未取得地址";
   show($("#quick-address-policy"), status.mode === "quick_tunnel");
   $("#remote-reuse").textContent = status.transport === "ready" ? "继续：选择工作区" : "重测当前连接";
-  $("#remote-reuse").disabled = state.remoteMutation || status.busy || state.remoteUnavailable;
-  $("#reuse-test").disabled = state.remoteMutation || status.busy || state.remoteUnavailable || !status.enabled || status.gateway !== "running";
+  $("#remote-reuse").disabled = state.remoteMutation || status.busy || state.remoteUnavailable || blockedQuick;
+  $("#reuse-test").disabled = state.remoteMutation || status.busy || state.remoteUnavailable || !status.enabled || status.gateway !== "running" || blockedQuick;
   $("#reuse-copy-url").disabled = !status.mcpUrl || state.remoteUnavailable;
   $("#connection-next").disabled = status.transport !== "ready";
   show($("#remote-connection"), state.connectionMode === "new");
@@ -800,17 +953,24 @@ function renderPlanOverview() {
   const session = plan.session, review = plan.review;
   const waiting = (plan.interactions || []).length || state.waitingInteractions || 0;
   const stage = plan.workflow?.label || (session ? waiting ? "等待人工处理" : statuses[session.status] || session.status : plan.status === "approved" ? "待执行" : review?.current ? "待核对与批准" : plan.draft ? "待审查" : "等待网页规划");
-  $("#plan-stage").textContent = stage;
-  $("#plan-stage").className = `badge ${statusClass(session?.status || plan.status)}`;
-  $("#plan-next-action").textContent = session ? waiting ? "Runner 正在等待你的批准或回答，进入执行页处理。" : "进入执行与结果页查看任务状态、恢复操作和交付证据。" : plan.status === "approved" ? "草案已批准。查看本次并发与隔离配置后，到执行页运行。" : review?.current ? "核对审查结论和必要的豁免记录，然后在审查页批准。" : plan.draft ? "查看草案；在网页继续审查，提交有效报告后再批准。" : "到已连接的网页继续需求澄清与规划。可复制下方提示，在新会话恢复同一 Plan。";
-  if (plan.workflow) $("#plan-next-action").textContent = plan.workflow.detail;
-  if (!session && !plan.workflow?.role && !review?.current && !selectedOperationIsWeb("review")) $("#plan-next-action").textContent = plan.draft ? "在审查与修订页点击所选 Agent／API 的审查按钮，核对结果后再批准。" : "在本机回答澄清或补充需求，继续规划。";
-  $("#plan-summary").innerHTML = `<div><strong>${plan.draft?.plan?.tasks?.length || 0}</strong><span>计划任务</span></div><div><strong>${session?.tasks?.filter(task => task.status === "succeeded").length || 0}</strong><span>执行完成</span></div><div><strong>${review?.current ? "有效" : review ? "已过期" : "待提交"}</strong><span>审查报告</span></div>`;
+  let nextAction = session ? waiting ? "Runner 正在等待你的批准或回答，进入执行页处理。" : "进入执行与结果页查看任务状态、恢复操作和交付证据。" : plan.status === "approved" ? "草案已批准。查看本次并发与隔离配置后，到执行页运行。" : review?.current ? "核对审查结论和必要的豁免记录，然后在审查页批准。" : plan.draft ? "查看草案；在网页继续审查，提交有效报告后再批准。" : "到已连接的网页继续需求澄清与规划。可复制下方提示，在新会话恢复同一 Plan。";
+  if (plan.workflow) nextAction = plan.workflow.detail;
+  if (!session && !plan.workflow?.role && !review?.current && !selectedOperationIsWeb("review")) nextAction = plan.draft ? "在审查与修订页点击所选 Agent／API 的审查按钮，核对结果后再批准。" : "在本机回答澄清或补充需求，继续规划。";
+  state.planNextAction = nextAction;
   const approved = plan.workflow ? plan.workflow.stage === "approved" : plan.status === "approved";
   const target = session || approved ? "execution" : review?.current || plan.workflow?.role === "review" || plan.workflow?.stage?.startsWith("review_") ? "review" : plan.draft ? "draft" : "overview";
-  $("#plan-primary-action").textContent = target === "execution" ? "查看执行与结果" : target === "review" ? "核对并批准" : target === "draft" ? "查看草案" : "复制网页继续提示";
-  $("#plan-primary-action").onclick = () => target === "overview" ? $("#copy-plan-resume").click() : planTab(target);
-  $("#copy-plan-resume").disabled = !isWebMcp(plan.config.provider) && !(plan.handoffs || []).length;
+  const primaryActionLabel = target === "execution" ? "查看执行与结果" : target === "review" ? "核对并批准" : target === "draft" ? "查看草案" : "复制网页继续提示";
+  const resumeDisabled = !isWebMcp(plan.config.provider) && !(plan.handoffs || []).length;
+  const overview = globalThis.tokenCouponPlanOverview;
+  if (overview) overview.render({ stage, stageTone: statusClass(session?.status || plan.status), nextAction, taskCount: plan.draft?.plan?.tasks?.length || 0, completedTaskCount: session?.tasks?.filter(task => task.status === "succeeded").length || 0, reviewStatus: review?.current ? "有效" : review ? "已过期" : "待提交", primaryActionLabel, resumeDisabled }, () => target === "overview" ? void copyResumePrompt() : planTab(target), () => void copyResumePrompt());
+  else {
+    $("#plan-stage").textContent = stage; $("#plan-stage").className = `badge ${statusClass(session?.status || plan.status)}`;
+    $("#plan-next-action").textContent = nextAction;
+    $("#plan-summary").innerHTML = `<div><strong>${plan.draft?.plan?.tasks?.length || 0}</strong><span>计划任务</span></div><div><strong>${session?.tasks?.filter(task => task.status === "succeeded").length || 0}</strong><span>执行完成</span></div><div><strong>${review?.current ? "有效" : review ? "已过期" : "待提交"}</strong><span>审查报告</span></div>`;
+    $("#plan-primary-action").textContent = primaryActionLabel;
+    $("#plan-primary-action").onclick = () => target === "overview" ? $("#copy-plan-resume").click() : planTab(target);
+    $("#copy-plan-resume").disabled = resumeDisabled;
+  }
 }
 function renderReference() {
   const root = $("#reference-summary"); if (!root) return;
@@ -869,7 +1029,7 @@ function renderSystemSettings() {
   const saved = state.systemSettings;
   if (!state.systemSettingsSupported || !saved || !state.operationRoutingSupported) {
     status.textContent = "当前后台尚未加载完整的功能路由设置。请重启后台并刷新后再配置。";
-    $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; root.replaceChildren(); return;
+    $("#system-settings-save").disabled = true; $("#system-settings-mode").disabled = true; disposeAgentSelectionControls(root); disposeSystemPolicyRouting(root); root.replaceChildren(); return;
   }
   const draft = state.settingsDraft = structuredClone(saved);
   $("#system-settings-save").disabled = false; $("#system-settings-mode").disabled = false;
@@ -880,7 +1040,7 @@ function renderSystemSettings() {
   renderSystemPolicyFields();
 }
 function renderSystemPolicyFields() {
-  const draft = state.settingsDraft, root = $("#system-settings-policies"); root.replaceChildren();
+  const draft = state.settingsDraft, root = $("#system-settings-policies"); disposeAgentSelectionControls(root); disposeSystemPolicyRouting(root); root.replaceChildren();
   if (!draft) return;
   draft.functions.revision ??= structuredClone(draft.functions.planning);
   const names = draft.mode === "unified" ? [["unified", "所有功能"]] : [["planning", "规划"], ["review", "审查"], ["revision", "修订"], ["diagnosis", "错误分析"]];
@@ -888,18 +1048,38 @@ function renderSystemPolicyFields() {
     const policy = name === "unified" ? draft.unified : draft.functions[name];
     const card = document.createElement("fieldset"); card.className = "policy-card"; card.dataset.function = name;
     const legend = document.createElement("legend"); legend.textContent = title;
-    const priorityLabel = document.createElement("label"); priorityLabel.textContent = "默认方式";
-    const priority = document.createElement("select"); priority.dataset.field = "priority";
-    priority.add(new Option("网页优先", "web")); priority.add(new Option("指定 Agent 优先", "agent")); priority.value = policy.priority; priorityLabel.append(priority);
-    const web = document.createElement("label"); web.textContent = "默认网页";
-    const source = document.createElement("select"); source.dataset.field = "web-source"; source.add(new Option("ChatGPT", "chatgpt")); source.add(new Option("Claude", "claude")); source.value = policy.webSource; web.append(source);
+    const routing = document.createElement("div"); routing.className = "policy-routing-mount"; routing.dataset.systemPolicyRoutingMount = "true";
     const current = () => state.settingsDraft === draft && card.isConnected;
     const controls = createAgentSelectionControls(policy.agent, value => { policy.agent = value; markSystemSettingsDirty(); }, current, (state.runners || []).filter(runner => ["codex", "claude-code"].includes(runner.id)));
-    const update = () => { show(web, priority.value === "web"); show(controls.root, priority.value === "agent"); };
-    priority.addEventListener("change", () => { policy.priority = priority.value; update(); if (policy.priority === "agent") void controls.load(); markSystemSettingsDirty(); });
-    source.addEventListener("change", () => { policy.webSource = source.value; markSystemSettingsDirty(); });
-    card.append(legend, priorityLabel, web, controls.root); root.append(card); update(); if (policy.priority === "agent") void controls.load();
+    const update = () => {
+      globalThis.tokenCouponSystemPolicyRouting?.render(routing, policy, {
+        onPriorityChange: value => { policy.priority = value; update(); if (value === "agent") void controls.load(); markSystemSettingsDirty(); },
+        onWebSourceChange: value => { policy.webSource = value; markSystemSettingsDirty(); },
+      });
+      if (!globalThis.tokenCouponSystemPolicyRouting) {
+        const priority = routing.querySelector<HTMLSelectElement>('[data-field="priority"]'), web = routing.querySelector<HTMLLabelElement>('[data-field="web-source"]');
+        if (priority) priority.value = policy.priority;
+        if (web) show(web, policy.priority === "web");
+        show(controls.root, policy.priority === "agent");
+      } else show(controls.root, policy.priority === "agent");
+    };
+    if (!globalThis.tokenCouponSystemPolicyRouting) {
+      const priorityLabel = document.createElement("label"); priorityLabel.textContent = "默认方式";
+      const priority = document.createElement("select"); priority.dataset.field = "priority";
+      priority.add(new Option("网页优先", "web")); priority.add(new Option("指定 Agent 优先", "agent")); priority.value = policy.priority; priorityLabel.append(priority);
+      const web = document.createElement("label"); web.dataset.field = "web-source"; web.textContent = "默认网页";
+      const source = document.createElement("select"); source.add(new Option("ChatGPT", "chatgpt")); source.add(new Option("Claude", "claude")); source.value = policy.webSource; web.append(source);
+      priority.addEventListener("change", () => { policy.priority = priority.value; update(); if (policy.priority === "agent") void controls.load(); markSystemSettingsDirty(); });
+      source.addEventListener("change", () => { policy.webSource = source.value; markSystemSettingsDirty(); });
+      routing.append(priorityLabel, web);
+    }
+    card.append(legend, routing, controls.root); root.append(card); update(); if (policy.priority === "agent") void controls.load();
   }
+}
+function disposeSystemPolicyRouting(container) {
+  const bridge = globalThis.tokenCouponSystemPolicyRouting;
+  if (!bridge) return;
+  for (const mount of [container, ...container.querySelectorAll("[data-system-policy-routing-mount]")]) bridge.unmount(mount);
 }
 function markSystemSettingsDirty() { $("#system-settings-status").textContent = "设置已修改，保存后对后续操作生效。"; show($("#system-settings-continue"), false); }
 $("#workspace-settings-nav").addEventListener("click", () => state.workspace && void navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/settings`));
@@ -923,14 +1103,180 @@ $("#system-settings-form").addEventListener("submit", async event => {
 });
 $("#system-settings-continue").addEventListener("click", () => { state.initialSetup = false; void navigate(functionPolicy("planning")?.priority === "web" ? "/connect" : "/workspaces"); });
 
+function recoveryStorageKey(key, kind) {
+  return kind === "local" ? key.startsWith("tc-run:") || key === "tc-runner-id" || key.startsWith("tc-model-") : key.startsWith("tc-review-") || key.startsWith("tc-planning-");
+}
+async function refreshAgentComponents() {
+  if (!state.agentComponentsSupported) return;
+  show($("#agent-components"));
+  clearTimeout(state.componentRefreshTimer);
+  const generation = state.componentRefreshGeneration = (state.componentRefreshGeneration || 0) + 1;
+  try {
+    const components = await api("/api/v1/agent-components");
+    if (generation !== state.componentRefreshGeneration) return;
+    const becameAvailable = components.some(item => item.available && state.agentComponents?.some(previous => previous.id === item.id && !previous.available));
+    state.agentComponents = components;
+    const root = $("#agent-components-list"), expanded = new Set([...root.querySelectorAll("details[open]")].map(node => node.dataset.component));
+    root.replaceChildren();
+    for (const item of components) {
+      const row = document.createElement("section"); row.className = "agent-component-row"; row.dataset.componentId = item.id;
+      const header = document.createElement("div"); header.className = "section-title";
+      const title = document.createElement("strong"); title.textContent = item.label;
+      const badge = document.createElement("span"); badge.className = `badge ${item.available ? "badge-success" : "badge-neutral"}`;
+      const busy = item.operation?.phase === "installing";
+      badge.textContent = busy ? "安装中" : item.available ? item.source === "managed" ? "组件已就绪" : "复用本机工具" : "尚未就绪";
+      header.append(title, badge); row.append(header);
+      const message = document.createElement("p"); message.className = "hint"; message.setAttribute("role", "status");
+      message.textContent = busy ? item.operation.message : item.available ? "将复用此工具。可复制启动命令，在终端完成登录；检测到程序不代表已登录或模型可用。" : item.operation?.message || item.reason || "使用时再安装。"; row.append(message);
+      const details = document.createElement("details"); details.dataset.component = item.id; details.open = expanded.has(item.id);
+      const summary = document.createElement("summary"); summary.textContent = "路径与安装信息"; details.append(summary);
+      for (const text of [item.executable ? `当前程序：${item.executable}` : "当前程序：未检测到", `按需安装：${item.package}@${item.version}`, `组件目录：${item.installDirectory}`, `官方说明：${item.docs}`]) { const line = document.createElement("p"); line.className = "hint"; line.textContent = text; details.append(line); }
+      row.append(details);
+      const actions = document.createElement("div"); actions.className = "button-row";
+      if (item.available && item.executable) {
+        const launch = document.createElement("button"); launch.type = "button"; launch.className = "button button-quiet"; launch.textContent = "复制启动命令";
+        launch.addEventListener("click", async () => { const windows = state.environment?.platform === "win32", quoted = "'" + item.executable.replaceAll("'", windows ? "''" : "'\\''") + "'", text = (windows ? "& " : "") + quoted; try { await navigator.clipboard.writeText(text); showToast("启动命令已复制。在终端运行并按工具提示登录。"); } catch { showCopyFallback("启动 Agent", text); } }); actions.append(launch);
+      }
+      if (!item.available && !busy) {
+        const install = document.createElement("button"); install.type = "button"; install.className = "button button-primary"; install.textContent = "按需安装"; install.disabled = !item.canInstall;
+        install.addEventListener("click", () => openAgentInstall(item)); actions.append(install);
+      }
+      if (busy) {
+        const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "button button-quiet"; cancel.textContent = "取消安装";
+        cancel.addEventListener("click", async () => { cancel.disabled = true; try { await api(`/api/v1/agent-components/${item.id}/cancel`, { method: "POST", body: JSON.stringify({ operationId: item.operation.operationId }) }); await refreshAgentComponents(); } catch (error) { $("#agent-components-status").textContent = `取消未完成：${error.message}`; cancel.disabled = false; } }); actions.append(cancel);
+      }
+      const instructions = document.createElement("button"); instructions.type = "button"; instructions.className = "button button-quiet"; instructions.textContent = "复制手动安装说明";
+      instructions.addEventListener("click", async () => { const text = `${item.label} 官方安装与登录说明：${item.docs}\n安装完成后回到系统设置点击“重新检测”，会优先复用本机工具。`; try { await navigator.clipboard.writeText(text); showToast("手动安装说明已复制。"); } catch { showCopyFallback("手动安装说明", text); } }); if (!item.available) actions.append(instructions);
+      row.append(actions); root.append(row);
+    }
+    $("#agent-components-status").textContent = "检测完成。规划、审查和执行使用相同的工具发现规则；不会自动安装或升级工具。";
+    if (becameAvailable) void refreshAgentRunners();
+    if (components.some(item => item.operation?.phase === "installing") && state.route?.page === "settings") state.componentRefreshTimer = setTimeout(() => void refreshAgentComponents(), 2000);
+  } catch (error) { if (generation === state.componentRefreshGeneration) $("#agent-components-status").textContent = `组件状态读取未完成：${error.message}。可点击重新检测。`; }
+}
+function openAgentInstall(item) {
+  state.componentInstallTarget = item.id;
+  const root = $("#agent-component-install-details"); root.replaceChildren();
+  for (const [label, text] of [["工具", item.label], ["官方包", item.package], ["固定版本", item.version], ["安装目录", item.installDirectory]]) { const term = document.createElement("dt"), value = document.createElement("dd"); term.textContent = label; value.textContent = text; root.append(term, value); }
+  $("#agent-component-consent").checked = false; $("#agent-component-install-confirm").disabled = true; $("#agent-component-install-error").textContent = ""; $("#agent-component-dialog").showModal();
+}
+$("#agent-components-refresh").addEventListener("click", () => { void refreshAgentComponents(); void refreshAgentRunners(); });
+$("#agent-component-consent").addEventListener("change", () => { $("#agent-component-install-confirm").disabled = !$("#agent-component-consent").checked; });
+$("#agent-component-install-close").addEventListener("click", () => $("#agent-component-dialog").close());
+$("#agent-component-install-confirm").addEventListener("click", async () => {
+  if (!state.componentInstallTarget || !$("#agent-component-consent").checked) return;
+  const button = $("#agent-component-install-confirm"); button.disabled = true;
+  try {
+    await api(`/api/v1/agent-components/${state.componentInstallTarget}/install`, { method: "POST", body: JSON.stringify({ confirmed: true }) });
+    $("#agent-component-dialog").close(); await refreshAgentComponents();
+  } catch (error) { $("#agent-component-install-error").textContent = `安装未提交：${error.message}`; button.disabled = false; }
+});
+async function refreshAgentRunners() {
+  try { state.runners = await api("/api/v1/runners"); state.providers = await api("/api/v1/providers"); renderRunners(); renderProviders(); } catch { /* Availability remains unknown; leave current selections intact. */ }
+}
+function captureDesktopRecovery() {
+  const storage = {};
+  for (const [kind, source] of [["local", localStorage], ["session", sessionStorage]]) {
+    storage[kind] = [];
+    for (let index = 0; index < source.length; index++) {
+      const key = source.key(index);
+      if (key && recoveryStorageKey(key, kind)) storage[kind].push([key, source.getItem(key)]);
+    }
+  }
+  const diagnosis = state.attemptDiagnosticContext;
+  const inputs = new Map((state.desktopRecoveryPending?.value.inputs || []).map(input => [`${input.kind}:${input.workspaceId || ""}:${input.planningId || ""}:${input.identity || ""}`, input]));
+  const remember = input => inputs.set(`${input.kind}:${input.workspaceId || ""}:${input.planningId || ""}:${input.identity || ""}`, input);
+  if (state.workspace && state.planning) remember({ kind: "reply", workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, text: $("#reply-text").value });
+  if (state.editingPlan && state.editBase) remember({ kind: "plan", workspaceId: state.editBase.workspaceId, planningId: state.editBase.planningId, base: state.editBase, text: $("#plan-editor").value });
+  for (const [identity, text] of state.desktopRecoveredDiagnoses || []) remember({ kind: "diagnosis", identity, text });
+  if (diagnosis) remember({ kind: "diagnosis", identity: diagnosis.identity, text: $("#attempt-diagnosis-reply")?.value ?? diagnosis.unsentText ?? "" });
+  return JSON.stringify({ version: 1, route: location.hash || "#/connect", requestText: $("#request-text").value, storage,
+    inputs: [...inputs.values()],
+  });
+}
+function desktopConnectionChanged(value) {
+  if (!window.tokenCouponDesktop?.reconnect) return;
+  const busy = value.phase === "reconnecting";
+  state.desktopReconnecting = busy;
+  $("#desktop-reconnect").disabled = busy; $("#reconnect").disabled = busy;
+  $("#reconnect").textContent = busy ? "正在重连…" : "重新连接后台";
+  const lost = value.phase === "disconnected";
+  show($("#desktop-connection-banner"), lost || busy || !!state.desktopRecoveryNotice);
+  show($("#desktop-reconnect"), lost || busy);
+  show($("#desktop-restore-inputs"), !!state.desktopRecoveryPending);
+  $("#desktop-connection-title").textContent = busy ? "正在重新连接后台" : lost ? "本机后台已失联" : "后台已重新连接";
+  $("#desktop-connection-message").textContent = value.error || (busy ? "正在核验后台身份并恢复页面。未提交内容暂存在内存中，不会自动保存、批准或重试任务。" : state.desktopRecoveryNotice || "");
+  if (lost || busy) { $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = busy ? "后台重新连接中" : "后台失联 · 可重新连接"; }
+}
+async function loadDesktopRecovery() {
+  if (!window.tokenCouponDesktop?.getRecoveryState) return;
+  const saved = await window.tokenCouponDesktop.getRecoveryState();
+  if (!saved) return;
+  if (state.desktopRecoveryPending?.id === saved.id) return;
+  const value = JSON.parse(saved.snapshot);
+  if (value?.version !== 1) return;
+  state.desktopRecoveryPending = { id: saved.id, value };
+  for (const [kind, target] of [["local", localStorage], ["session", sessionStorage]]) {
+    for (const entry of value.storage?.[kind] || []) {
+      if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string" && recoveryStorageKey(entry[0], kind)) target.setItem(entry[0], entry[1]);
+    }
+  }
+}
+async function restoreDesktopRecovery() {
+  const saved = state.desktopRecoveryPending;
+  if (!saved) return;
+  const value = saved.value;
+  if (!saved.globalRestored && typeof value.requestText === "string") { $("#request-text").value = value.requestText; globalThis.tokenCouponPlannerRequestComposer?.setValue(value.requestText); }
+  saved.globalRestored = true;
+  const samePlan = context => context?.workspaceId === state.workspace?.workspaceId && context?.planningId === state.planning?.planningId;
+  const pending = [];
+  for (const input of value.inputs || []) {
+    if (typeof input?.text !== "string") continue;
+    if (input.kind === "reply" && input.text) {
+      if (samePlan(input)) { $("#reply-text").value = input.text; globalThis.tokenCouponReplyComposer?.setValue(input.text); }
+      else pending.push(input);
+    } else if (input.kind === "plan" && input.base) {
+      if (samePlan(input) && samePlan(input.base) && state.planning?.draft && !state.planning.execution) {
+        state.editBase = input.base; state.savedPlanText = state.editBase.text;
+        $("#plan-editor").value = input.text; state.editingPlan = true;
+        renderTextEditor(); renderPlanEditControls(); previewPlanDiff();
+      } else pending.push(input);
+    } else if (input.kind === "diagnosis" && typeof input.identity === "string") {
+      state.desktopRecoveredDiagnoses ??= new Map(); state.desktopRecoveredDiagnoses.set(input.identity, input.text);
+    }
+  }
+  state.desktopRecoveryNotice = pending.length ? "后台已连接。部分未提交内容属于其他计划或原计划已进入执行；内容仍保留，请打开原计划后点击恢复未提交内容。" : "未提交的需求、澄清和草案已恢复。请核对最新状态；没有自动保存、批准、回答或重试任务。";
+  if (!pending.length) { await window.tokenCouponDesktop?.acknowledgeRecovery?.(saved.id); state.desktopRecoveryPending = null; }
+  else state.desktopRecoveryPending.value = { ...value, inputs: pending };
+  desktopConnectionChanged({ phase: "connected" });
+}
+async function reconnectDesktop() {
+  if (!window.tokenCouponDesktop?.reconnect) { state.reconnectAttempts = 0; await init(); return; }
+  if (state.desktopReconnecting) return;
+  try {
+    const snapshot = captureDesktopRecovery();
+    desktopConnectionChanged({ phase: "reconnecting" });
+    clearTimeout(state.reconnectTimer); state.eventSource?.close(); state.eventGeneration = (state.eventGeneration || 0) + 1;
+    await window.tokenCouponDesktop.reconnect(snapshot);
+  } catch (error) { desktopConnectionChanged({ phase: "disconnected", error: `重连未完成：${error.message}。内容保留，可再次重试。` }); }
+}
+window.addEventListener("token-coupon:desktop-reconnect", () => { void reconnectDesktop(); });
+window.addEventListener("token-coupon:desktop-connection", event => desktopConnectionChanged(event.detail));
+
 async function init() {
   try {
+    await loadDesktopRecovery();
+    if (window.tokenCouponDesktop) {
+      try {
+        state.desktopNotificationsEnabled = await window.tokenCouponDesktop.getNotificationsEnabled();
+        $("#enable-notifications").textContent = state.desktopNotificationsEnabled ? "关闭桌面提醒" : "开启桌面提醒";
+        $("#notification-status").textContent = state.desktopNotificationsEnabled ? "已开启：新审批到达且页面在后台时发送系统通知。" : "审批到达时显示页签提醒，可选择开启系统通知。";
+      } catch { state.desktopNotificationsEnabled = false; }
+    }
     const health = await api("/api/v1/health");
+    applyDaemonHandshake(health);
+    state.daemonEpoch = health.epoch;
     state.environment = health.workspaceEnvironment;
-    state.executionSelectionSupported = health.capabilities?.executionSelection === 1;
-    state.systemSettingsSupported = health.capabilities?.systemSettings === 1;
-    state.operationRoutingSupported = health.capabilities?.operationRouting === 1;
-    state.plannerProgressSupported = health.capabilities?.plannerProgress === 1;
     if (state.systemSettingsSupported) state.systemSettings = await api("/api/v1/settings");
     if (health.mcp?.localReady) { $("#mcp-local-address").textContent = `本机 MCP 地址：${health.mcp.url}`; show($("#mcp-connection")); }
     const environment = state.environment;
@@ -940,32 +1286,74 @@ async function init() {
     $("#use-current-directory").disabled = !environment?.currentDirectory;
     $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接";
     [state.workspaces, state.providers, state.runners] = await Promise.all([api("/api/v1/workspaces"), api("/api/v1/providers"), api("/api/v1/runners")]);
-    renderProviders(); renderRunners(); renderWorkspaces(); connectEvents();
+    renderProviders(); renderRunners(); renderWorkspaces();
     await refreshRemoteConnection();
-    state.initialized = true;
     const firstUse = state.systemSettings && !state.systemSettings.initialized && !state.workspaces.length && !location.hash;
     state.initialSetup = !!firstUse;
     await applyRoute(firstUse ? "/settings" : location.hash.slice(1) || "/connect", true);
-    await maybeNavigateToAuthorization();
+    if (!state.desktopRecoveryPending) await maybeNavigateToAuthorization();
+    state.initialized = true;
+    await restoreDesktopRecovery();
+    if (window.tokenCouponDesktop?.getConnectionState) desktopConnectionChanged(await window.tokenCouponDesktop.getConnectionState());
+    connectEvents();
+    configureGlobalPending(); void globalThis.tokenCouponGlobalPending?.refresh();
   } catch (error) { disconnected(error); }
 }
-function disconnected(error) { $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; showToast(error.message || "无法连接本机服务", true); }
+function applyDaemonHandshake(health) {
+    state.agentComponentsSupported = health.capabilities?.agentComponents === 1;
+    show($("#agent-components"), state.agentComponentsSupported);
+    state.environment = health.workspaceEnvironment;
+    state.executionSelectionSupported = health.capabilities?.executionSelection === 1;
+    state.systemSettingsSupported = health.capabilities?.systemSettings === 1;
+    state.operationRoutingSupported = health.capabilities?.operationRouting === 1;
+    state.plannerProgressSupported = health.capabilities?.plannerProgress === 1;
+    state.pendingQueueSupported = health.capabilities?.pendingQueue === 1;
+    state.planningTodosSupported = health.capabilities?.planningTodos === 1;
+    if (health.protocol && health.protocol.major !== 1) showToast("界面与后台协议不兼容，写操作已暂停。请更新后重新打开；当前仍可查看记录。", true);
+}
+function disconnected(error) { globalThis.tokenCouponGlobalPending?.unavailable(); $("#connection-dot").classList.remove("online"); $("#connection-label").textContent = "连接中断"; desktopConnectionChanged({ phase: "disconnected", error: error.message }); showToast(error.message || "无法连接本机服务", true); }
 function renderProviders() {
-  const select = $("#planner-provider"); select.replaceChildren();
-  const local = document.createElement("optgroup"); local.label = "本机 Agent（只读规划／审查）";
-  const api = document.createElement("optgroup"); api.label = "模型 API / 离线演示";
+  const select = $("#planner-provider"), standalone = [], local = [], api = [];
   for (const provider of state.providers) {
     if (["chatgpt-web", "chatgpt-mcp"].includes(provider.id) && state.providers.some(item => item.id === "web-mcp")) continue;
-    const option = new Option(provider.available ? provider.label : `${provider.label} · 未连接`, provider.id);
-    option.disabled = !provider.available;
-    if (isWebMcp(provider.id)) select.add(option);
-    else if (provider.id.endsWith("-agent")) local.append(option);
-    else api.append(option);
+    const item = { id: provider.id, label: provider.available ? provider.label : `${provider.label} · 未连接`, disabled: !provider.available };
+    if (isWebMcp(provider.id)) standalone.push(item);
+    else if (provider.id.endsWith("-agent")) local.push(item);
+    else api.push(item);
   }
-  if (local.children.length) select.append(local);
-  if (api.children.length) select.append(api);
+  const allProviders = [...standalone, ...local, ...api];
+  const preferred = allProviders.find(option => option.id === "web-mcp" && !option.disabled)?.id
+    || allProviders.find(option => option.id === "chatgpt-mcp" && !option.disabled)?.id
+    || allProviders.find(option => !option.disabled)?.id || "";
+  if (!allProviders.some(option => option.id === state.plannerProviderId && !option.disabled)) state.plannerProviderId = preferred;
+  const renderSelector = () => {
+    const model = { standalone, localAgents: local, apiProviders: api, selectedProviderId: state.plannerProviderId || "" };
+    if (globalThis.tokenCouponPlannerProviderSelector) {
+      globalThis.tokenCouponPlannerProviderSelector.render(model, providerId => {
+        state.plannerProviderId = providerId; update();
+      });
+      return;
+    }
+    select.replaceChildren();
+    for (const option of standalone) { const entry = new Option(option.label, option.id, false, option.id === state.plannerProviderId); entry.disabled = option.disabled; select.add(entry); }
+    for (const [items, label] of [[local, "本机 Agent（只读规划／审查）"], [api, "模型 API / 离线演示"]]) {
+      if (!items.length) continue;
+      const group = document.createElement("optgroup"); group.label = label;
+      for (const option of items) { const entry = new Option(option.label, option.id, false, option.id === state.plannerProviderId); entry.disabled = option.disabled; group.append(entry); }
+      select.append(group);
+    }
+    select.value = state.plannerProviderId || "";
+    select.onchange = () => { state.plannerProviderId = select.value; update(); };
+  };
+  let modelOwner;
   const update = () => {
-    const provider = select.value, mcp = isWebMcp(provider);
+    const provider = globalThis.tokenCouponPlannerProviderSelector ? state.plannerProviderId : select.value, mcp = isWebMcp(provider);
+    if (modelOwner !== provider) {
+      if (modelOwner !== undefined) state.modelChoiceSelections.planner = "";
+      modelOwner = provider;
+    }
+    state.plannerProviderId = provider;
+    if (globalThis.tokenCouponPlannerProviderSelector) renderSelector();
     show($("#planner-model-wrap"), !mcp && provider !== "mock");
     show($("#web-planning-guide"), mcp); show($("#local-request-wrap"), !mcp); show($("#start-planning"), !mcp);
     $("#planning-entry-label").textContent = mcp ? "WEB PLANNING" : "NEW PLANNING";
@@ -976,59 +1364,99 @@ function renderProviders() {
     $("#planner-model").placeholder = mcp ? "网页所选模型名称（仅记录）" : provider.endsWith("-agent") ? "选择本机模型或沿用 Runner 默认" : "输入自定义模型 ID";
     const current = mcp ? "" : provider === "mock" ? "mock" : state.providers.find(item => item.id === provider)?.model || "";
     renderModelPicker("planner", { models: current && current !== "mock" ? [{ id: current, label: `${current}（已配置）` }] : [], customAllowed: true }, current, mcp ? "在所选网页选择" : "使用已配置模型");
-    $("#planner-model-hint").textContent = mcp ? "此处仅记录名称；实际模型在对应网页中切换。" : provider.endsWith("-agent") ? "调用可能使用本机 Agent 登录账号的额度；规划在只读模式下运行，业务任务仍需单独审查、批准和执行。" : "可选择接口公布的模型，也可输入自定义 ID。";
+    setModelCatalogStatus("planner", mcp ? "此处仅记录名称；实际模型在对应网页中切换。" : provider.endsWith("-agent") ? "调用可能使用本机 Agent 登录账号的额度；规划在只读模式下运行，业务任务仍需单独审查、批准和执行。" : "可选择接口公布的模型，也可输入自定义 ID。");
     $("#planner-help").textContent = mcp ? "需求、文件调研、规划和审查在网页完成；这里配置执行、编辑草案、审批和观测。" : provider.endsWith("-agent") ? "开始后调用本机 Agent 一次；返回结果仍经过规划校验，草案需单独审查和批准。" : "按当前 API 或离线模拟配置生成草案。";
     $("#start-planning").textContent = mcp ? "登记需求，等待网页" : "开始规划";
     show($("#provider-notice"), false); void loadPlannerModels();
   };
-  select.value = state.providers.some(item => item.id === "web-mcp") ? "web-mcp" : state.providers.some(item => item.id === "chatgpt-mcp") ? "chatgpt-mcp" : state.providers.find(item => item.available)?.id || ""; select.onchange = update;
-  $("#planner-model-choice").onchange = () => applyModelChoice("planner"); update();
+  renderSelector();
+  if (!globalThis.tokenCouponModelChoiceSelectors) $("#planner-model-choice").onchange = () => applyModelChoice("planner");
+  update();
 }
 function renderRunners() {
-  const select = $("#runner-id"); select.replaceChildren();
+  const select = $("#runner-id");
   const ordered = ["codex", "claude-code", "dsh", "mock"].flatMap(id => state.runners.filter(item => item.id === id));
-  for (const runner of ordered) {
-    const option = new Option(`${labels[runner.id] || runner.id}${runner.available ? "" : " · 未就绪"}`, runner.id);
-    option.disabled = !runner.available; select.add(option);
-  }
+  const options = ordered.map(runner => ({ id: runner.id, label: (labels[runner.id] || runner.id) + (runner.available ? "" : " · 未就绪"), disabled: !runner.available }));
   const stored = localStorage.getItem("tc-runner-id");
-  select.value = stored && [...select.options].some(option => option.value === stored && !option.disabled) ? stored : ordered.find(runner => runner.id !== "mock" && runner.available)?.id || "mock";
-  const update = () => {
-    localStorage.setItem("tc-runner-id", select.value);
-    renderModelPicker("runner", { models: [], customAllowed: select.value !== "mock" }, localStorage.getItem(`tc-model-${select.value}`) || "", "沿用 Runner 默认模型");
+  const selectedRunnerId = stored && options.some(option => option.id === stored && !option.disabled) ? stored : ordered.find(runner => runner.id !== "mock" && runner.available)?.id || "mock";
+  const renderSelector = runnerId => globalThis.tokenCouponRunnerSelector?.render({ options, selectedRunnerId: runnerId }, value => update(value));
+  let modelOwner;
+  const update = (requestedRunnerId = "") => {
+    const runnerId = requestedRunnerId || (globalThis.tokenCouponRunnerSelector ? $("#runner-id").value : select.value);
+    if (modelOwner !== runnerId) {
+      if (modelOwner !== undefined) state.modelChoiceSelections.runner = "";
+      modelOwner = runnerId;
+    }
+    state.runnerId = runnerId;
+    localStorage.setItem("tc-runner-id", runnerId);
+    if (globalThis.tokenCouponRunnerSelector) renderSelector(runnerId);
+    renderModelPicker("runner", { models: [], customAllowed: runnerId !== "mock" }, localStorage.getItem("tc-model-" + runnerId) || "", "沿用 Runner 默认模型");
     void loadRunnerModels();
   };
-  select.onchange = update;
-  $("#runner-model").onchange = () => localStorage.setItem(`tc-model-${select.value}`, $("#runner-model").value.trim());
-  $("#runner-model-choice").onchange = () => { applyModelChoice("runner"); localStorage.setItem(`tc-model-${select.value}`, $("#runner-model").value.trim()); };
-  update();
+  if (globalThis.tokenCouponRunnerSelector) renderSelector(selectedRunnerId);
+  else {
+    select.replaceChildren();
+    for (const option of options) { const entry = new Option(option.label, option.id); entry.disabled = option.disabled; select.add(entry); }
+    select.value = selectedRunnerId;
+    select.onchange = () => update(select.value);
+  }
+  $("#runner-model").onchange = () => localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim());
+  if (!globalThis.tokenCouponModelChoiceSelectors) $("#runner-model-choice").onchange = () => { applyModelChoice("runner"); localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim()); };
+  update(selectedRunnerId);
 }
 function renderModelPicker(prefix, catalog, current, defaultLabel) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`);
-  select.replaceChildren(new Option(defaultLabel, ""));
-  for (const model of catalog.models || []) select.add(new Option(`${model.label || model.id}${model.label && model.label !== model.id ? ` · ${model.id}` : ""}${model.isDefault ? "（工具推荐）" : ""}`, model.id));
-  if (catalog.customAllowed) select.add(new Option(prefix === "planner" && isWebMcp($("#planner-provider").value) ? "记录网页模型名称…" : "自定义模型 ID…", "__custom__"));
-  select.value = current && [...select.options].some(option => option.value === current) ? current : current && catalog.customAllowed ? "__custom__" : "";
+  const choices = [
+    { id: "", label: defaultLabel },
+    ...(catalog.models || []).map(model => ({ id: model.id, label: `${model.label || model.id}${model.label && model.label !== model.id ? ` · ${model.id}` : ""}${model.isDefault ? "（工具推荐）" : ""}` })),
+    ...(catalog.customAllowed ? [{ id: "__custom__", label: prefix === "planner" && isWebMcp($("#planner-provider").value) ? "记录网页模型名称…" : "自定义模型 ID…" }] : []),
+  ];
+  const currentIsChoice = current && choices.some(choice => choice.id === current);
+  const remembersCustomChoice = ["planner", "runner", "reviewer"].includes(prefix) && state.modelChoiceSelections[prefix] === "__custom__";
+  const selectedModelId = currentIsChoice ? current : current && catalog.customAllowed ? "__custom__" :
+    (catalog.customAllowed && remembersCustomChoice ? "__custom__" : "");
+  if (["planner", "runner", "reviewer"].includes(prefix) && globalThis.tokenCouponModelChoiceSelectors) {
+    select.onchange = null;
+    globalThis.tokenCouponModelChoiceSelectors.render(prefix, { choices, selectedModelId }, modelId => {
+      state.modelChoiceSelections[prefix] = modelId;
+      applyModelChoice(prefix);
+      if (prefix === "runner") localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim());
+    });
+  } else {
+    select.replaceChildren(...choices.map(choice => new Option(choice.label, choice.id)));
+    select.value = selectedModelId;
+  }
   input.value = catalog.customAllowed || catalog.models?.some(model => model.id === current) ? current : "";
-  show(input, select.value === "__custom__"); input.disabled = !catalog.customAllowed;
+  show(input, selectedModelId === "__custom__"); input.disabled = !catalog.customAllowed;
 }
 function applyModelChoice(prefix) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`), custom = select.value === "__custom__";
+  if (["planner", "runner", "reviewer"].includes(prefix)) state.modelChoiceSelections[prefix] = select.value;
   input.value = custom ? "" : select.value;
   show(input, custom); if (custom) input.focus();
+}
+function setModelCatalogStatus(kind, message, loading = false) {
+  const bridge = globalThis.tokenCouponModelCatalogStatus;
+  if (bridge) bridge.render(kind, { message, loading });
+  else {
+    const hint = $(`#${kind}-model-hint`);
+    if (hint) hint.textContent = message;
+    const refresh = $("#refresh-models");
+    if (refresh && kind === "runner") { refresh.disabled = loading; refresh.textContent = loading ? "正在读取模型…" : "刷新模型列表"; }
+  }
 }
 async function loadRunnerModels(refresh = false) {
   const runnerId = $("#runner-id").value; if (!runnerId) return;
   const workspaceId = state.workspace?.workspaceId || "";
   const sequence = state.runnerModelRequest = (state.runnerModelRequest || 0) + 1;
-  $("#runner-model-hint").textContent = "正在读取本机工具的模型目录…";
+  setModelCatalogStatus("runner", "正在读取本机工具的模型目录…", true);
   const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
   try {
     const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`);
     if (sequence !== state.runnerModelRequest || runnerId !== $("#runner-id").value || workspaceId !== (state.workspace?.workspaceId || "")) return;
     renderModelPicker("runner", catalog, $("#runner-model").value.trim(), "沿用 Runner 默认模型");
-    $("#runner-model-hint").textContent = catalog.error || (runnerId === "mock" ? "离线模拟无需选择模型。" : `${catalog.models.length} 个候选模型，来自本机工具目录；实际调用仍取决于账户和接口。`);
-  } catch (error) { if (sequence === state.runnerModelRequest) $("#runner-model-hint").textContent = `${error.message}；仍可使用默认模型或自定义 ID。`; }
+    setModelCatalogStatus("runner", catalog.error || (runnerId === "mock" ? "离线模拟无需选择模型。" : `${catalog.models.length} 个候选模型，来自本机工具目录；实际调用仍取决于账户和接口。`));
+  } catch (error) { if (sequence === state.runnerModelRequest) setModelCatalogStatus("runner", `${error.message}；仍可使用默认模型或自定义 ID。`); }
 }
 async function loadPlannerModels(refresh = false) {
   const sequence = state.plannerModelRequest = (state.plannerModelRequest || 0) + 1;
@@ -1038,34 +1466,45 @@ async function loadPlannerModels(refresh = false) {
     const workspaceId = state.workspace?.workspaceId || "";
     const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
     try {
+      setModelCatalogStatus("planner", "正在读取本机工具的规划模型目录…", true);
       const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`);
       if (sequence !== state.plannerModelRequest || provider !== $("#planner-provider").value) return;
       const selected = $("#planner-model").value.trim();
       renderModelPicker("planner", { ...catalog, models: [{ id: "runner-default", label: "沿用 Runner 默认模型", isDefault: true }, ...(catalog.models || [])], customAllowed: true }, selected || "runner-default", "沿用 Runner 默认模型");
-      $("#planner-model-hint").textContent = catalog.error || `${catalog.models.length} 个本机候选模型；选择只配置本次调用，不会启动模型。`;
-    } catch (error) { if (sequence === state.plannerModelRequest) $("#planner-model-hint").textContent = `${error.message}；可自定义模型 ID 或沿用 Runner 默认模型。`; }
+      setModelCatalogStatus("planner", catalog.error || `${catalog.models.length} 个本机候选模型；选择只配置本次调用，不会启动模型。`);
+    } catch (error) { if (sequence === state.plannerModelRequest) setModelCatalogStatus("planner", `${error.message}；可自定义模型 ID 或沿用 Runner 默认模型。`); }
     return;
   }
-  if (provider !== "deepseek-api") return;
+  if (provider !== "deepseek-api") { setModelCatalogStatus("planner", $("#planner-model-hint")?.textContent || "", false); return; }
   try {
+    setModelCatalogStatus("planner", "正在读取规划模型目录…", true);
     const catalog = await api(`/api/v1/providers/deepseek-api/models${refresh ? "?refresh=1" : ""}`);
     if (sequence !== state.plannerModelRequest || $("#planner-provider").value !== "deepseek-api") return;
     renderModelPicker("planner", catalog, $("#planner-model").value.trim(), "使用已配置模型");
-    $("#planner-model-hint").textContent = catalog.error || "候选项来自当前 Planner 接口，可选或自定义模型 ID。";
-  } catch (error) { if (sequence === state.plannerModelRequest) $("#planner-model-hint").textContent = error.message; }
+    setModelCatalogStatus("planner", catalog.error || "候选项来自当前 Planner 接口，可选或自定义模型 ID。");
+  } catch (error) { if (sequence === state.plannerModelRequest) setModelCatalogStatus("planner", error.message); }
 }
 function renderWorkspaces() {
-  const list = $("#workspace-list"); list.replaceChildren();
-  const cards = $("#workspace-cards"); cards.replaceChildren();
-  if (!state.workspaces.length) { list.innerHTML = '<div class="muted small" style="padding:8px">尚未添加项目</div>'; cards.innerHTML = '<div class="empty-state">添加一个项目目录，或先完成上一步连接。</div>'; return; }
-  for (const workspace of state.workspaces) {
-    const button = document.createElement("button"); button.className = `workspace-item ${state.workspace?.workspaceId === workspace.workspaceId ? "active" : ""}`; button.innerHTML = `<span class="workspace-glyph">⌂</span><span>${esc(workspace.label)}</span>`;
-    button.addEventListener("click", () => selectWorkspace(workspace.workspaceId)); list.append(button);
-    const card = document.createElement("button"); card.className = `project-card ${state.workspace?.workspaceId === workspace.workspaceId ? "selected" : ""}`;
-    card.innerHTML = `<span class="eyebrow">WORKSPACE</span><strong>${esc(workspace.label)}</strong><span class="muted small">${esc(workspace.path)}</span><span class="card-link">打开工作区 →</span>`;
-    card.addEventListener("click", () => selectWorkspace(workspace.workspaceId));
-    cards.append(card);
+  const list = $("#workspace-list");
+  const cards = $("#workspace-cards");
+  const reactSwitcher = globalThis.tokenCouponWorkspaceSwitcher;
+  if (!reactSwitcher) { list.replaceChildren(); cards.replaceChildren(); }
+  if (!state.workspaces.length) {
+    if (reactSwitcher) reactSwitcher.render([], undefined, selectWorkspace);
+    else { list.innerHTML = '<div class="muted small" style="padding:8px">尚未添加项目</div>'; cards.innerHTML = '<div class="empty-state">添加一个项目目录，或先完成上一步连接。</div>'; }
+    return;
   }
+  for (const workspace of state.workspaces) {
+    if (!reactSwitcher) {
+      const button = document.createElement("button"); button.className = `workspace-item ${state.workspace?.workspaceId === workspace.workspaceId ? "active" : ""}`; button.innerHTML = `<span class="workspace-glyph">⌂</span><span>${esc(workspace.label)}</span>`;
+      button.addEventListener("click", () => selectWorkspace(workspace.workspaceId)); list.append(button);
+      const card = document.createElement("button"); card.className = `project-card ${state.workspace?.workspaceId === workspace.workspaceId ? "selected" : ""}`;
+      card.innerHTML = `<span class="eyebrow">WORKSPACE</span><strong>${esc(workspace.label)}</strong><span class="muted small">${esc(workspace.path)}</span><span class="card-link">打开工作区 →</span>`;
+      card.addEventListener("click", () => selectWorkspace(workspace.workspaceId));
+      cards.append(card);
+    }
+  }
+  reactSwitcher?.render(state.workspaces, state.workspace?.workspaceId, selectWorkspace);
 }
 
 function planningListStatus(planning) {
@@ -1095,9 +1534,36 @@ function planningCreationTime(planning) {
   return `<time class="planning-created" datetime="${esc(date.toISOString())}" title="${esc(date.toLocaleString())}">创建 ${esc(text)}</time>`;
 }
 function renderPlanningList() {
-  const root = $("#planning-list"); root.replaceChildren();
-  const cards = $("#workspace-plan-cards"); cards.replaceChildren();
+  const root = $("#planning-list"), cards = $("#workspace-plan-cards");
   show($("#planning-nav-heading"), !!state.workspace);
+  const reactPlanning = globalThis.tokenCouponPlanningSwitcher;
+  if (reactPlanning) {
+    state.planToolsExpanded ??= new Map();
+    const items = state.plannings.map(planning => {
+      const status = planningListStatus(planning);
+      const identity = `${state.workspace.workspaceId}:${planning.planningId}`;
+      return {
+        planningId: planning.planningId,
+        title: planning.draft?.plan?.title || planning.messages?.[0]?.content?.slice(0, 28) || "新规划",
+        status: status.label,
+        statusTone: status.tone,
+        createdAt: planning.createdAt,
+        taskCount: planning.draft?.plan?.tasks?.length || 0,
+        selected: state.planning?.planningId === planning.planningId,
+        workflowLabel: planning.workflow?.label,
+        toolsExpanded: state.planToolsExpanded.get(identity) ?? (state.planning?.planningId === planning.planningId && ["models", "attempts"].includes(state.route?.tab)),
+      };
+    });
+    reactPlanning.render(
+      items,
+      state.route?.tab,
+      planningId => { void selectPlanning(planningId); },
+      (planningId, tab) => { if (state.workspace) void navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/plans/${encodeURIComponent(planningId)}/${tab}`); },
+      (planningId, expanded) => { if (state.workspace) state.planToolsExpanded.set(`${state.workspace.workspaceId}:${planningId}`, expanded); },
+    );
+    return;
+  }
+  root.replaceChildren(); cards.replaceChildren();
   for (const planning of state.plannings) {
     const button = document.createElement("button"); button.className = `workspace-item ${state.planning?.planningId === planning.planningId ? "active" : ""}`;
     const title = planning.draft?.plan?.title || planning.messages?.[0]?.content?.slice(0, 28) || "新规划";
@@ -1135,29 +1601,66 @@ async function loadWorkspace(workspaceId, sequence = state.navigationSequence) {
 function connectEvents() {
   clearTimeout(state.reconnectTimer);
   state.eventSource?.close();
-  state.eventSource = new EventSource(`/api/v1/events?after=${state.lastEventId}`);
-  const connected = () => { state.reconnectAttempts = 0; $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接"; if (state.initialized) { void refreshAll(); void readSelectedAttempt(); } };
-  state.eventSource.addEventListener("hello", connected);
-  state.eventSource.onopen = connected;
-  state.eventSource.onerror = () => {
+  const generation = state.eventGeneration = (state.eventGeneration || 0) + 1;
+  const connected = () => { if (generation === state.eventGeneration) $("#connection-label").textContent = "已连接，正在核对状态"; };
+  const failed = () => {
+    if (generation !== state.eventGeneration) return;
+    globalThis.tokenCouponGlobalPending?.unavailable();
     state.eventSource?.close(); state.eventSource = null; $("#connection-dot").classList.remove("online");
-    if (state.reconnectAttempts >= 5) { $("#connection-label").textContent = "需要重新连接"; return; }
+    if (state.reconnectAttempts >= 5) { $("#connection-label").textContent = "需要重新连接"; desktopConnectionChanged({ phase: "disconnected" }); return; }
     $("#connection-label").textContent = "正在重连";
     const delay = Math.min(16000, 1000 * (2 ** state.reconnectAttempts)) + Math.floor(Math.random() * 250);
     state.reconnectAttempts += 1; state.reconnectTimer = setTimeout(connectEvents, delay);
   };
-  state.eventSource.onmessage = (event) => consumeEvent(event);
-  for (const type of ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.progress", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"]) {
-    state.eventSource.addEventListener(type, (event) => consumeEvent(event));
-  }
+  state.eventSource = openEventStream(`/api/v1/events?after=${state.lastEventId}${state.daemonEpoch ? `&epoch=${encodeURIComponent(state.daemonEpoch)}` : ""}`, {
+    onHello: event => { void reconcileDaemon(event, generation).catch(error => { if (generation === state.eventGeneration) { disconnected(error); failed(); } }); },
+    onOpen: connected,
+    onError: failed,
+    onMessage: event => { if (generation === state.eventGeneration) consumeEvent(event); },
+    eventTypes: ["job.started", "job.succeeded", "job.failed", "job.cancel_requested", "job.cancelled", "planning.progress", "planning.updated", "review.completed", "planning.approved", "execution.completed", "draft.saved", "draft.revised", "interaction.requested", "interaction.resolved", "runner.output", "task.activity", "workspace.registered", "external.prepared", "external.completed", "external.handoff", "remote_authorization.updated", "remote_authorization.pending", "remote_authorization.decided", "remote_authorization.revoked", "session.model.updated", "session.control_requested", "task.model-switch.waiting", "remote_connection.updated", "remote_connection.started", "remote_connection.stopped"],
+  });
+}
+async function reconcileDaemon(event, generation) {
+  const hello = JSON.parse(event.data);
+  if (generation !== state.eventGeneration) return;
+  state.eventReconciling = true;
+  if (hello.epoch !== state.daemonEpoch || hello.resetReason) state.lastEventId = Number.isSafeInteger(hello.latestSequence) ? hello.latestSequence : 0;
+  try {
+    const health = await api("/api/v1/health");
+    if (generation !== state.eventGeneration) return;
+    if (hello.epoch !== health.epoch) throw new Error("daemon_epoch_changed：核对期间后台再次重启，请重新连接。");
+    const changed = state.daemonEpoch !== health.epoch;
+    applyDaemonHandshake(health);
+    state.daemonEpoch = health.epoch;
+    configureGlobalPending();
+    if (changed || hello.resetReason) {
+      state.loggedPlanEvents?.clear(); state.taskActivity = {};
+    }
+    // Only authoritative reads: do not re-submit any interrupted command or clear local inputs.
+    const [workspaces, providers, runners] = await Promise.all([api("/api/v1/workspaces"), api("/api/v1/providers"), api("/api/v1/runners")]);
+    if (generation !== state.eventGeneration) return;
+    state.workspaces = workspaces; state.providers = providers; state.runners = runners;
+    // Keep the current provider/model form controls and drafts untouched during a reconnect.
+    renderWorkspaces();
+    if (state.systemSettingsSupported) state.systemSettings = await api("/api/v1/settings");
+    if (state.initialized) { await refreshAll(true); await readSelectedAttempt(); await refreshRemoteConnection(); }
+    if (generation !== state.eventGeneration) return;
+    state.reconnectAttempts = 0; $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接 · 状态已核对";
+    void globalThis.tokenCouponGlobalPending?.refresh();
+    if (changed) showToast("后台已重新连接，已读取最新状态。未提交输入已保留，执行操作不会自动重放。");
+  } finally { if (generation === state.eventGeneration) state.eventReconciling = false; }
 }
 function consumeEvent(event) {
   let data; try { data = JSON.parse(event.data); } catch { return; }
   const sequence = Number(event.lastEventId || data.sequence); if (Number.isFinite(sequence)) state.lastEventId = Math.max(state.lastEventId, sequence);
+  if (state.eventReconciling || state.daemonEpoch && data.epoch !== state.daemonEpoch) return;
   if (data.type === "planning.progress") { consumePlanningProgress(data); return; }
   if (data.workspaceId === state.workspace?.workspaceId && data.planningId === state.planning?.planningId) logPlanEvent(data);
   if (data.type === "task.model-switch.waiting" && data.workspaceId === state.workspace?.workspaceId && data.planningId === state.planning?.planningId) { $("#job-label").textContent = data.payload?.message || "目标任务正在收尾，等待安全重试"; show($("#job-bar")); }
   if (data.type?.startsWith("remote_")) void refreshRemoteConnection();
+  if (["interaction.requested", "interaction.resolved", "job.succeeded", "job.failed", "job.cancelled"].includes(data.type) && !state.pendingQueueRefreshTimer) {
+    state.pendingQueueRefreshTimer = setTimeout(() => { state.pendingQueueRefreshTimer = null; void globalThis.tokenCouponGlobalPending?.refresh(); }, 200);
+  }
   if (data.workspaceId === state.workspace?.workspaceId && (data.planningId === state.planning?.planningId || !data.planningId)) {
     if (data.type === "runner.output" || data.type === "task.activity") {
       if (!state.outputRefreshTimer) state.outputRefreshTimer = setTimeout(() => { state.outputRefreshTimer = null; void readSelectedAttempt(); }, 350);
@@ -1433,24 +1936,34 @@ function renderRunAgents(config, plan) {
   let section = $("#run-agent-configuration");
   if (!section) {
     section = document.createElement("fieldset"); section.id = "run-agent-configuration"; section.className = "run-agent-configuration";
-    section.innerHTML = '<legend>本次执行 Runner／模型</legend><label class="compact-label">配置方式<select id="run-agent-mode"><option value="plan">沿用已批准草案</option><option value="unified">统一配置所有任务</option><option value="per-task">逐任务单独配置</option></select></label><div id="run-agent-defaults"></div><details id="run-agent-overrides"><summary>单独配置个别任务（可选）</summary><div id="run-agent-task-list"></div></details><p class="hint">只影响本次 Session 的 Runner／模型；任务正文、依赖及工具审批沿用已批准草案。模型留空使用所选 Runner 的本机默认。</p>';
+    section.innerHTML = '<legend>本次执行 Runner／模型</legend><label class="compact-label">配置方式<div id="run-agent-mode-root"><select id="run-agent-mode"><option value="plan">沿用已批准草案</option><option value="unified">统一配置所有任务</option><option value="per-task">逐任务单独配置</option></select></div></label><div id="run-agent-defaults"></div><details id="run-agent-overrides"><summary>单独配置个别任务（可选）</summary><div id="run-agent-task-list"></div></details><p class="hint">只影响本次 Session 的 Runner／模型；任务正文、依赖及工具审批沿用已批准草案。模型留空使用所选 Runner 的本机默认。</p>';
     $("#run-configuration-summary").after(section);
-    $("#run-agent-mode").addEventListener("change", () => { if (!state.runConfiguration) return; state.runConfiguration.agentMode = $("#run-agent-mode").value; state.runConfiguration.edited = true; state.runRequestKey = null; renderRunConfiguration(); });
+    if (!globalThis.tokenCouponRunAgentMode) $("#run-agent-mode").addEventListener("change", () => updateRunAgentMode($("#run-agent-mode").value));
   }
   section.disabled = !!state.activeJob || !!state.runInFlight;
-  for (const option of $("#run-agent-mode").options) if (option.value !== "plan") option.disabled = !state.executionSelectionSupported;
+  const mode = config.agentMode || "plan";
+  const modeOptions = [
+    { id: "plan", label: "沿用已批准草案", disabled: false },
+    { id: "unified", label: "统一配置所有任务", disabled: !state.executionSelectionSupported },
+    { id: "per-task", label: "逐任务单独配置", disabled: !state.executionSelectionSupported },
+  ];
+  if (globalThis.tokenCouponRunAgentMode) {
+    globalThis.tokenCouponRunAgentMode.render({ options: modeOptions, selectedMode: mode }, updateRunAgentMode);
+  } else {
+    for (const option of $("#run-agent-mode").options) if (option.value !== "plan") option.disabled = !state.executionSelectionSupported;
+    $("#run-agent-mode").value = mode;
+  }
   let supportNote = $("#run-agent-support-note");
   if (!supportNote) { supportNote = document.createElement("p"); supportNote.id = "run-agent-support-note"; supportNote.className = "hint"; supportNote.setAttribute("role", "status"); section.append(supportNote); }
   show(supportNote, !state.executionSelectionSupported); supportNote.textContent = "当前后台尚未加载运行模型选择功能，请正常重启后台并刷新此页面。仍可沿用已批准草案运行。";
-  const mode = config.agentMode || "plan", signature = JSON.stringify([state.runConfigKey, mode]);
-  $("#run-agent-mode").value = mode;
+  const signature = JSON.stringify([state.runConfigKey, mode]);
   if (section.dataset.signature === signature) {
     if (mode === "unified") $("#run-agent-overrides > summary").textContent = config.agentOverrides?.length ? `单独配置个别任务（已设置 ${config.agentOverrides.length} 项）` : "单独配置个别任务（可选）";
     for (const hint of section.querySelectorAll(".run-agent-inherited")) hint.textContent = `沿用统一配置：${labels[config.agentDefaults?.runnerId] || config.agentDefaults?.runnerId || ""} / ${config.agentDefaults?.modelId || "Runner 默认模型"}`;
     return;
   }
   section.dataset.signature = signature;
-  const defaults = $("#run-agent-defaults"), list = $("#run-agent-task-list"), overrides = $("#run-agent-overrides"); defaults.replaceChildren(); list.replaceChildren();
+  const defaults = $("#run-agent-defaults"), list = $("#run-agent-task-list"), overrides = $("#run-agent-overrides"); disposeAgentSelectionControls(defaults); disposeAgentSelectionControls(list); defaults.replaceChildren(); list.replaceChildren();
   show(defaults, mode === "unified"); show(overrides, mode !== "plan"); overrides.open = mode === "per-task";
   overrides.querySelector("summary").textContent = mode === "per-task" ? `逐任务配置（${plan.tasks.length} 项）` : config.agentOverrides?.length ? `单独配置个别任务（已设置 ${config.agentOverrides.length} 项）` : "单独配置个别任务（可选）";
   if (mode === "plan") return;
@@ -1489,6 +2002,13 @@ function renderRunAgents(config, plan) {
     list.append(row);
   }
 }
+function updateRunAgentMode(mode) {
+  if (!state.runConfiguration || !["plan", "unified", "per-task"].includes(mode)) return;
+  state.runConfiguration.agentMode = mode;
+  state.runConfiguration.edited = true;
+  state.runRequestKey = null;
+  renderRunConfiguration();
+}
 function renderRunConfiguration() {
   const plan = state.planning;
   const root = $("#run-configuration");
@@ -1516,20 +2036,37 @@ function renderRunConfiguration() {
   const config = state.runConfiguration;
   renderRunAgents(config, plan.draft.plan);
   const candidates = verificationCandidates(plan.draft.plan, plan.verificationTasks);
-  const radio = document.querySelector(`input[name="run-mode-choice"][value="${config.mode}"]`);
-  for (const item of document.querySelectorAll('input[name="run-mode-choice"]')) item.checked = item === radio;
+  if (globalThis.tokenCouponRunModeSelector) {
+    const radios = [...document.querySelectorAll('input[name="run-mode-choice"]')];
+    const options = radios.map(radio => ({ id: radio.value, title: radio.closest("label")?.querySelector("strong")?.textContent || radio.value, description: radio.closest("label")?.querySelector("small")?.textContent || "" }));
+    globalThis.tokenCouponRunModeSelector.render({ options, selectedMode: config.mode || "" }, mode => persistRunConfiguration(mode, true));
+  } else {
+    const radio = document.querySelector(`input[name="run-mode-choice"][value="${config.mode}"]`);
+    for (const item of document.querySelectorAll('input[name="run-mode-choice"]')) item.checked = item === radio;
+  }
   show($("#run-custom-fields"), config.mode === "custom");
-  const verification = $("#run-verification");
   const previousVerification = config.verificationTaskId;
-  verification.replaceChildren();
-  if (!candidates.length) verification.add(new Option("没有满足依赖要求的最终验证任务", ""));
-  for (const candidate of candidates) verification.add(new Option(`${candidate.title} · ${candidate.taskId}`, candidate.taskId));
-  verification.value = candidates.some(item => item.taskId === previousVerification) ? previousVerification : candidates.length === 1 ? candidates[0].taskId : "";
-  config.verificationTaskId = verification.value;
-  $("#run-parallel").value = String(config.maxParallel || 1);
-  $("#run-isolation").value = config.isolation || "git-worktree";
+  const verificationOptions = candidates.length
+    ? candidates.map(candidate => ({ id: candidate.taskId, label: `${candidate.title} · ${candidate.taskId}` }))
+    : [{ id: "", label: "没有满足依赖要求的最终验证任务" }];
+  const selectedVerification = candidates.some(item => item.taskId === previousVerification) ? previousVerification : candidates.length === 1 ? candidates[0].taskId : "";
+  const parallelOptions = [...$("#run-parallel").options].map(option => ({ id: option.value, label: option.textContent || option.value }));
+  const isolationOptions = [...$("#run-isolation").options].map(option => ({ id: option.value, label: option.textContent || option.value }));
+  config.verificationTaskId = selectedVerification;
+  if (globalThis.tokenCouponRunParameters) {
+    globalThis.tokenCouponRunParameters.render({
+      parallelOptions, selectedParallel: String(config.maxParallel || 1), isolationOptions, selectedIsolation: config.isolation || "git-worktree",
+      verificationOptions, selectedVerification, showVerification: config.isolation !== "shared",
+    }, (field, value) => persistRunConfiguration(undefined, true, { field, value }));
+  } else {
+    const verification = $("#run-verification");
+    verification.replaceChildren(...verificationOptions.map(option => new Option(option.label, option.id)));
+    verification.value = selectedVerification;
+    $("#run-parallel").value = String(config.maxParallel || 1);
+    $("#run-isolation").value = config.isolation || "git-worktree";
+  }
   const shared = config.isolation === "shared";
-  show($("#run-verification-wrap"), !shared);
+  if (!globalThis.tokenCouponRunParameters) show($("#run-verification-wrap"), !shared);
   const selection = runExecutionSelection(config, plan.draft.plan);
   const taskModes = [...new Set(plan.draft.plan.tasks.map(({ task }) => { const execution = launchExecutionForTask(task, selection); return `${labels[execution.runnerId] || execution.runnerId}${execution.modelId ? ` / ${execution.modelId}` : " / Runner 默认模型"}`; }))];
   $("#run-configuration-summary").textContent = `${config.needsReconfirm ? "草案版本已变化，旧参数仅供参考；请重新选择默认或自定义后再启动。 " : ""}批准草案：draft-${plan.approval.draftRevision}。本次 Runner／模型：${taskModes.join("；") || "未设置"}。启动配置独立保存在 Session，任务内容和依赖沿用已批准草案。`;
@@ -1552,7 +2089,7 @@ function startNewTask() {
   state.resetPlanningPolicy = true;
   return navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/new`);
 }
-async function refreshAll() {
+async function refreshAll(rethrow = false) {
   if (!state.workspace) return;
   try {
     const workspaceId = state.workspace.workspaceId;
@@ -1563,7 +2100,7 @@ async function refreshAll() {
     const id = state.planning?.planningId;
     if (id && state.plannings.some((plan) => plan.planningId === id) && state.route?.page === "plan") await loadPlanning(id);
     renderWorkspaceAccess();
-  } catch (error) { showToast(error.message, true); }
+  } catch (error) { showToast(error.message, true); if (rethrow === true) throw error; }
 }
 function renderPlanning() {
   const plan = state.planning; if (!plan) return;
@@ -1575,19 +2112,27 @@ function renderPlanning() {
   if (plan.sourcePlanning) { sourceLink.textContent = `修订自 ${shortId(plan.sourcePlanning.planningId)} · 原草案 draft-${plan.sourcePlanning.draftRevision} · 查看原记录`; sourceLink.href = `#/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/plans/${encodeURIComponent(plan.sourcePlanning.planningId)}`; }
   $("#planning-status").textContent = plan.workflow?.label || statuses[plan.session?.status] || statuses[plan.status] || plan.session?.status || plan.status;
   $("#planning-status").className = `badge ${statusClass(plan.session?.status || plan.status)}`;
-  $("#turn-count").textContent = `${plan.messages?.length || 0} 条`;
-  const conversation = $("#conversation"); conversation.replaceChildren();
-  for (const message of (plan.messages || []).slice(-30)) {
-    const item = document.createElement("article"); item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
-    item.innerHTML = `<div class="message-label">${message.role === "user" ? "你" : "Planner"}</div><div>${esc(message.content)}</div>`; conversation.append(item);
-  }
+  const conversationMessages = (plan.messages || []).slice(-30).map((message, index) => ({
+    messageId: String(message.messageId || `message-${index}`), roleClass: message.role === "user" ? "user" : "assistant",
+    label: message.role === "user" ? "你" : "Planner", content: message.content,
+  }));
   const pendingInputs = [...new Map((plan.externalOperations || []).filter((operation) => operation.role === "plan" && ["prepared", "stale", "interrupted", "failed"].includes(operation.state) && operation.message && !(plan.messages || []).some((message) => message.messageId === operation.sourceMessageId)).reverse().map(operation => [operation.sourceMessageId || operation.operationId, operation])).values()];
-  for (const operation of pendingInputs) {
-    const item = document.createElement("article"); item.className = "message user";
-    item.innerHTML = `<div class="message-label">你 · ${externalOperationState(operation) === "prepared" ? "已登记，等待网页" : "已登记，需要继续处理"}</div><div>${esc(operation.message)}</div>`; conversation.append(item);
+  const pendingMessages = pendingInputs.map(operation => ({
+    messageId: String(operation.sourceMessageId || operation.operationId), roleClass: "user",
+    label: `你 · ${externalOperationState(operation) === "prepared" ? "已登记，等待网页" : "已登记，需要继续处理"}`, content: operation.message,
+  }));
+  const messageItems = [...conversationMessages, ...pendingMessages];
+  const conversationModel = { count: (plan.messages?.length || 0) + pendingInputs.length, messages: messageItems };
+  if (globalThis.tokenCouponConversationView) globalThis.tokenCouponConversationView.render(conversationModel);
+  else {
+    $("#turn-count").textContent = `${conversationModel.count} 条`;
+    const conversation = $("#conversation"); conversation.replaceChildren();
+    for (const message of messageItems) {
+      const item = document.createElement("article"); item.className = `message ${message.roleClass}`;
+      const label = document.createElement("div"), content = document.createElement("div"); label.className = "message-label"; label.textContent = message.label; content.textContent = message.content; item.append(label, content); conversation.append(item);
+    }
+    if (!conversation.children.length) conversation.innerHTML = '<div class="empty-state">本轮还没有对话内容。</div>';
   }
-  $("#turn-count").textContent = `${(plan.messages?.length || 0) + pendingInputs.length} 条`;
-  if (!conversation.children.length) conversation.innerHTML = '<div class="empty-state">本轮还没有对话内容。</div>';
   renderRequirements(); renderDraft(); renderReview(); renderSession(); renderInteractions(); renderRunConfiguration();
   renderExternalOperations(); renderHandoffs();
   renderReviewerControls(plan);
@@ -1603,7 +2148,7 @@ function renderPlanWorkflowBanner() {
   const plan = state.planning; if (!plan) return;
   const banner = $("#plan-workflow-banner"); banner.replaceChildren();
   const heading = document.createElement("strong"); heading.textContent = plan.workflow?.label || $("#planning-status").textContent;
-  const detail = document.createElement("p"); detail.textContent = plan.workflow?.role ? plan.workflow.detail : $("#plan-next-action").textContent;
+  const detail = document.createElement("p"); detail.textContent = plan.workflow?.role ? plan.workflow.detail : state.planNextAction || $("#plan-next-action").textContent;
   banner.append(heading, detail);
   const lastTurn = plan.turns?.at(-1);
   if (["codex-agent", "claude-agent"].includes(plan.config.provider) && !plan.execution && !plan.localOperation?.progress && ["failed", "timed_out", "cancelled", "interrupted"].includes(lastTurn?.status) && !(plan.externalOperations || []).some(item => ["prepared", "submitting"].includes(item.state))) {
@@ -1629,6 +2174,12 @@ function renderPlanWorkflowBanner() {
 function renderReviewerControls(plan) {
   let select = $("#reviewer-mode");
   const button = $("#review-button");
+  const setReviewerMode = mode => {
+    localStorage.setItem("tc-reviewer-mode", mode);
+    $("#reviewer-model").value = "";
+    state.modelChoiceSelections.reviewer = "";
+    state.reviewerModelMode = "";
+  };
   if (!select) {
     const controls = document.createElement("div"); controls.className = "review-run-controls";
     const methodLabel = document.createElement("label"); methodLabel.className = "compact-label"; methodLabel.textContent = "审查方式";
@@ -1636,19 +2187,22 @@ function renderReviewerControls(plan) {
     for (const [value, label] of [["planning", "沿用规划方式"], ["codex-agent", "Codex 本机 Agent"], ["claude-agent", "Claude Code 本机 Agent"], ["deepseek-api", "DeepSeek API"], ["web-chatgpt", "ChatGPT 网页 MCP"], ["web-claude", "Claude 网页 MCP"]]) select.add(new Option(label, value));
     methodLabel.append(select); controls.append(methodLabel);
     const modelLabel = document.createElement("label"); modelLabel.id = "reviewer-model-wrap"; modelLabel.className = "compact-label"; modelLabel.textContent = "审查模型";
+    const modelChoiceRoot = document.createElement("div"); modelChoiceRoot.id = "reviewer-model-choice-root";
     const modelChoice = document.createElement("select"); modelChoice.id = "reviewer-model-choice";
     const modelInput = document.createElement("input"); modelInput.id = "reviewer-model"; modelInput.maxLength = 120; modelInput.placeholder = "沿用 Runner 默认模型";
-    modelLabel.append(modelChoice, modelInput); controls.append(modelLabel);
+    modelChoiceRoot.append(modelChoice); modelLabel.append(modelChoiceRoot, modelInput); controls.append(modelLabel);
     button.parentElement.insertBefore(controls, button);
     const hint = document.createElement("p"); hint.id = "reviewer-mode-hint"; hint.className = "hint"; button.parentElement.parentElement.insertBefore(hint, button.parentElement.nextSibling);
   }
   if (!$("#reviewer-model-choice")) {
-    const choice = document.createElement("select"); choice.id = "reviewer-model-choice"; $("#reviewer-model").before(choice);
+    let choiceRoot = $("#reviewer-model-choice-root");
+    if (!choiceRoot) { choiceRoot = document.createElement("div"); choiceRoot.id = "reviewer-model-choice-root"; $("#reviewer-model").before(choiceRoot); }
+    const choice = document.createElement("select"); choice.id = "reviewer-model-choice"; choiceRoot.append(choice);
   }
   if (!select.dataset.bound) {
     select.dataset.bound = "true";
-    select.addEventListener("change", () => { localStorage.setItem("tc-reviewer-mode", select.value); $("#reviewer-model").value = ""; state.reviewerModelMode = ""; renderReviewerControls(state.planning); });
-    $("#reviewer-model-choice").addEventListener("change", () => applyModelChoice("reviewer"));
+    if (!globalThis.tokenCouponReviewerModeSelector) select.onchange = () => { setReviewerMode(select.value); renderReviewerControls(state.planning); };
+    if (!globalThis.tokenCouponModelChoiceSelectors) $("#reviewer-model-choice").addEventListener("change", () => applyModelChoice("reviewer"));
   }
   const reviewKey = `${plan.planningId}:${state.systemSettings?.revision || 0}`;
   if (state.reviewerPolicyKey !== reviewKey && functionPolicy("review")) {
@@ -1659,6 +2213,15 @@ function renderReviewerControls(plan) {
   }
   const stored = functionPolicy("review") ? null : localStorage.getItem("tc-reviewer-mode");
   if (stored && [...select.options].some(option => option.value === stored)) select.value = stored;
+  if (globalThis.tokenCouponReviewerModeSelector) {
+    select.onchange = null;
+    globalThis.tokenCouponReviewerModeSelector.render({ options: [...select.options].map(option => ({ id: option.value, label: option.textContent || option.value })), selectedMode: select.value || "planning" }, mode => {
+      setReviewerMode(mode);
+      queueMicrotask(() => renderReviewerControls(state.planning));
+    });
+  } else {
+    select.onchange = () => { setReviewerMode(select.value); renderReviewerControls(state.planning); };
+  }
   const mode = select.value || "planning";
   const web = mode === "web-chatgpt" || mode === "web-claude" || mode === "planning" && isWebMcp(plan.config.provider);
   const model = ["codex-agent", "claude-agent", "deepseek-api", "web-chatgpt", "web-claude"].includes(mode);
@@ -1674,6 +2237,7 @@ function renderReviewerControls(plan) {
   };
   $("#reviewer-mode-hint").textContent = hints[mode] || "请选择审查方式。";
   if (mode !== state.reviewerModelMode) {
+    state.modelChoiceSelections.reviewer = "";
     state.reviewerModelMode = mode;
     void runReviewModelCatalog(mode);
   }
@@ -1795,7 +2359,9 @@ async function confirmBudgetExtension() {
 }
 function renderRequirements() {
   const pending = (state.planning.requirements?.items || []).filter((item) => item.status === "pending");
-  $("#reply-text").placeholder = pending.length ? `还有 ${pending.length} 项需求待澄清，请回答 Planner 的问题` : "回答澄清问题，或补充需求";
+  const replyPlaceholder = pending.length ? `还有 ${pending.length} 项需求待澄清，请回答 Planner 的问题` : "回答澄清问题，或补充需求";
+  $("#reply-text").placeholder = replyPlaceholder;
+  globalThis.tokenCouponReplyComposer?.setPlaceholder(replyPlaceholder);
   const mcp = selectedOperationIsWeb("planning");
   let prepare = $("#prepare-web-planning");
   if (!prepare) {
@@ -1818,9 +2384,16 @@ function renderRequirements() {
   $("#send-reply").disabled = state.replying || !!state.planning.execution;
 }
 function renderDraft() {
-  const draft = state.planning.draft; const target = $("#plan-view");
-  const expanded = new Set([...target.querySelectorAll("details[open]")].map(item => item.dataset.taskId)); target.replaceChildren();
-  if (!draft) { closePlanEditor(); target.innerHTML = `<div class="empty-state">${isWebMcp(state.planning.config.provider) ? "等待网页模型生成草案；请在 ChatGPT／Claude 中提出需求或回答澄清。" : "Planner 正在收集需求，或尚未生成草案。回答上方的问题后继续。"}</div>`; return; }
+  const draft = state.planning.draft; const target = $("#plan-view"); const draftView = globalThis.tokenCouponPlanDraftView;
+  const expanded = draftView ? new Set() : new Set([...target.querySelectorAll("details[open]")].map(item => item.dataset.taskId));
+  if (!draftView) target.replaceChildren();
+  if (!draft) {
+    closePlanEditor();
+    const emptyMessage = isWebMcp(state.planning.config.provider) ? "等待网页模型生成草案；请在 ChatGPT／Claude 中提出需求或回答澄清。" : "Planner 正在收集需求，或尚未生成草案。回答上方的问题后继续。";
+    if (draftView) draftView.render({ contextKey: `${state.planning.planningId}:empty`, emptyMessage, tasks: [] });
+    else target.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
+    return;
+  }
   if (!state.editingPlan && state.editedPlanHash !== draft.planHash) {
     $("#plan-editor").value = JSON.stringify(draft.plan, null, 2); state.savedPlanText = $("#plan-editor").value; state.editedPlanHash = draft.planHash;
   }
@@ -1832,24 +2405,47 @@ function renderDraft() {
   for (const candidate of candidates) verification.add(new Option(`${candidate.title} · ${candidate.taskId}`, candidate.taskId));
   verification.value = candidates.some(item => item.taskId === previous) ? previous : candidates.length === 1 ? candidates[0].taskId : "";
   show($("#verification-wrap"), $("#isolation").value === "git-worktree");
-  for (const entry of draft.plan.tasks) {
-    const card = document.createElement("details"); card.className = "plan-card"; card.dataset.taskId = entry.task.id; card.open = expanded.has(entry.task.id);
-    card.innerHTML = `<summary><span>${esc(entry.task.title)}</span><span class="muted small">${esc(entry.task.id)} · ${entry.task.schemaVersion === 2 ? "结构化任务" : "旧版正文"} · 查看详情</span></summary>`;
+  const taskViews = draft.plan.tasks.map(entry => {
+    const task = entry.task;
+    const sections = task.schemaVersion === 2
+      ? [["需求目标", task.objective], ["设计与技术方案", task.approach], ["实施步骤", task.steps], ["交付物", task.deliverables], ["验收标准", task.acceptanceCriteria], ["约束", task.constraints], ["其他说明", task.notes]]
+      : [["任务正文", task.prompt]];
+    return {
+      taskId: task.id,
+      title: task.title,
+      schemaLabel: task.schemaVersion === 2 ? "结构化任务" : "旧版正文",
+      sections: sections.filter(([, value]) => value !== undefined && value !== "" && !(Array.isArray(value) && !value.length)).map(([label, value]) => ({ label, value })),
+      dependsOn: entry.dependsOn,
+      runnerLabel: labels[task.execution.runnerId] || task.execution.runnerId,
+      modelLabel: task.execution.modelId || "Runner 默认模型",
+    };
+  });
+  if (draftView) draftView.render({ contextKey: `${state.planning.planningId}:${draft.planHash}`, tasks: taskViews });
+  else for (const task of taskViews) {
+    const card = document.createElement("details"); card.className = "plan-card"; card.dataset.taskId = task.taskId; card.open = expanded.has(task.taskId);
+    const summary = document.createElement("summary"), title = document.createElement("span"), hint = document.createElement("span");
+    title.textContent = task.title; hint.className = "muted small"; hint.textContent = `${task.taskId} · ${task.schemaLabel} · 查看详情`; summary.append(title, hint);
     const sections = document.createElement("div"); sections.className = "plan-field-preview";
-    const content = entry.task.schemaVersion === 2
-      ? [["需求目标", entry.task.objective], ["设计与技术方案", entry.task.approach], ["实施步骤", entry.task.steps], ["交付物", entry.task.deliverables], ["验收标准", entry.task.acceptanceCriteria], ["约束", entry.task.constraints], ["其他说明", entry.task.notes]]
-      : [["任务正文", entry.task.prompt]];
-    for (const [label, value] of content) {
-      if (value === undefined || value === "" || Array.isArray(value) && !value.length) continue;
-      const section = document.createElement("section"), heading = document.createElement("strong"), body = document.createElement("p"); heading.textContent = label;
-      body.textContent = Array.isArray(value) ? value.map((line, index) => `${index + 1}. ${line}`).join("\n") : value; section.append(heading, body); sections.append(section);
+    for (const item of task.sections) {
+      const section = document.createElement("section"), heading = document.createElement("strong"), body = document.createElement("p"); heading.textContent = item.label;
+      body.textContent = Array.isArray(item.value) ? item.value.map((line, index) => `${index + 1}. ${line}`).join("\n") : item.value; section.append(heading, body); sections.append(section);
     }
-    const meta = document.createElement("div"); meta.className = "task-meta"; meta.textContent = `依赖：${entry.dependsOn.join(", ") || "无"} · ${labels[entry.task.execution.runnerId] || entry.task.execution.runnerId}${entry.task.execution.modelId ? ` / ${entry.task.execution.modelId}` : " / Runner 默认模型"}`;
-    card.append(sections, meta); target.append(card);
+    const meta = document.createElement("div"); meta.className = "task-meta"; meta.textContent = `依赖：${task.dependsOn.join(", ") || "无"} · ${task.runnerLabel} / ${task.modelLabel}`;
+    card.append(summary, sections, meta); target.append(card);
   }
   renderPlanEditControls();
 }
 function createAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
+  return globalThis.tokenCouponAgentSelectionControls
+    ? createReactAgentSelectionControls(initial, onChange, isCurrent, runners)
+    : createNativeAgentSelectionControls(initial, onChange, isCurrent, runners);
+}
+function disposeAgentSelectionControls(container) {
+  const bridge = globalThis.tokenCouponAgentSelectionControls;
+  if (!bridge) return;
+  for (const mount of [container, ...container.querySelectorAll("[data-agent-selection-mount]")]) bridge.unmount(mount);
+}
+function createNativeAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
   const root = document.createElement("div"), fields = document.createElement("div"), hint = document.createElement("p");
   root.className = "agent-selection-controls"; fields.className = "settings-grid task-agent-config-fields"; hint.className = "hint"; hint.setAttribute("role", "status");
   const runner = document.createElement("select"); runner.dataset.field = "runner";
@@ -1884,12 +2480,66 @@ function createAgentSelectionControls(initial, onChange = () => {}, isCurrent = 
   model.addEventListener("input", () => { preview(); onChange(value()); }); refresh.addEventListener("click", () => void load(true));
   return { root, load, value };
 }
+function createReactAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
+  const root = document.createElement("div"); root.dataset.agentSelectionMount = "true";
+  let runnerId = initial.runnerId, modelId = initial.modelId || "", modelChoice = modelId || "", choices = [], hint = "";
+  const values = new Map([[runnerId, modelId]]); let generation = 0, customAllowed = runnerId !== "mock";
+  const currentRunner = () => (runners || []).map(item => ({ id: item.id, label: `${labels[item.id] || item.id}${item.available ? "" : " · 未就绪"}`, disabled: !item.available && item.id !== initial.runnerId }));
+  const runnerOptions = () => {
+    const options = currentRunner();
+    if (!options.some(option => option.id === runnerId)) options.push({ id: runnerId, label: `${labels[runnerId] || runnerId} · 当前配置`, disabled: false });
+    return options;
+  };
+  const value = () => ({ runnerId, ...(modelId.trim() ? { modelId: modelId.trim() } : {}) });
+  const preview = () => `配置预览：${labels[runnerId] || runnerId} / ${modelId.trim() || "Runner 默认模型"}`;
+  const selectedChoice = () => modelChoice === "__custom__" ? "__custom__" : choices.some(item => item.id === modelId) ? modelId : modelChoice;
+  const render = () => globalThis.tokenCouponAgentSelectionControls?.render(root, {
+    runners: runnerOptions(), selectedRunnerId: runnerId, modelChoices: choices,
+    selectedModelChoice: selectedChoice(), modelId, showCustomModel: selectedChoice() === "__custom__", hint,
+  }, {
+    onRunnerChange: nextRunner => {
+      if (!isCurrent() || nextRunner === runnerId) return;
+      values.set(runnerId, modelId.trim()); runnerId = nextRunner; modelId = values.get(nextRunner) || "";
+      modelChoice = modelId || ""; customAllowed = runnerId !== "mock"; hint = preview(); render(); onChange(value()); void load();
+    },
+    onModelChoice: nextChoice => {
+      if (!isCurrent()) return;
+      modelChoice = nextChoice;
+      if (nextChoice !== "__custom__") modelId = nextChoice;
+      hint = preview(); render(); onChange(value());
+    },
+    onModelInput: nextModel => {
+      if (!isCurrent()) return;
+      modelId = nextModel; values.set(runnerId, modelId.trim()); hint = preview(); render(); onChange(value());
+    },
+    onRefresh: () => void load(true),
+  });
+  const fill = catalog => {
+    customAllowed = catalog.customAllowed !== false;
+    choices = [{ id: "", label: "沿用所选 Runner 的默认模型" }, ...(catalog.models || []).map(item => ({ id: item.id, label: `${item.label || item.id}${item.label && item.label !== item.id ? ` · ${item.id}` : ""}` }))];
+    if (customAllowed || modelId) choices.push({ id: "__custom__", label: "自定义模型 ID…" });
+    modelChoice = choices.some(item => item.id === modelId) ? modelId : "__custom__";
+  };
+  const load = async (force = false) => {
+    const sequence = ++generation, requestedRunner = runnerId, workspaceId = state.workspace?.workspaceId || "";
+    fill({ models: [], customAllowed: requestedRunner !== "mock" }); hint = "正在读取所选 Runner 的完整模型目录…"; render();
+    try {
+      const catalog = await api(`/api/v1/runners/${encodeURIComponent(requestedRunner)}/models?workspaceId=${encodeURIComponent(workspaceId)}${force ? "&refresh=true" : ""}`);
+      if (sequence !== generation || !root.isConnected || runnerId !== requestedRunner || !isCurrent()) return;
+      fill(catalog); hint = `${preview()}${catalog.error ? ` · ${catalog.error}；仍可使用默认或自定义模型。` : ` · ${catalog.models?.length || 0} 个目录候选，实际可用性以调用结果为准。`}`; render();
+    } catch (error) {
+      if (sequence === generation && root.isConnected && isCurrent()) { hint = `${preview()} · 目录暂不可读：${error.message}；可使用默认或自定义模型。`; render(); }
+    }
+  };
+  fill({ models: [], customAllowed }); hint = preview(); render();
+  return { root, load, value };
+}
 
 function openTaskAgentConfig() {
   const planning = state.planning, draft = planning?.draft;
   if (!planning || !draft || planning.execution) return;
   state.taskAgentContext = { planningId: planning.planningId, workspaceId: state.workspace.workspaceId, planHash: draft.planHash, draftRevision: draft.draftRevision };
-  const root = $("#task-agent-config-list"); root.replaceChildren();
+  const root = $("#task-agent-config-list"); disposeAgentSelectionControls(root); root.replaceChildren();
   const defaults = planning.executionDefaults || {};
   $("#task-agent-config-defaults").textContent = `全局默认：${labels[defaults.runnerId] || defaults.runnerId || "未设置"}${defaults.modelId ? ` / ${defaults.modelId}` : " / Runner 默认模型"} · 执行模式 managed`;
   $("#task-agent-config-error").textContent = "";
@@ -1941,9 +2591,12 @@ function renderPlanEditControls() {
   $("#save-plan").disabled = state.savingPlan || !planHasChanges() || !!state.planning?.execution;
   $("#save-plan").textContent = state.savingPlan ? "正在校验并保存…" : "校验并保存";
   $("#plan-edit-status").textContent = state.savingPlan ? "正在校验并保存…" : state.editingPlan && state.editBase.hash !== state.planning?.draft?.planHash ? "当前草案已更新。未保存内容已保留；请放弃修改后重新编辑，避免覆盖新版本。" : planHasChanges() ? "已修改，尚未保存。" : "尚无修改。";
+  if (state.editingPlan && globalThis.tokenCouponPlanDraftEditor) globalThis.tokenCouponPlanDraftEditor.setDisabled($("#plan-text-editor"), state.savingPlan);
 }
 function closePlanEditor() {
   state.editingPlan = false; state.editBase = null; state.editedPlanHash = "";
+  globalThis.tokenCouponPlanDraftEditor?.unmount($("#plan-text-editor"));
+  globalThis.tokenCouponPlanDiff?.unmount($("#plan-diff"));
   show($("#plan-diff"), false); renderPlanEditControls();
 }
 function openPlanEditor() {
@@ -1954,6 +2607,16 @@ function openPlanEditor() {
 }
 function renderTextEditor() {
   let plan; try { plan = JSON.parse($("#plan-editor").value); } catch { return; }
+  if (globalThis.tokenCouponPlanDraftEditor && state.editBase) {
+    globalThis.tokenCouponPlanDraftEditor.render($("#plan-text-editor"), {
+      identity: `${state.editBase.workspaceId}:${state.editBase.planningId}:${state.editBase.hash}`,
+      plan, disabled: state.savingPlan,
+    }, updated => {
+      $("#plan-editor").value = JSON.stringify(updated, null, 2);
+      previewPlanDiff(); renderPlanEditControls();
+    });
+    return;
+  }
   const root = $("#plan-text-editor"); root.replaceChildren();
   const field = (label, value, update, multiline = false, array = false) => {
     const wrapper = document.createElement("label"); wrapper.className = "draft-text-field"; wrapper.append(document.createTextNode(label));
@@ -2030,10 +2693,15 @@ function previewPlanDiff() {
     const changed = [];
     for (const [id, entry] of newMap) {
       const before = oldMap.get(id); if (!before) continue;
-      for (const key of Object.keys(names)) if (JSON.stringify(entry.task[key] ?? null) !== JSON.stringify(before.task[key] ?? null)) changed.push(`任务 ${id} · ${names[key]}`);
+      for (const key of Object.keys(names)) if (JSON.stringify(entry.task[key] ?? null) !== JSON.stringify(before.task[key] ?? null)) changed.push({ taskId: id, label: names[key] });
     }
-    box.textContent = `草案差异 · ${edited.title !== old.title ? `计划标题：${old.title} → ${edited.title}\n` : ""}修改 ${changed.length} 项 / 新增 ${added.length} 项 / 删除 ${removed.length} 项\n${changed.length ? changed.map(item => `• ${item}`).join("\n") : "正文无字段修改"}${added.length ? `\n新增任务：${added.join("、")}` : ""}${removed.length ? `\n删除任务：${removed.join("、")}` : ""}`;
-  } catch (error) { box.textContent = `JSON 校验失败：${error.message}`; }
+    const model = { titleChange: edited.title !== old.title ? { from: old.title, to: edited.title } : undefined, changed, addedTasks: added, removedTasks: removed };
+    if (globalThis.tokenCouponPlanDiff) { globalThis.tokenCouponPlanDiff.render(box, model); return; }
+    box.textContent = `草案差异 · ${edited.title !== old.title ? `计划标题：${old.title} → ${edited.title}\n` : ""}修改 ${changed.length} 项 / 新增 ${added.length} 项 / 删除 ${removed.length} 项\n${changed.length ? changed.map(item => `• 任务 ${item.taskId} · ${item.label}`).join("\n") : "正文无字段修改"}${added.length ? `\n新增任务：${added.join("、")}` : ""}${removed.length ? `\n删除任务：${removed.join("、")}` : ""}`;
+  } catch (error) {
+    if (globalThis.tokenCouponPlanDiff) globalThis.tokenCouponPlanDiff.render(box, { changed: [], addedTasks: [], removedTasks: [], error: error.message });
+    else box.textContent = `JSON 校验失败：${error.message}`;
+  }
 }
 function renderReview() {
   const plan = state.planning, review = plan.review, box = $("#review-view");
@@ -2041,43 +2709,77 @@ function renderReview() {
   const signature = JSON.stringify([state.workspace.workspaceId, plan.planningId, plan.draft?.planHash, review, plan.workflow, plan.approval, plan.execution, plan.reviewHistory, plan.approvalHistory, plan.reviewReadError, state.systemSettings?.revision, state.activeJob?.jobId]);
   // A poll with no review change must not close an open select or move a typing cursor.
   if (state.renderedReviewSignature === signature) return;
-  state.renderedReviewSignature = signature; box.replaceChildren();
+  state.renderedReviewSignature = signature;
   const key = `${state.workspace.workspaceId}:${plan.planningId}:${plan.draft?.planHash}:${review?.reviewId}`;
   if (state.reviewChoiceContext?.key !== key) {
     if (state.reviewChoiceContext?.planningId === plan.planningId && state.reviewChoiceContext.dirty) showToast("草案或审查版本已变化，旧处理选择不再适用，请重新确认。", true);
     let choices = {}; try { choices = JSON.parse(sessionStorage.getItem(`tc-review-${key}`) || "{}"); } catch { /* Invalid local input is not a review record. */ }
     state.reviewChoiceContext = { key, planningId: plan.planningId, choices, dirty: Object.keys(choices).length > 0 };
   }
-  const summary = document.createElement("section"); summary.className = `review-overview ${review?.current ? "is-current" : ""}`;
-  const summaryTitle = document.createElement("strong"); summaryTitle.textContent = review ? `${review.current ? "有效审查" : "审查已过期"} · draft-${review.draftRevision}` : plan.workflow?.label || "当前草案尚无有效审查";
+  const summaryTitle = review ? `${review.current ? "有效审查" : "审查已过期"} · draft-${review.draftRevision}` : plan.workflow?.label || "当前草案尚无有效审查";
   const reviewConfig = review?.reviewerConfig || plan.config;
   const reviewSource = review ? `审查来源：${({ deepseek: "DeepSeek API", mock: "离线模拟", "codex-agent": "Codex 本机 Agent", "claude-agent": "Claude Code 本机 Agent", "chatgpt-mcp": "ChatGPT 网页 MCP", "web-mcp": "Claude／网页 MCP" })[reviewConfig.provider] || reviewConfig.provider} · ${review.reviewerReportedModel ? `实际报告 ${review.reviewerReportedModel}` : `配置 ${reviewConfig.model}${["codex-agent", "claude-agent"].includes(reviewConfig.provider) ? "（Runner 未报告实际模型）" : ""}`}` : "";
-  const summaryText = document.createElement("p"); summaryText.textContent = review ? `${review.reviewId ? `Review ${shortId(review.reviewId)} · ` : ""}${review.summary || "无总结"}${reviewSource ? `\n${reviewSource}` : ""}` : !selectedOperationIsWeb("review") ? "点击上方审查按钮，调用所选本机 Agent／API 审查当前草案。有待处理网页审查时，先确认接管。" : plan.workflow?.detail || "先准备审查，再到网页领取并提交报告。";
-  summary.append(summaryTitle, summaryText);
-  box.append(summary);
-  if (plan.reviewReadError) { const error = document.createElement("p"); error.className = "notice notice-warn"; error.textContent = `审查记录读取失败：${plan.reviewReadError}`; box.append(error); }
-  for (const finding of review?.findings || []) {
-    const item = document.createElement("article"); item.className = "finding";
-    const severity = finding.severity === "error" ? "阻塞建议" : finding.severity === "warning" ? "风险提醒" : "可选建议";
-    item.innerHTML = `<div class="finding-head"><span class="badge ${finding.severity === "error" ? "badge-error" : finding.severity === "warning" ? "badge-warning" : "badge-neutral"}">${severity}</span><h4>${esc(finding.findingId)} · ${esc(finding.description)}</h4></div><p class="finding-suggestion">建议：${esc(finding.suggestion)}</p><details class="finding-basis"><summary>查看依据</summary><p class="basis">${esc(finding.basis)}</p></details>`;
-    if (review.current && !plan.execution && !plan.approval && plan.workflow?.role !== "plan") item.append(reviewChoice(finding));
-    box.append(item);
-  }
-  if (review?.resolutions?.length) {
-    const resolutions = document.createElement("details"); resolutions.className = "review-resolutions";
-    const heading = document.createElement("summary"); heading.textContent = `上轮问题逐项回顾 · ${review.resolutions.filter(item => item.status === "resolved").length}/${review.resolutions.length} 已解决`;
-    resolutions.append(heading);
-    for (const resolution of review.resolutions) { const row = document.createElement("p"); row.className = resolution.status === "resolved" ? "resolution-resolved" : "resolution-open"; row.textContent = `${resolution.findingId} · ${resolution.status === "resolved" ? "已解决" : "仍未解决"}：${resolution.basis}`; resolutions.append(row); }
-    box.append(resolutions);
-  }
-  if (plan.reviewHistory?.length || plan.approvalHistory?.length) {
-    const history = document.createElement("details"); history.className = "foldout";
-    const heading = document.createElement("summary"); heading.textContent = "历史审查与批准（只读，不适用于本版）"; history.append(heading);
-    for (const previous of plan.reviewHistory || []) { const text = document.createElement("p"); text.textContent = `draft-${previous.draftRevision} · ${previous.summary} · ${previous.findings.length} 个问题`; history.append(text); }
-    for (const previous of plan.approvalHistory || []) { const text = document.createElement("p"); text.textContent = `历史批准 draft-${previous.draftRevision} · ${new Date(previous.recordedAt).toLocaleString()}`; history.append(text); }
-    box.append(history);
+  const summaryText = review ? `${review.reviewId ? `Review ${shortId(review.reviewId)} · ` : ""}${review.summary || "无总结"}${reviewSource ? `\n${reviewSource}` : ""}` : !selectedOperationIsWeb("review") ? "点击上方审查按钮，调用所选本机 Agent／API 审查当前草案。有待处理网页审查时，先确认接管。" : plan.workflow?.detail || "先准备审查，再到网页领取并提交报告。";
+  const findings = (review?.findings || []).map(finding => ({
+    findingId: finding.findingId,
+    severity: ["error", "warning"].includes(finding.severity) ? finding.severity : "info",
+    description: finding.description,
+    suggestion: finding.suggestion,
+    basis: finding.basis,
+  }));
+  const history = [
+    ...(plan.reviewHistory || []).map(previous => `draft-${previous.draftRevision} · ${previous.summary} · ${previous.findings.length} 个问题`),
+    ...(plan.approvalHistory || []).map(previous => `历史批准 draft-${previous.draftRevision} · ${new Date(previous.recordedAt).toLocaleString()}`),
+  ];
+  if (globalThis.tokenCouponReviewView) {
+    const choices = Object.fromEntries(findings.map(finding => [finding.findingId, state.reviewChoiceContext.choices[finding.findingId] || { choice: "accept", custom: "" }]));
+    globalThis.tokenCouponReviewView.render({
+      contextKey: key,
+      summaryTitle,
+      summaryText,
+      isCurrent: !!review?.current,
+      ...(plan.reviewReadError ? { reviewReadError: plan.reviewReadError } : {}),
+      findings,
+      canChoose: !!review?.current && !plan.execution && !plan.approval && plan.workflow?.role !== "plan",
+      choices,
+      resolutions: review?.resolutions || [],
+      history,
+    }, rememberReviewChoice);
+  } else {
+    box.replaceChildren();
+    const summary = document.createElement("section"); summary.className = `review-overview ${review?.current ? "is-current" : ""}`;
+    const summaryHeading = document.createElement("strong"); summaryHeading.textContent = summaryTitle;
+    const summaryParagraph = document.createElement("p"); summaryParagraph.textContent = summaryText;
+    summary.append(summaryHeading, summaryParagraph); box.append(summary);
+    if (plan.reviewReadError) { const error = document.createElement("p"); error.className = "notice notice-warn"; error.textContent = `审查记录读取失败：${plan.reviewReadError}`; box.append(error); }
+    for (const finding of review?.findings || []) {
+      const item = document.createElement("article"); item.className = "finding";
+      const severity = finding.severity === "error" ? "阻塞建议" : finding.severity === "warning" ? "风险提醒" : "可选建议";
+      item.innerHTML = `<div class="finding-head"><span class="badge ${finding.severity === "error" ? "badge-error" : finding.severity === "warning" ? "badge-warning" : "badge-neutral"}">${severity}</span><h4>${esc(finding.findingId)} · ${esc(finding.description)}</h4></div><p class="finding-suggestion">建议：${esc(finding.suggestion)}</p><details class="finding-basis"><summary>查看依据</summary><p class="basis">${esc(finding.basis)}</p></details>`;
+      if (review.current && !plan.execution && !plan.approval && plan.workflow?.role !== "plan") item.append(reviewChoice(finding));
+      box.append(item);
+    }
+    if (review?.resolutions?.length) {
+      const resolutions = document.createElement("details"); resolutions.className = "review-resolutions";
+      const heading = document.createElement("summary"); heading.textContent = `上轮问题逐项回顾 · ${review.resolutions.filter(item => item.status === "resolved").length}/${review.resolutions.length} 已解决`;
+      resolutions.append(heading);
+      for (const resolution of review.resolutions) { const row = document.createElement("p"); row.className = resolution.status === "resolved" ? "resolution-resolved" : "resolution-open"; row.textContent = `${resolution.findingId} · ${resolution.status === "resolved" ? "已解决" : "仍未解决"}：${resolution.basis}`; resolutions.append(row); }
+      box.append(resolutions);
+    }
+    if (history.length) {
+      const details = document.createElement("details"); details.className = "foldout";
+      const heading = document.createElement("summary"); heading.textContent = "历史审查与批准（只读，不适用于本版）"; details.append(heading);
+      for (const entry of history) { const text = document.createElement("p"); text.textContent = entry; details.append(text); }
+      box.append(details);
+    }
   }
   renderReviewActions(review);
+}
+function rememberReviewChoice(findingId, value) {
+  if (!state.reviewChoiceContext) return;
+  state.reviewChoiceContext.choices[findingId] = value;
+  state.reviewChoiceContext.dirty = true;
+  try { sessionStorage.setItem(`tc-review-${state.reviewChoiceContext.key}`, JSON.stringify(state.reviewChoiceContext.choices)); } catch { /* Input remains in memory if storage is full. */ }
 }
 function renderReviewContinuation() {
   const plan = state.planning; if (!plan) return;
@@ -2109,9 +2811,13 @@ function renderReviewActions(review) {
 }
 async function submitReviewRevision(review) {
   if (functionPolicy("revision") && !state.operationRoutingSupported) { showToast("后台尚未支持按设置切换修订方式，请重启后台并刷新页面。", true); return; }
-  const actions = [...$("#review-view").querySelectorAll(".finding-choice")].map((row) => ({ findingId: row.dataset.findingId, choice: row.querySelector("select").value, custom: row.querySelector("textarea").value.trim() }));
-  if (actions.some((item) => item.choice === "custom" && !item.custom)) {
-    for (const row of $("#review-view").querySelectorAll(".finding-choice")) { const invalid = row.querySelector("select").value === "custom" && !row.querySelector("textarea").value.trim(); row.querySelector(".field-error").textContent = "请填写自定义修订说明"; show(row.querySelector(".field-error"), invalid); }
+  const actions = globalThis.tokenCouponReviewView
+    ? review.findings.map(finding => { const saved = state.reviewChoiceContext.choices[finding.findingId] || { choice: "accept", custom: "" }; return { findingId: finding.findingId, choice: saved.choice, custom: saved.custom.trim() }; })
+    : [...$("#review-view").querySelectorAll(".finding-choice")].map(row => ({ findingId: row.dataset.findingId, choice: row.querySelector("select").value, custom: row.querySelector("textarea").value.trim() }));
+  const invalidChoices = actions.filter(item => item.choice === "custom" && !item.custom.trim()).map(item => item.findingId);
+  if (invalidChoices.length) {
+    if (globalThis.tokenCouponReviewView) globalThis.tokenCouponReviewView.setErrors(invalidChoices);
+    else for (const row of $("#review-view").querySelectorAll(".finding-choice")) { const invalid = invalidChoices.includes(row.dataset.findingId); row.querySelector(".field-error").textContent = "请填写自定义修订说明"; show(row.querySelector(".field-error"), invalid); }
     showToast("自定义修订说明不能为空。", true); return;
   }
   if (!await confirmPlanChanges()) return;
@@ -2140,13 +2846,22 @@ function renderTaskDependencies(tasks) {
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}`;
   state.dagNodes = nodes;
   const signature = JSON.stringify([identity, nodes]); if (root.dataset.signature === signature) return;
-  root.dataset.signature = signature; root.replaceChildren(); if (!nodes.length) { if ($("#dag-dialog").open) $("#dag-dialog").close(); return; }
-  const heading = document.createElement("h4"); heading.textContent = `任务依赖 · ${nodes.length} 个任务`; root.append(heading);
-  const preview = document.createElement("div"); preview.className = "dag-preview dag-mini-map";
-  const graph = buildTaskDag(nodes, preferredDagFocus(nodes), 2, "preview"); preview.append(graph.svg); root.append(preview);
-  const full = document.createElement("button"); full.type = "button"; full.className = "button button-quiet task-dag-full"; full.textContent = "放大查看任务 DAG";
-  full.addEventListener("click", () => openTaskDag(identity)); root.append(full);
-  const caption = document.createElement("p"); caption.className = "hint"; caption.textContent = `以${byTitle(nodes, graph.focusId)}为中心 · 显示 ${graph.shown}/${nodes.length} 项 · 远端分支折叠`; root.append(caption);
+  root.dataset.signature = signature;
+  if (!nodes.length) {
+    if (globalThis.tokenCouponTaskDependencyPreview) globalThis.tokenCouponTaskDependencyPreview.render(null);
+    else root.replaceChildren();
+    if ($("#dag-dialog").open) $("#dag-dialog").close();
+    return;
+  }
+  const graph = buildTaskDag(nodes, preferredDagFocus(nodes), 2, "preview");
+  if (globalThis.tokenCouponTaskDependencyPreview) globalThis.tokenCouponTaskDependencyPreview.render({ taskCount: nodes.length, focusLabel: byTitle(nodes, graph.focusId), shown: graph.shown, svg: graph.svg, onOpen: () => openTaskDag(identity) });
+  else {
+    root.replaceChildren();
+    const heading = document.createElement("h4"); heading.textContent = `任务依赖 · ${nodes.length} 个任务`; root.append(heading);
+    const preview = document.createElement("div"); preview.className = "dag-preview dag-mini-map"; preview.append(graph.svg); root.append(preview);
+    const full = document.createElement("button"); full.type = "button"; full.className = "button button-quiet task-dag-full"; full.textContent = "放大查看任务 DAG"; full.addEventListener("click", () => openTaskDag(identity)); root.append(full);
+    const caption = document.createElement("p"); caption.className = "hint"; caption.textContent = `以${byTitle(nodes, graph.focusId)}为中心 · 显示 ${graph.shown}/${nodes.length} 项 · 远端分支折叠`; root.append(caption);
+  }
   if ($("#dag-dialog").open) {
     if (state.dagView?.identity === identity) updateTaskDag(); else $("#dag-dialog").close();
   }
@@ -2219,9 +2934,17 @@ function updateTaskDag(recenter = false) {
   const viewport = $("#dag-viewport"), x = viewport.scrollLeft, y = viewport.scrollTop;
   Object.assign(view, { focusId: graph.focusId, width: graph.width, height: graph.height, focusX: graph.focusX, focusY: graph.focusY });
   viewport.replaceChildren(graph.svg); setTaskDagZoom(view.zoom);
-  const select = $("#dag-focus"); const optionsSignature = JSON.stringify(state.dagNodes);
-  if (select.dataset.signature !== optionsSignature) { select.dataset.signature = optionsSignature; select.replaceChildren(...state.dagNodes.map(node => new Option(`${dagStatusIcon(node.status)} ${node.title} · ${statuses[node.status] || node.status}`, node.id))); }
-  select.value = graph.focusId;
+  const focusOptions = state.dagNodes.map(node => ({ id: node.id, label: `${dagStatusIcon(node.status)} ${node.title} · ${statuses[node.status] || node.status}` }));
+  if (globalThis.tokenCouponDagFocusSelector) {
+    globalThis.tokenCouponDagFocusSelector.render(focusOptions, graph.focusId, taskId => {
+      if (!state.dagView) return;
+      state.dagView.focusId = taskId; state.dagView.autoFocus = false; updateTaskDag(true);
+    });
+  } else {
+    const select = $("#dag-focus"); const optionsSignature = JSON.stringify(state.dagNodes);
+    if (select.dataset.signature !== optionsSignature) { select.dataset.signature = optionsSignature; select.replaceChildren(...focusOptions.map(option => new Option(option.label, option.id))); }
+    select.value = graph.focusId;
+  }
   $("#dag-scope").textContent = `聚焦：${byTitle(state.dagNodes, graph.focusId)} · 前后 ${view.depth} 层 · 显示 ${graph.shown}/${state.dagNodes.length} 项；远端任务已折叠。${graph.shown >= 21 ? "已达到单视图 21 项上限，请切换聚焦任务查看其他分支。" : ""}${graph.invalid ? "依赖记录不完整或存在环，请核对草案。" : ""}`;
   $("#dag-expand").disabled = graph.shown === state.dagNodes.length || graph.shown >= 21 || view.depth >= 8;
   $("#dag-collapse").disabled = view.depth <= 1;
@@ -2250,13 +2973,21 @@ function showDagTaskDetails(taskId) {
   const summaryFields = [["状态", `${dagStatusIcon(task?.status)} ${statuses[task?.status] || task?.status || "未开始"}`], ["任务 ID", taskId], ["Runner / 模型", `${execution.runnerId || "未设置"} / ${task?.currentAttempt?.reportedModel || execution.modelId || "Runner 默认"}`], ["前置任务", (task?.dependsOn || definition?.dependsOn || []).map(id => byTitle(state.dagNodes || [], id)).join("、") || "无"]];
   const spec = definition?.task;
   const bodyFields = spec?.schemaVersion === 2 ? [["需求目标", spec.objective], ["设计与技术方案", spec.approach], ["实施步骤", spec.steps], ["交付物", spec.deliverables], ["验收标准", spec.acceptanceCriteria], ["约束", spec.constraints], ["其他说明", spec.notes]] : [["正文与验收", spec?.prompt || "暂无计划正文"]];
-  for (const [label, raw] of [...summaryFields, ...bodyFields]) {
-    if (raw === undefined || raw === null) continue; const value = Array.isArray(raw) ? raw.map((line, i) => `${i + 1}. ${line}`).join("\n") : raw;
-    const section = document.createElement("section"), heading = document.createElement("h4"), body = document.createElement("pre"); heading.textContent = label; body.textContent = value; section.append(heading, body); content.append(section);
-  }
+  const sections = [...summaryFields, ...bodyFields].filter(([, raw]) => raw !== undefined && raw !== null).map(([label, raw]) => ({ label, value: Array.isArray(raw) ? raw.map((line, i) => `${i + 1}. ${line}`).join("\n") : raw }));
   const attemptId = task?.activeAttemptId || task?.attempts?.at(-1)?.attemptId;
-  $("#dag-task-attempt").disabled = !attemptId;
-  $("#dag-task-attempt").onclick = () => { if (!attemptId) return; $("#dag-task-dialog").close(); if ($("#dag-dialog").open) $("#dag-dialog").close(); void openTaskDetails(attemptId); };
+  if (globalThis.tokenCouponDagTaskDetails) {
+    globalThis.tokenCouponDagTaskDetails.render($("#dag-task-content-root"), { sections, canOpenAttempt: !!attemptId }, () => {
+      if (!attemptId) return;
+      $("#dag-task-dialog").close(); if ($("#dag-dialog").open) $("#dag-dialog").close(); void openTaskDetails(attemptId);
+    });
+  } else {
+    content.replaceChildren();
+    for (const { label, value } of sections) {
+      const section = document.createElement("section"), heading = document.createElement("h4"), body = document.createElement("pre"); heading.textContent = label; body.textContent = value; section.append(heading, body); content.append(section);
+    }
+    $("#dag-task-attempt").disabled = !attemptId;
+    $("#dag-task-attempt").onclick = () => { if (!attemptId) return; $("#dag-task-dialog").close(); if ($("#dag-dialog").open) $("#dag-dialog").close(); void openTaskDetails(attemptId); };
+  }
   $("#dag-task-dialog").showModal();
 }
 function taskBoardGroup(status) {
@@ -2286,40 +3017,111 @@ function taskExecutionLabel(task) {
   const pending = pendingTaskInteraction(task);
   return pending ? pending.request.kind === "question" ? "等待回答" : pending.request.kind === "approval" ? "等待工具审批" : "等待表单／网页确认" : statuses[task.status] || task.status;
 }
+function taskBoardViewModel(session, tasks) {
+  const groups = [
+    { id: "completed", label: "已完成", tasks: [] },
+    { id: "running", label: "运行中", tasks: [] },
+    { id: "pending", label: "未开始 / 等待依赖", tasks: [] },
+    { id: "errors", label: "错误 / 中断", tasks: [] },
+  ];
+  const definitions = new Map((state.planning.draft?.plan.tasks || []).map(entry => [entry.task.id, entry]));
+  for (const task of tasks) {
+    const definition = definitions.get(task.taskId), status = task.status, pending = pendingTaskInteraction(task);
+    const attempt = task.currentAttempt, execution = attempt?.execution || task.execution || definition?.task.execution || {};
+    const dependencies = task.dependsOn || definition?.dependsOn || [];
+    const unfinishedDependencies = dependencies.filter(id => !tasks.some(item => item.taskId === id && item.status === "succeeded"));
+    const dependencyItems = (unfinishedDependencies.length ? unfinishedDependencies : dependencies).map(id => {
+      const dependency = tasks.find(item => item.taskId === id);
+      return { label: `${dependency?.title || id}（${statuses[dependency?.status] || "状态待核验"}）`, tone: statusClass(dependency?.status) };
+    });
+    const completedDependencies = unfinishedDependencies.length && unfinishedDependencies.length < dependencies.length ? dependencies.filter(id => !unfinishedDependencies.includes(id)).map(id => {
+      const dependency = tasks.find(item => item.taskId === id);
+      return { label: `${dependency?.title || id}（${statuses[dependency?.status] || "状态待核验"}）`, tone: statusClass(dependency?.status) };
+    }) : [];
+    const id = task.activeAttemptId || task.attempts?.at(-1)?.attemptId;
+    const runner = attempt?.runnerId || execution.runnerId || "未知 Runner";
+    const model = attempt?.reportedModel ? reportedModelLabel(attempt.reportedModel, attempt.reportedModelSource) : execution.modelId ? `${execution.modelId}（配置模型）` : "沿用 Runner 默认，实际模型未报告";
+    const elapsed = attempt?.startedAt ? ` · 耗时 ${Math.max(0, Math.floor(((attempt.finishedAt ? Date.parse(attempt.finishedAt) : Date.now()) - Date.parse(attempt.startedAt)) / 1000))} 秒` : "";
+    const recent = attempt?.activity || state.taskActivity?.[task.taskId];
+    const activity = pending ? "请在上方“审批与回答”处理；提交后继续当前任务" : recent || (status === "planned" ? `等待依赖：${dependencies.join("、") || "等待调度"}` : task.reasonCode === "user_input_required" ? "已暂停自动调度，请查看最新 Attempt 的结论" : attempt?.lastActivityAt ? `最近活动：${new Date(attempt.lastActivityAt).toLocaleTimeString()}` : "等待输出");
+    const taskStatusLabel = status === "blocked" && task.reasonCode === "user_input_required" ? "等待用户决策" : status === "blocked" && task.reasonCode === "dependency_not_succeeded" ? "等待前置任务" : taskExecutionLabel(task);
+    const icon = status === "succeeded" ? "✓" : status === "failed" ? "!" : status === "running" ? "◌" : status === "blocked" ? "Ⅱ" : "·";
+    const actions = [{ label: "查看明细", onClick: () => showDagTaskDetails(task.taskId) }];
+    if (id) actions.push({ label: "查看回复与工具活动", onClick: () => void openTaskDetails(id) });
+    if (status === "succeeded") actions.push({ label: "查看任务生成结果", onClick: () => void openTaskResults(task.taskId) });
+    const retryable = ["failed", "timed_out", "cancelled", "interrupted"].includes(status) && dependencies.every(id => tasks.some(item => item.taskId === id && item.status === "succeeded")) && !session.health?.recoveryRequired && !["active", "unknown", "identity_conflict"].includes(session.health?.state);
+    if (retryable) actions.push({ label: `重试 ${task.taskId}`, onClick: () => startSessionAction("session/retry", `重试 ${task.taskId}`, { taskId: task.taskId }) });
+    groups.find(group => group.id === taskBoardGroup(status)).tasks.push({
+      taskId: task.taskId,
+      icon: pending ? "Ⅱ" : icon,
+      iconTone: pending ? "blocked" : status,
+      title: task.title || definition?.task.title || task.taskId,
+      runnerModel: `${runner} / ${model}`,
+      attemptSummary: `${task.attempts?.length || 0} 次 attempt`,
+      elapsed,
+      ...(task.reasonCode ? { reasonCode: task.reasonCode } : {}),
+      activity,
+      ...(task.result?.summary ? { resultSummary: task.result.summary, resultTruncated: task.result.truncated } : {}),
+      dependencyLabel: unfinishedDependencies.length ? "等待前置任务完成：" : "前置任务已全部完成：",
+      dependencies: dependencyItems,
+      ...(completedDependencies.length ? { completedDependencyLabel: "已完成的前置任务：", completedDependencies } : {}),
+      ...(session.models?.overrides?.[task.taskId] ? { nextModel: `下次启动模型：${session.models.overrides[task.taskId].modelId || "沿用 Session 启动配置"}；当前 Attempt 不原地变更` } : {}),
+      ...(executionConclusion(status, task.reasonCode) ? { outcome: executionConclusion(status, task.reasonCode) } : {}),
+      statusLabel: taskStatusLabel,
+      statusTone: statusClass(pending ? "blocked" : status),
+      actions,
+    });
+  }
+  return { groups };
+}
 function renderLiveTaskReplies(tasks) {
   const root = $("#live-task-replies");
   const wasOpen = !!root.querySelector("details[open]");
-  root.replaceChildren();
   const ordered = tasks.filter(item => item.currentAttempt).map((task, index) => ({ task, index, time: Date.parse(task.currentAttempt.startedAt || task.currentAttempt.lastActivityAt || "") || 0 }))
     .sort((a, b) => b.time - a.time || b.index - a.index).map(item => item.task);
   const latest = ordered[0], current = ordered.filter(task => task.status === "running" || task === latest), history = ordered.filter(task => !current.includes(task));
   const latestButton = $("#execution-latest-details"); latestButton.disabled = !latest;
   latestButton.dataset.attemptId = latest?.currentAttempt.attemptId || "";
   $("#execution-response-context").textContent = latest ? `最近一次记录：${latest.title || latest.taskId} · ${shortId(latest.currentAttempt.attemptId)}${latest.currentAttempt.startedAt ? ` · ${new Date(latest.currentAttempt.startedAt).toLocaleString()}` : ""}。历史任务结果另行折叠。` : "尚无执行记录；启动后在此查看任务与模型返回。";
-  const overflow = document.createElement("details"); overflow.className = "live-replies-overflow foldout"; overflow.open = wasOpen;
-  const extraCount = Math.max(0, current.length - 3) + history.length;
-  const summary = document.createElement("summary"); summary.textContent = `其他任务与历史返回（${extraCount} 项，不代表本次重试）`; overflow.append(summary);
-  for (const [index, task] of [...current, ...history].entries()) {
-    const attempt = task.currentAttempt, card = document.createElement("article"), heading = document.createElement("strong"), body = document.createElement("p"), activity = document.createElement("p");
-    const model = attempt.reportedModel ? reportedModelLabel(attempt.reportedModel, attempt.reportedModelSource) : attempt.execution?.modelId ? `${attempt.execution.modelId}（配置值）` : "Runner 默认模型，实际未验证";
+  const cards = [...current, ...history].map((task, index) => {
+    const attempt = task.currentAttempt;
+    const modelLabel = attempt.reportedModel ? reportedModelLabel(attempt.reportedModel, attempt.reportedModelSource) : attempt.execution?.modelId ? `${attempt.execution.modelId}（配置值）` : "Runner 默认模型，实际未验证";
     const historical = history.includes(task);
-    card.className = "live-task-reply"; card.dataset.attemptId = attempt.attemptId;
     const pending = pendingTaskInteraction(task);
-    heading.textContent = `${historical ? "历史任务 · " : ""}${task.title || task.taskId} · ${taskExecutionLabel(task)} · ${model}`;
-    body.textContent = attempt.lastReply ? `模型返回：${attempt.lastReply}` : "模型尚未返回文字；以工具活动及执行状态为准。";
     const time = attempt.lastActivityAt ? Date.parse(attempt.lastActivityAt) : NaN;
-    activity.className = "hint"; activity.textContent = pending ? `${shortId(attempt.attemptId)} · 请在上方“审批与回答”处理：${pending.request.summary || pending.request.title}。提交后继续当前任务。` : `${shortId(attempt.attemptId)} · ${attempt.activity || (task.status === "running" ? "等待下一条可观测活动" : "本次任务执行已结束")}${Number.isFinite(time) ? ` · ${new Date(time).toLocaleString()}` : ""}${task.status === "running" ? "。长任务暂无输出不等于已停止。" : ""}`;
-    card.append(heading);
-    if (attempt.reason && ["failed", "interrupted", "cancelled", "timed_out"].includes(task.status)) { const error = document.createElement("p"); error.className = "reply-verdict reply-error"; error.textContent = `中断／错误原因：${attempt.reason}`; card.append(error); }
-    card.append(body, activity);
-    if (["failed", "interrupted", "cancelled", "timed_out"].includes(task.status) || task.status === "blocked" && task.reasonCode === "user_input_required") {
-      const diagnose = document.createElement("button"); diagnose.type = "button"; diagnose.className = "button button-quiet"; diagnose.textContent = "分析原因";
-      diagnose.addEventListener("click", async () => { await openTaskDetails(attempt.attemptId); await openAttemptDiagnosis(); }); card.append(diagnose);
+    const failed = ["failed", "interrupted", "cancelled", "timed_out"].includes(task.status);
+    return {
+      attemptId: attempt.attemptId,
+      heading: `${historical ? "历史任务 · " : ""}${task.title || task.taskId} · ${taskExecutionLabel(task)} · ${modelLabel}`,
+      reply: attempt.lastReply ? `模型返回：${attempt.lastReply}` : "模型尚未返回文字；以工具活动及执行状态为准。",
+      activity: pending ? `${shortId(attempt.attemptId)} · 请在上方“审批与回答”处理：${pending.request.summary || pending.request.title}。提交后继续当前任务。` : `${shortId(attempt.attemptId)} · ${attempt.activity || (task.status === "running" ? "等待下一条可观测活动" : "本次任务执行已结束")}${Number.isFinite(time) ? ` · ${new Date(time).toLocaleString()}` : ""}${task.status === "running" ? "。长任务暂无输出不等于已停止。" : ""}`,
+      ...(attempt.reason && failed ? { error: `中断／错误原因：${attempt.reason}` } : {}),
+      showDiagnosis: failed || task.status === "blocked" && task.reasonCode === "user_input_required",
+      onDiagnose: async () => { await openTaskDetails(attempt.attemptId); await openAttemptDiagnosis(); },
+    };
+  });
+  const visible = cards.slice(0, Math.min(3, current.length)), overflowCards = cards.slice(visible.length);
+  const model = { visible, overflow: overflowCards, overflowLabel: `其他任务与历史返回（${overflowCards.length} 项，不代表本次重试）` };
+  if (globalThis.tokenCouponLiveTaskReplies) globalThis.tokenCouponLiveTaskReplies.render(model);
+  else {
+    root.replaceChildren();
+    const renderCard = cardModel => {
+      const card = document.createElement("article"), heading = document.createElement("strong"), body = document.createElement("p"), activity = document.createElement("p");
+      card.className = "live-task-reply"; card.dataset.attemptId = cardModel.attemptId; heading.textContent = cardModel.heading; body.textContent = cardModel.reply; activity.className = "hint"; activity.textContent = cardModel.activity; card.append(heading);
+      if (cardModel.error) { const error = document.createElement("p"); error.className = "reply-verdict reply-error"; error.textContent = cardModel.error; card.append(error); }
+      card.append(body, activity);
+      if (cardModel.showDiagnosis) { const diagnose = document.createElement("button"); diagnose.type = "button"; diagnose.className = "button button-quiet"; diagnose.textContent = "分析原因"; diagnose.addEventListener("click", cardModel.onDiagnose); card.append(diagnose); }
+      return card;
+    };
+    for (const card of visible) root.append(renderCard(card));
+    if (overflowCards.length) {
+      const overflow = document.createElement("details"); overflow.className = "live-replies-overflow foldout"; overflow.open = wasOpen;
+      const summary = document.createElement("summary"); summary.textContent = model.overflowLabel; overflow.append(summary);
+      for (const card of overflowCards) overflow.append(renderCard(card));
+      root.append(overflow);
     }
-    (index < 3 && !historical ? root : overflow).append(card);
   }
-  if (extraCount) root.append(overflow);
-  show(root, !!root.children.length);
+  show(root, !!cards.length);
 }
 function renderRuntimeModelPanel(tasks) {
   const candidates = tasks.filter(task => task.status !== "succeeded" && (task.execution?.runnerId || state.planning.draft?.plan.tasks.find(entry => entry.task.id === task.taskId)?.task.execution.runnerId) !== "mock");
@@ -2329,30 +3131,66 @@ function renderRuntimeModelPanel(tasks) {
   if (!candidates.length) return;
   const select = $("#runtime-model-task"), signature = JSON.stringify([state.workspace.workspaceId, state.planning.planningId, candidates.map(task => task.taskId)]);
   if (signature !== state.runtimeTaskSignature) {
-    state.runtimeTaskSignature = signature; const previous = select.value; select.replaceChildren(...candidates.map(task => new Option(task.title || task.taskId, task.taskId)));
-    if (candidates.some(task => task.taskId === previous)) select.value = previous;
-    state.runtimeModelCatalogKey = null; void loadRuntimeModelChoices();
+    state.runtimeTaskSignature = signature;
+    const previous = state.runtimeModelTaskId || select.value;
+    state.runtimeModelTaskId = candidates.some(task => task.taskId === previous) ? previous : candidates[0].taskId;
+    state.runtimeModelCatalogKey = null;
+    state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+    state.runtimeModelChoice = ""; state.runtimeModelCustomValue = "";
+    void loadRuntimeModelChoices();
   }
-  const target = candidates.find(task => task.taskId === select.value), busy = !!state.runtimeModelSubmitting || state.activeJob?.kind === "session.model-switch" && state.activeJob.status === "running";
+  state.runtimeModelCandidates = candidates;
+  renderRuntimeModelControls();
+  const target = candidates.find(task => task.taskId === state.runtimeModelTaskId), busy = !!state.runtimeModelSubmitting || state.activeJob?.kind === "session.model-switch" && state.activeJob.status === "running";
   $("#runtime-model-save").disabled = busy;
   $("#runtime-model-retry").disabled = busy || target?.status !== "running" || state.planning.session.health?.state !== "active";
   if (!state.runtimeModelSubmitting) $("#runtime-model-status").textContent = `配置版本 ${state.planning.session.models?.revision || 0} · ${target?.title || target?.taskId || ""}：${statuses[target?.status] || ""}。运行中停止重试会等待当前批次安全收尾；不停止其他任务。`;
 }
+function renderRuntimeModelControls() {
+  const tasks = (state.runtimeModelCandidates || []).map(task => ({ id: task.taskId, label: task.title || task.taskId }));
+  const models = state.runtimeModelChoices || [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+  const bridge = globalThis.tokenCouponRuntimeModelControls;
+  if (bridge) {
+    bridge.render({ tasks, selectedTaskId: state.runtimeModelTaskId || "", models, selectedModelId: state.runtimeModelChoice || "", customModelId: state.runtimeModelCustomValue || "" }, {
+      onTaskChange: selectRuntimeModelTask,
+      onModelChange: value => { state.runtimeModelChoice = value; renderRuntimeModelControls(); },
+      onCustomModelChange: value => { state.runtimeModelCustomValue = value; renderRuntimeModelControls(); },
+    });
+    return;
+  }
+  const task = $("#runtime-model-task"), previous = task.value;
+  task.replaceChildren(...tasks.map(item => new Option(item.label, item.id)));
+  task.value = tasks.some(item => item.id === (state.runtimeModelTaskId || previous)) ? state.runtimeModelTaskId || previous : tasks[0]?.id || "";
+  const choice = $("#runtime-model-choice"); choice.replaceChildren(...models.map(item => new Option(item.label, item.id)));
+  choice.value = state.runtimeModelChoice || "";
+  $("#runtime-model-custom").value = state.runtimeModelCustomValue || "";
+  show($("#runtime-model-custom").parentElement, choice.value === "__custom__");
+}
+function selectRuntimeModelTask(taskId) {
+  if (!state.runtimeModelCandidates?.some(task => task.taskId === taskId)) return;
+  state.runtimeModelTaskId = taskId;
+  state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+  state.runtimeModelChoice = ""; state.runtimeModelCustomValue = "";
+  renderRuntimeModelControls();
+  void loadRuntimeModelChoices();
+  if (state.planning?.session) renderRuntimeModelPanel(state.planning.session.tasks);
+}
 async function loadRuntimeModelChoices() {
-  const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = $("#runtime-model-task").value;
+  const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = state.runtimeModelTaskId || $("#runtime-model-task").value;
   if (!plan || !workspaceId || !taskId) return;
   const entry = plan.draft?.plan.tasks.find(item => item.task.id === taskId), runnerId = plan.session?.tasks.find(item => item.taskId === taskId)?.execution?.runnerId || entry?.task.execution.runnerId;
   if (!runnerId) return;
   const identity = `${workspaceId}:${plan.planningId}:${taskId}`, request = state.runtimeModelRequest = (state.runtimeModelRequest || 0) + 1;
-  const select = $("#runtime-model-choice"); select.replaceChildren(new Option("沿用 Session 启动模型", ""), new Option("自定义模型…", "__custom__")); $("#runtime-model-custom").value = "";
+  state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
+  state.runtimeModelChoice = ""; state.runtimeModelCustomValue = ""; renderRuntimeModelControls();
   try {
     const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(workspaceId)}`);
-    if (request !== state.runtimeModelRequest || `${state.workspace?.workspaceId}:${state.planning?.planningId}:${$("#runtime-model-task").value}` !== identity) return;
-    for (const model of catalog.models || []) select.add(new Option(model.label || model.id, model.id), select.options.length - 1);
+    if (request !== state.runtimeModelRequest || `${state.workspace?.workspaceId}:${state.planning?.planningId}:${state.runtimeModelTaskId || $("#runtime-model-task").value}` !== identity) return;
+    state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, ...(catalog.models || []).map(model => ({ id: model.id, label: model.label || model.id })), { id: "__custom__", label: "自定义模型…" }];
     const saved = plan.session?.models?.overrides?.[taskId]?.modelId;
-    if (saved) { if (![...select.options].some(item => item.value === saved)) select.add(new Option(saved, saved), select.options.length - 1); select.value = saved; }
+    if (saved) { if (!state.runtimeModelChoices.some(item => item.id === saved)) state.runtimeModelChoices.splice(state.runtimeModelChoices.length - 1, 0, { id: saved, label: saved }); state.runtimeModelChoice = saved; }
   } catch { $("#runtime-model-status").textContent = "候选模型暂不可读，可输入 Runner 支持的自定义模型 ID。"; }
-  show($("#runtime-model-custom").parentElement, select.value === "__custom__");
+  renderRuntimeModelControls();
 }
 async function changeRuntimeModel(stopAndRetry) {
   const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = $("#runtime-model-task").value;
@@ -2367,7 +3205,10 @@ async function changeRuntimeModel(stopAndRetry) {
 }
 function renderSession() {
   const box = $("#task-list"); const session = state.planning.session;
-  if (!session) { $("#session-controls").replaceChildren(); delete $("#session-controls").dataset.signature; }
+  if (!session) {
+    if (globalThis.tokenCouponSessionControls) globalThis.tokenCouponSessionControls.render({ buttons: [] });
+    else { $("#session-controls").replaceChildren(); delete $("#session-controls").dataset.signature; }
+  }
   renderSessionContinue(session);
   renderControlFeedback(session);
   renderExecutionFloatingStatus();
@@ -2376,15 +3217,22 @@ function renderSession() {
   const progress = $("#session-progress"), completed = tasks.filter(task => task.status === "succeeded").length;
   const progressSignature = JSON.stringify([session?.status, tasks.map(task => [task.status, task.reasonCode]), waiting, session?.maxParallel]);
   if (progress.dataset.signature !== progressSignature) {
-    progress.dataset.signature = progressSignature; progress.replaceChildren();
-    const status = document.createElement("span"); status.className = "execution-state badge " + statusClass(session?.status); status.textContent = session ? waitingForUser.length ? "等待用户决策" : waiting ? "等待人工处理" : statuses[session.status] || session.status : "尚未启动 Session"; progress.append(status);
-    if (session) {
-      const track = document.createElement("progress"); track.max = tasks.length || 1; track.value = completed; track.setAttribute("aria-label", "已完成任务比例"); progress.append(track);
-      const metrics = document.createElement("div"); metrics.className = "execution-metrics";
-      for (const [label, value, kind] of [["成功", `${completed}/${tasks.length}`, "completed"], ["运行中", running.length, "running"], ...(waiting ? [["等待回答／审批", waiting, "waiting"]] : []), ["待执行", tasks.filter(task => ["planned", "created", "blocked", "ready", "paused"].includes(task.status)).length, "pending"], ["失败／中断", tasks.filter(task => ["failed", "timed_out", "interrupted", "cancelled", "unavailable"].includes(task.status)).length, "errors"], ["并发上限", session.maxParallel || 1, "parallel"]]) {
-        const metric = document.createElement("div"); metric.className = "execution-metric"; metric.dataset.kind = kind; const text = document.createElement("span"), count = document.createElement("strong"); text.textContent = label + " "; count.textContent = String(value); metric.append(text, count); metrics.append(metric);
+    progress.dataset.signature = progressSignature;
+    const statusLabel = session ? waitingForUser.length ? "等待用户决策" : waiting ? "等待人工处理" : statuses[session.status] || session.status : "尚未启动 Session";
+    const metrics = session ? [["成功", `${completed}/${tasks.length}`, "completed"], ["运行中", running.length, "running"], ...(waiting ? [["等待回答／审批", waiting, "waiting"]] : []), ["待执行", tasks.filter(task => ["planned", "created", "blocked", "ready", "paused"].includes(task.status)).length, "pending"], ["失败／中断", tasks.filter(task => ["failed", "timed_out", "interrupted", "cancelled", "unavailable"].includes(task.status)).length, "errors"], ["并发上限", session.maxParallel || 1, "parallel"]] : [];
+    const model = { statusLabel, statusTone: statusClass(session?.status), hasSession: !!session, completed, total: tasks.length, metrics: metrics.map(([label, value, kind]) => ({ label, value, kind })) };
+    if (globalThis.tokenCouponExecutionProgress) globalThis.tokenCouponExecutionProgress.render(model);
+    else {
+      progress.replaceChildren();
+      const status = document.createElement("span"); status.className = `execution-state badge ${model.statusTone}`; status.textContent = model.statusLabel; progress.append(status);
+      if (session) {
+        const track = document.createElement("progress"); track.max = tasks.length || 1; track.value = completed; track.setAttribute("aria-label", "已完成任务比例"); progress.append(track);
+        const metricsRoot = document.createElement("div"); metricsRoot.className = "execution-metrics";
+        for (const metricData of model.metrics) {
+          const metric = document.createElement("div"); metric.className = "execution-metric"; metric.dataset.kind = metricData.kind; const text = document.createElement("span"), count = document.createElement("strong"); text.textContent = metricData.label + " "; count.textContent = String(metricData.value); metric.append(text, count); metricsRoot.append(metric);
+        }
+        progress.append(metricsRoot);
       }
-      progress.append(metrics);
     }
   }
   const health = session?.health;
@@ -2397,7 +3245,14 @@ function renderSession() {
   $("#session-progress").className = `session-progress ${statusClass(session?.status)}`;
   renderTaskDependencies(tasks); renderLiveTaskReplies(tasks); renderRuntimeModelPanel(tasks);
   renderAttemptChoices(tasks);
-  if (!session?.tasks) { box.innerHTML = `<div class="empty-state">${state.planning.status === "approved" ? "草案已批准，点击“运行计划”启动。" : "完成审查和批准后，任务进度会显示在这里。"}</div>`; return; }
+  if (!session?.tasks) {
+    const emptyMessage = state.planning.status === "approved" ? "草案已批准，点击“运行计划”启动。" : "完成审查和批准后，任务进度会显示在这里。";
+    if (globalThis.tokenCouponTaskBoard) globalThis.tokenCouponTaskBoard.render({ emptyMessage, groups: [] });
+    else box.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
+    return;
+  }
+  if (globalThis.tokenCouponTaskBoard) globalThis.tokenCouponTaskBoard.render(taskBoardViewModel(session, tasks));
+  else {
   ensureTaskBoard(box);
   const existingRows = new Map([...box.querySelectorAll(".task-row")].map(row => [row.dataset.taskId, row]));
   for (const [id, row] of existingRows) if (!tasks.some(task => task.taskId === id)) row.remove();
@@ -2449,18 +3304,27 @@ function renderSession() {
     overflow.querySelector("summary").textContent = `展开其余 ${Math.max(0, rows.length - 3)} 项任务`;
     show(overflow, rows.length > 3);
   }
+  }
   const pendingControl = session.pendingControl || (session.controlState?.requestId && !session.controlState.acknowledgedAt ? session.controlState : null);
-  const controls = $("#session-controls"), controlSignature = JSON.stringify([session.status, session.health?.state, session.health?.recoveryRequired, tasks.map(task => task.status), session.isolation?.mode, pendingControl?.requestId, pendingControl?.kind, state.controlJob?.jobId, state.controlJob?.status, state.submittingControl]);
   acknowledgeResumedSession();
-  if (controls.dataset.signature === controlSignature) return;
-  controls.dataset.signature = controlSignature; controls.replaceChildren();
+  const busy = !!state.submittingControl || state.controlJob?.status === "running", controlButtons = [];
   if (["running", "pausing"].includes(session.status)) {
-    const busy = !!state.submittingControl || state.controlJob?.status === "running";
-    const pause = document.createElement("button"); pause.className = "button button-session-pause"; pause.textContent = pendingControl?.kind === "pause" || session.status === "pausing" ? "等待当前任务收尾…" : "暂停会话"; pause.title = "停止继续派发任务；当前运行任务完成后暂停，不冻结模型进程。"; pause.disabled = busy || !!pendingControl || session.status === "pausing"; pause.addEventListener("click", () => startSessionAction("session/pause", "暂停会话")); controls.append(pause);
-    const cancel = document.createElement("button"); cancel.className = "button button-session-cancel"; cancel.textContent = pendingControl?.kind === "cancel" ? "正在取消…" : "取消会话"; cancel.disabled = busy || pendingControl?.kind === "cancel"; cancel.addEventListener("click", () => startSessionAction("session/cancel", "取消会话")); controls.append(cancel);
+    controlButtons.push({ label: pendingControl?.kind === "pause" || session.status === "pausing" ? "等待当前任务收尾…" : "暂停会话", className: "button button-session-pause", title: "停止继续派发任务；当前运行任务完成后暂停，不冻结模型进程。", disabled: busy || !!pendingControl || session.status === "pausing", onClick: () => startSessionAction("session/pause", "暂停会话") });
+    controlButtons.push({ label: pendingControl?.kind === "cancel" ? "正在取消…" : "取消会话", className: "button button-session-cancel", disabled: busy || pendingControl?.kind === "cancel", onClick: () => startSessionAction("session/cancel", "取消会话") });
   }
   if (session.status === "succeeded" && session.isolation?.mode === "git-worktree") {
-    const delivery = document.createElement("button"); delivery.className = "button button-primary"; delivery.textContent = "生成交付报告"; delivery.addEventListener("click", () => startSessionAction("session/delivery", "生成交付报告")); controls.append(delivery);
+    controlButtons.push({ label: "生成交付报告", className: "button button-primary", disabled: busy, onClick: () => startSessionAction("session/delivery", "生成交付报告") });
+  }
+  if (globalThis.tokenCouponSessionControls) globalThis.tokenCouponSessionControls.render({ buttons: controlButtons });
+  else {
+    const controls = $("#session-controls"), controlSignature = JSON.stringify([session.status, session.health?.state, session.health?.recoveryRequired, tasks.map(task => task.status), session.isolation?.mode, pendingControl?.requestId, pendingControl?.kind, state.controlJob?.jobId, state.controlJob?.status, state.submittingControl]);
+    if (controls.dataset.signature === controlSignature) return;
+    controls.dataset.signature = controlSignature; controls.replaceChildren();
+    for (const model of controlButtons) {
+      const button = document.createElement("button"); button.type = "button"; button.className = model.className; button.textContent = model.label; button.disabled = model.disabled;
+      if (model.title) button.title = model.title;
+      button.addEventListener("click", model.onClick); controls.append(button);
+    }
   }
 
 }
@@ -2473,6 +3337,10 @@ function openRevisionPlanning() {
     dialog.innerHTML = `<div class="section-title"><h3>基于当前计划新建修订</h3><button type="button" class="text-button" id="revision-planning-close">取消</button></div><p id="revision-planning-source" class="hint"></p><p>原计划与执行记录保留。新建网页修订计划后，在 GPT／Claude 读取原计划和执行证据，补齐决策，再重新审查、批准。新计划不会直接继承完成状态或失败现场的文件。</p><label for="revision-planning-message">本次需要补充或调整什么？</label><textarea id="revision-planning-message" rows="4" maxlength="4096" placeholder="例如：授权在现有约束内补齐数据库与依赖选型；请先列出方案供我确认。"></textarea><p id="revision-planning-error" class="field-error" role="status"></p><button id="revision-planning-create" type="button" class="button button-primary">创建关联修订计划</button>`;
     document.body.append(dialog); $("#revision-planning-close").addEventListener("click", () => dialog.close());
     $("#revision-planning-create").addEventListener("click", () => void confirmRevisionPlanning());
+    const textarea = $("#revision-planning-message"), shortcut = document.createElement("p");
+    shortcut.id = "revision-planning-shortcut"; shortcut.className = "composer-shortcut-hint"; shortcut.textContent = "Enter 发送 · Shift+Enter 换行";
+    textarea.setAttribute("aria-describedby", shortcut.id); textarea.insertAdjacentElement("afterend", shortcut);
+    bindTextareaEnterSubmit(textarea, () => $("#revision-planning-create").click());
   }
   state.revisionPlanningContext = { workspaceId: state.workspace.workspaceId, planningId: plan.planningId, expectedRevision: plan.revision, expectedPlanHash: plan.draft.planHash };
   $("#revision-planning-source").textContent = `${plan.draft.plan.title} · draft-${plan.draft.draftRevision} · ${shortId(plan.planningId)}`;
@@ -2510,6 +3378,21 @@ function sessionContinueAction(session) {
 }
 function renderSessionContinue(session) {
   const action = sessionContinueAction(session), button = $("#session-continue");
+  if (globalThis.tokenCouponSessionContinue) {
+    const blockers = (action.blockers || []).flatMap(task => {
+      const attemptId = task.activeAttemptId || task.attempts?.at(-1)?.attemptId;
+      return attemptId ? [{ taskId: task.taskId, label: action.blockers.length === 1 ? "查看阻塞回复" : `查看阻塞：${task.title || task.taskId}`, onView: () => void openTaskDetails(attemptId) }] : [];
+    });
+    globalThis.tokenCouponSessionContinue.render({
+      label: action.kind === "recover" ? "核验断点状态" : "从断点继续执行",
+      disabled: !!action.disabled || !!state.submittingJob || state.activeJob?.status === "running",
+      message: action.message,
+      blockers,
+      onContinue: openSessionContinue,
+      onRevise: openRevisionPlanning,
+    });
+    return;
+  }
   button.disabled = !!action.disabled || !!state.submittingJob || state.activeJob?.status === "running";
   button.textContent = action.kind === "recover" ? "核验断点状态" : "从断点继续执行";
   $("#session-continue-hint").textContent = action.message;
@@ -2551,23 +3434,38 @@ async function confirmSessionContinue() {
   await startSessionAction(action.kind === "retry" ? "session/retry" : "session/resume", "从断点继续执行", action.kind === "retry" ? { taskId } : {});
 }
 async function openTaskResults(taskId) {
-  const view = { workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, taskId, files: [] };
+  const view = { workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, taskId, files: [], total: 0, summary: "正在读取此任务的文件归属记录…", hasMore: false, loading: false, preview: null, error: "" };
   state.taskResultView = view;
   $("#task-results-title").textContent = `${state.planning.session.tasks.find(task => task.taskId === taskId)?.title || taskId} · 生成结果`;
-  $("#task-results-summary").textContent = "正在读取此任务的文件归属记录…"; $("#task-results-files").replaceChildren(); $("#task-results-error").textContent = "";
-  show($("#task-results-preview-wrap"), false); show($("#task-results-more"), false); $("#task-results-dialog").showModal();
+  renderTaskResults(view); $("#task-results-dialog").showModal();
   await loadTaskResultPage(view, 0);
 }
+function renderTaskResults(view) {
+  const mount = $("#task-results-content-root");
+  const model = { summary: view.summary, files: view.files, total: view.total, hasMore: view.hasMore, loadingMore: view.loading, preview: view.preview, error: view.error };
+  const callbacks = {
+    onPreview: path => void previewTaskResult(view, path),
+    onCopyPath: async file => { try { await navigator.clipboard.writeText(file.absolutePath); showToast("文件路径已复制。"); } catch { showCopyFallback("复制生成文件路径", file.absolutePath); } },
+    onLoadMore: () => { if (view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); },
+  };
+  if (globalThis.tokenCouponTaskResults) { globalThis.tokenCouponTaskResults.render(mount, model, callbacks); return; }
+  $("#task-results-summary").textContent = model.summary;
+  $("#task-results-error").textContent = model.error;
+  $("#task-results-path").textContent = model.preview?.absolutePath || "";
+  $("#task-results-preview").textContent = model.preview?.content || "";
+  show($("#task-results-preview-wrap"), !!model.preview); show($("#task-results-more"), model.hasMore);
+  $("#task-results-more").disabled = model.loadingMore;
+  renderTaskResultFiles(view);
+}
 async function loadTaskResultPage(view, offset) {
-  if (view.loading) return; view.loading = true; $("#task-results-more").disabled = true;
+  if (view.loading) return; view.loading = true; renderTaskResults(view);
   try {
     const data = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/tasks/${encodeURIComponent(view.taskId)}/files?offset=${offset}`);
     if (state.taskResultView !== view || state.workspace?.workspaceId !== view.workspaceId || state.planning?.planningId !== view.planningId) return;
-    Object.assign(view, { files: [...view.files, ...data.files], nextOffset: data.nextOffset });
-    $("#task-results-summary").textContent = `${data.message}\n执行目录：${data.executionDirectory || "未记录"}${data.commit ? `\n任务提交：${data.commit}` : ""}\n已显示 ${view.files.length}/${data.total} 个文件`;
-    renderTaskResultFiles(view); show($("#task-results-more"), data.nextOffset !== null);
-  } catch (error) { if (state.taskResultView === view) $("#task-results-error").textContent = error.message; }
-  finally { view.loading = false; $("#task-results-more").disabled = false; }
+    Object.assign(view, { files: [...view.files, ...data.files], nextOffset: data.nextOffset, total: data.total, hasMore: data.nextOffset !== null });
+    view.summary = `${data.message}\n执行目录：${data.executionDirectory || "未记录"}${data.commit ? `\n任务提交：${data.commit}` : ""}\n已显示 ${view.files.length}/${data.total} 个文件`;
+  } catch (error) { if (state.taskResultView === view) view.error = error.message; }
+  finally { view.loading = false; if (state.taskResultView === view) renderTaskResults(view); }
 }
 function renderTaskResultFiles(view) {
   const root = $("#task-results-files"), wasOpen = !!root.querySelector("details[open]"); root.replaceChildren();
@@ -2583,36 +3481,39 @@ function renderTaskResultFiles(view) {
   if (view.files.length > 3) root.append(extra);
 }
 async function previewTaskResult(view, path) {
-  const request = view.previewRequest = (view.previewRequest || 0) + 1; $("#task-results-error").textContent = "";
+  const request = view.previewRequest = (view.previewRequest || 0) + 1; view.error = ""; renderTaskResults(view);
   try {
     const data = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/tasks/${encodeURIComponent(view.taskId)}/files?path=${encodeURIComponent(path)}`);
     if (state.taskResultView !== view || request !== view.previewRequest) return;
-    $("#task-results-path").textContent = data.file.absolutePath; $("#task-results-preview").textContent = data.file.content + (data.file.truncated ? "\n[预览已截断]" : ""); show($("#task-results-preview-wrap"));
-  } catch (error) { if (state.taskResultView === view && request === view.previewRequest) { show($("#task-results-preview-wrap"), false); $("#task-results-error").textContent = error.message; } }
+    view.preview = { absolutePath: data.file.absolutePath, content: data.file.content + (data.file.truncated ? "\n[预览已截断]" : "") };
+  } catch (error) { if (state.taskResultView === view && request === view.previewRequest) { view.preview = null; view.error = error.message; } }
+  finally { if (state.taskResultView === view && request === view.previewRequest) renderTaskResults(view); }
 }
 function renderAttemptChoices(tasks) {
-  const select = $("#attempt-select"), previous = select.value;
+  const select = $("#attempt-select"), previous = state.attemptSelection?.selectedAttemptId || select.value;
   const choices = tasks.flatMap(task => (task.attempts || []).map((attempt, index) => {
     const projected = task.currentAttempt?.attemptId === attempt.attemptId ? task.currentAttempt : {};
     return { ...attempt, taskId: task.taskId, label: `${task.title || task.taskId} · 第 ${index + 1} 次 · ${shortId(attempt.attemptId)}`, active: task.activeAttemptId === attempt.attemptId,
       at: projected.startedAt || attempt.lastActivityAt || projected.finishedAt || "" };
   }));
   const identity = `${state.workspace?.workspaceId}:${state.planning?.planningId}:${state.planning?.session?.sessionId}`;
-  if (state.attemptSelection?.identity !== identity) state.attemptSelection = { identity, mode: "auto" };
+  if (state.attemptSelection?.identity !== identity) state.attemptSelection = { identity, mode: "auto", selectedAttemptId: "" };
   state.attemptChoices = choices;
   const activeChoices = choices.filter(item => item.active);
   state.latestAttemptChoice = (activeChoices.length ? activeChoices : [...choices].reverse()).sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0))[0];
   show($("#attempt-reader"), !!choices.length);
   show($("#attempt-empty"), !choices.length);
   const signature = JSON.stringify([state.workspace?.workspaceId, state.planning?.planningId, choices]);
-  if (signature !== state.attemptChoiceSignature) {
+  if (!globalThis.tokenCouponAttemptSelection && signature !== state.attemptChoiceSignature) {
     state.attemptChoiceSignature = signature; select.replaceChildren();
     for (const choice of choices) select.add(new Option(choice.label, choice.attemptId));
   }
-  select.value = state.attemptSelection.mode === "history" && choices.some(item => item.attemptId === previous) ? previous : state.latestAttemptChoice?.attemptId || "";
+  state.attemptSelection.selectedAttemptId = state.attemptSelection.mode === "history" && choices.some(item => item.attemptId === previous) ? previous : state.latestAttemptChoice?.attemptId || "";
+  if (!globalThis.tokenCouponAttemptSelection) select.value = state.attemptSelection.selectedAttemptId;
   renderAttemptSelectionContext();
-  const projection = tasks.find(task => task.currentAttempt?.attemptId === select.value)?.currentAttempt;
-  if (projection && state.attemptView?.attemptId === select.value && state.attemptView.workspaceId === state.workspace?.workspaceId && state.attemptView.planningId === state.planning?.planningId) {
+  const selectedAttemptId = state.attemptSelection.selectedAttemptId;
+  const projection = tasks.find(task => task.currentAttempt?.attemptId === selectedAttemptId)?.currentAttempt;
+  if (projection && state.attemptView?.attemptId === selectedAttemptId && state.attemptView.workspaceId === state.workspace?.workspaceId && state.attemptView.planningId === state.planning?.planningId) {
     const changed = state.attemptView.attempt?.status !== projection.status;
     state.attemptView.attempt = { ...state.attemptView.attempt, ...projection };
     if (changed) void readSelectedAttempt(true);
@@ -2623,27 +3524,56 @@ async function openTaskDetails(attemptId) {
   const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId;
   await planTab("attempts");
   if (state.route?.tab !== "attempts" || state.workspace?.workspaceId !== workspaceId || state.planning?.planningId !== planningId) return;
-  if (attemptId && [...$("#attempt-select").options].some(option => option.value === attemptId)) { $("#attempt-select").value = attemptId; state.attemptSelection.mode = "history"; }
-  else { state.attemptSelection.mode = "auto"; $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; }
+  if (attemptId && state.attemptChoices?.some(option => option.attemptId === attemptId)) { state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = attemptId; }
+  else { state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || ""; }
+  if (!globalThis.tokenCouponAttemptSelection) $("#attempt-select").value = state.attemptSelection.selectedAttemptId;
+  renderAttemptSelectionContext();
   await selectAttempt();
   const target = $("#attempt-reader").classList.contains("hidden") ? $("#attempt-empty") : $("#attempt-reader");
   target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 function renderAttemptSelectionContext() {
-  const selected = state.attemptChoices?.find(item => item.attemptId === $("#attempt-select").value), latest = state.latestAttemptChoice;
+  const selectedAttemptId = state.attemptSelection?.selectedAttemptId || $("#attempt-select").value;
+  const selected = state.attemptChoices?.find(item => item.attemptId === selectedAttemptId), latest = state.latestAttemptChoice;
   const historical = !!selected && !selected.active && selected.attemptId !== latest?.attemptId;
-  $("#attempt-selection-context").textContent = selected ? `${selected.active ? "运行中任务记录" : historical ? "历史执行记录 · 不是本次重试返回" : "最近一次执行记录"}：${selected.label}${selected.at ? ` · ${new Date(selected.at).toLocaleString()}` : ""}` : "请选择执行记录。";
+  const model = {
+    choices: (state.attemptChoices || []).map(item => ({ attemptId: item.attemptId, label: item.label })),
+    selectedAttemptId,
+    contextText: selected ? `${selected.active ? "运行中任务记录" : historical ? "历史执行记录 · 不是本次重试返回" : "最近一次执行记录"}：${selected.label}${selected.at ? ` · ${new Date(selected.at).toLocaleString()}` : ""}` : "请选择执行记录。",
+    historical,
+    latestDisabled: !latest || selected?.attemptId === latest.attemptId,
+  };
+  if (globalThis.tokenCouponAttemptSelection) {
+    globalThis.tokenCouponAttemptSelection.render(model, {
+      onSelect(attemptId) {
+        if (!state.attemptSelection) return;
+        state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = attemptId;
+        void selectAttempt();
+      },
+      onLatest() {
+        if (!state.attemptSelection) return;
+        state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || "";
+        void selectAttempt();
+      },
+    });
+    return;
+  }
+  $("#attempt-selection-context").textContent = model.contextText;
   $("#attempt-selection-context").classList.toggle("is-history", historical);
-  $("#attempt-show-latest").disabled = !latest || selected?.attemptId === latest.attemptId;
+  $("#attempt-show-latest").disabled = model.latestDisabled;
 }
 async function selectAttempt() {
   renderAttemptSelectionContext();
-  const attemptId = $("#attempt-select").value;
+  const attemptId = state.attemptSelection?.selectedAttemptId || $("#attempt-select").value;
   if (!attemptId || !state.workspace || !state.planning) return;
   const identity = `${state.workspace.workspaceId}:${state.planning.planningId}:${attemptId}`;
   if (state.attemptView?.identity !== identity) {
-    state.attemptView = { identity, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0 };
-    $("#attempt-messages").replaceChildren(); $("#attempt-tools").replaceChildren(); $("#attempt-raw").textContent = "";
+    state.attemptView = { identity, rawRevision: 0, attemptId, workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId, cursor: 0, messages: new Map(), tools: [], raw: [], seen: new Set(), finalText: "", textStream: "", notice: "", loaded: false, toolsPage: 0, rawPage: 0, rawFilter: "" };
+    if (globalThis.tokenCouponAttemptMessages) globalThis.tokenCouponAttemptMessages.render({ messages: [], emptyMessage: "正在读取执行记录…" });
+    else $("#attempt-messages").replaceChildren();
+    if (globalThis.tokenCouponAttemptTools) globalThis.tokenCouponAttemptTools.render({ tools: [], openEventKeys: [] });
+    else $("#attempt-tools").replaceChildren();
+    if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-raw").textContent = "";
     await readSelectedAttempt();
   } else if (!state.attemptView.loaded || ["running", "created"].includes(state.attemptView.attempt?.status)) await readSelectedAttempt();
   else renderAttemptView();
@@ -2683,11 +3613,12 @@ async function readSelectedAttempt(force = false) {
   if (!view || view.loading || view.workspaceId !== state.workspace?.workspaceId || view.planningId !== state.planning?.planningId) return;
   if (view.hasMore && view.loaded && force !== true) return;
   view.loading = true;
+  renderAttemptControls();
   try {
     for (let page = 0; page < 3; page++) {
       const result = await api(`/api/v1/workspaces/${view.workspaceId}/plannings/${view.planningId}/attempts/${view.attemptId}/events?offset=${view.cursor}${view.fileId ? `&fileId=${encodeURIComponent(view.fileId)}` : ""}`);
       if (state.attemptView !== view) return;
-      if (result.reset) { view.messages.clear(); view.seen.clear(); view.tools = []; view.raw = []; delete view.reportedModel; delete view.reportedModelSource; view.finalText = ""; view.textStream = ""; view.semanticMessages = false; view.toolsPage = 0; view.rawPage = 0; view.notice = "记录文件发生变化，已从头重新读取。"; }
+      if (result.reset) { view.messages.clear(); view.seen.clear(); view.tools = []; view.raw = []; view.rawRevision = (view.rawRevision || 0) + 1; delete view.reportedModel; delete view.reportedModelSource; view.finalText = ""; view.textStream = ""; view.semanticMessages = false; view.toolsPage = 0; view.rawPage = 0; view.notice = "记录文件发生变化，已从头重新读取。"; }
       view.attempt = result.attempt; view.taskId = result.taskId; view.fileId = result.fileId; view.cursor = result.cursor; view.hasMore = result.hasMore; view.loaded = true;
       if (result.malformed) view.notice = `有 ${result.malformed} 条记录无法解析，原始文件可能不完整。`;
       for (const event of result.events) projectAttemptEvent(view, event);
@@ -2695,38 +3626,120 @@ async function readSelectedAttempt(force = false) {
     }
     renderAttemptView();
   } catch (error) { if (state.attemptView === view) { view.notice = `记录暂不可读：${error.message}；可刷新重试。`; renderAttemptView(); } }
-  finally { view.loading = false; }
+  finally { view.loading = false; if (state.attemptView === view) renderAttemptControls(); }
 }
 function renderAttemptView() { preserveExecutionReading(renderAttemptContent); }
+function renderAttemptControls() {
+  const model = { hasMore: !!state.attemptView?.hasMore, loading: !!state.attemptView?.loading };
+  if (globalThis.tokenCouponAttemptRecordControls) {
+    globalThis.tokenCouponAttemptRecordControls.render(model, {
+      onRefresh: () => void readSelectedAttempt(true),
+      onMore: () => void readSelectedAttempt(true),
+    });
+    return;
+  }
+  $("#attempt-refresh").disabled = model.loading;
+  $("#attempt-more").disabled = model.loading;
+  $("#attempt-more").textContent = model.loading ? "正在读取历史记录…" : "继续加载历史记录";
+  show($("#attempt-more"), model.hasMore);
+}
 function ensureAttemptDiagnosticUI() {
-  if (!$("#attempt-diagnose")) {
+  if (!globalThis.tokenCouponAttemptOverview && !$("#attempt-diagnose")) {
     const button = document.createElement("button"); button.id = "attempt-diagnose"; button.type = "button"; button.className = "button button-primary hidden"; button.textContent = "分析原因";
     $("#attempt-diagnostic-actions").append(button); button.addEventListener("click", () => void openAttemptDiagnosis());
   }
   if ($("#diagnosis-choice-dialog")) return;
   const choice = document.createElement("dialog"); choice.id = "diagnosis-choice-dialog"; choice.className = "diagnosis-choice-dialog";
-  choice.innerHTML = `<div class="section-title"><h3>选择分析方式</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><div class="diagnosis-options"><button id="diagnosis-local" class="diagnosis-option" type="button"><strong>在此页面分析</strong><span>与 Codex 或 Claude Code 继续对话，可在下方选择模型。</span><small>会使用所选模型的调用额度</small></button><button id="diagnosis-web" class="diagnosis-option" type="button"><strong>复制提示到网页分析</strong><span>把证据保存在工作区，通过已连接的 GPT／Claude 网页读取分析。</span><small>使用网页额度，节省执行模型的诊断调用</small></button></div>`;
+  const choiceRoot = document.createElement("div"); choiceRoot.id = "diagnosis-choice-root"; choice.append(choiceRoot);
   document.body.append(choice);
+  if (!globalThis.tokenCouponAttemptDiagnosisChoice) {
+    choiceRoot.innerHTML = `<div class="section-title"><h3>选择分析方式</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><div class="diagnosis-options"><button id="diagnosis-local" class="diagnosis-option" type="button"><strong>在此页面分析</strong><span>与 Codex 或 Claude Code 继续对话，可在下方选择模型。</span><small>会使用所选模型的调用额度</small></button><button id="diagnosis-web" class="diagnosis-option" type="button"><strong>复制提示到网页分析</strong><span>把证据保存在工作区，通过已连接的 GPT／Claude 网页读取分析。</span><small>使用网页额度，节省执行模型的诊断调用</small></button></div>`;
+    choice.querySelector("[data-diagnosis-close]").addEventListener("click", () => choice.close());
+    $("#diagnosis-local").addEventListener("click", () => { choice.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); });
+    $("#diagnosis-web").addEventListener("click", () => { choice.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); });
+  }
   const chat = document.createElement("dialog"); chat.id = "attempt-diagnosis-dialog"; chat.className = "diagnosis-chat-dialog";
-  chat.innerHTML = `<div class="section-title"><div><h3>任务诊断</h3><p id="attempt-diagnosis-context" class="hint"></p></div><button type="button" data-diagnosis-close class="text-button">关闭</button></div><select id="attempt-diagnosis-history-select" aria-label="历史诊断" class="hidden"></select><p id="attempt-diagnosis-status" class="diagnosis-chat-status" role="status"></p><section id="attempt-diagnosis-history" class="diagnosis-chat-history" aria-label="诊断对话"></section><form id="attempt-diagnosis-form" class="diagnosis-chat-composer"><label class="sr-only" for="attempt-diagnosis-reply">发送诊断问题</label><textarea id="attempt-diagnosis-reply" rows="3" maxlength="8192" placeholder="输入问题、补充事实，或讨论处理方案…"></textarea><div class="diagnosis-chat-footer"><div class="diagnosis-model-selectors"><label>助手<select id="attempt-diagnosis-runner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label><label id="diagnosis-custom-wrap" class="hidden">模型 ID<input id="diagnosis-custom-model" maxlength="200" placeholder="输入模型 ID"></label></div><button id="attempt-diagnosis-send" type="submit" class="button button-primary">发送</button></div><p class="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p></form>`;
+  const chatRoot = document.createElement("div"); chatRoot.id = "attempt-diagnosis-dialog-root"; chat.append(chatRoot);
   document.body.append(chat);
+  const reactDialog = globalThis.tokenCouponAttemptDiagnosisDialog;
+  if (reactDialog) {
+    renderAttemptDiagnosisDialog();
+  } else {
+    chatRoot.innerHTML = `<div class="section-title"><div><h3>任务诊断</h3><p id="attempt-diagnosis-context" class="hint"></p></div><button type="button" data-diagnosis-close class="text-button">关闭</button></div><select id="attempt-diagnosis-history-select" aria-label="历史诊断" class="hidden"></select><p id="attempt-diagnosis-status" class="diagnosis-chat-status" role="status"></p><section id="attempt-diagnosis-history" class="diagnosis-chat-history" aria-label="诊断对话"></section><form id="attempt-diagnosis-form" class="diagnosis-chat-composer"><label class="sr-only" for="attempt-diagnosis-reply">发送诊断问题</label><textarea id="attempt-diagnosis-reply" rows="3" maxlength="8192" placeholder="输入问题、补充事实，或讨论处理方案…"></textarea><div class="diagnosis-chat-footer"><div class="diagnosis-model-selectors"><label>助手<select id="attempt-diagnosis-runner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><label>模型<select id="attempt-diagnosis-model"><option value="">默认模型</option><option value="__custom__">自定义模型…</option></select></label><label id="diagnosis-custom-wrap" class="hidden">模型 ID<input id="diagnosis-custom-model" maxlength="200" placeholder="输入模型 ID"></label></div><button id="attempt-diagnosis-send" type="submit" class="button button-primary">发送</button></div><p class="hint">发送会调用所选模型。这里只分析与讨论；修复、重试和计划变更需另行确认。</p></form>`;
+    const diagnosisHistorySelect = $("#attempt-diagnosis-history-select"), diagnosisHistoryControls = document.createElement("div");
+    diagnosisHistoryControls.id = "attempt-diagnosis-history-controls-root"; diagnosisHistorySelect.replaceWith(diagnosisHistoryControls); diagnosisHistoryControls.append(diagnosisHistorySelect);
+    $(".diagnosis-model-selectors").id = "attempt-diagnosis-model-controls-root";
+  }
   const exported = document.createElement("dialog"); exported.id = "diagnosis-export-dialog"; exported.className = "reference-dialog";
   exported.innerHTML = `<div class="section-title"><h3>到网页分析</h3><button type="button" data-diagnosis-close class="text-button">关闭</button></div><p id="diagnosis-export-status" role="status">正在保存证据…</p><label>证据文件<input id="diagnosis-export-path" readonly></label><p class="hint">在已连接 Token Coupon MCP 的 GPT／Claude 网页粘贴提示即可读取。网页无法直接访问本机路径；未启用 MCP 时，请上传此文件。此操作不调用本机诊断模型。</p><button id="diagnosis-export-copy" type="button" class="button button-primary" disabled>复制分析提示</button>`;
   document.body.append(exported);
-  for (const dialog of [choice, chat, exported]) dialog.querySelector("[data-diagnosis-close]").addEventListener("click", () => dialog.close());
-  for (const dialog of [chat, exported]) {
+  const exportRoot = document.createElement("div"); exportRoot.id = "diagnosis-export-root";
+  while (exported.firstChild) exportRoot.append(exported.firstChild);
+  exported.append(exportRoot);
+  if (!reactDialog) chat.querySelector("[data-diagnosis-close]").addEventListener("click", () => chat.close());
+  exported.querySelector("[data-diagnosis-close]").addEventListener("click", () => exported.close());
+  if (!reactDialog) {
     const switchMode = document.createElement("button"); switchMode.type = "button"; switchMode.className = "text-button"; switchMode.textContent = "切换分析方式";
-    switchMode.addEventListener("click", () => { dialog.close(); choice.showModal(); }); dialog.querySelector(".section-title").append(switchMode);
+    switchMode.addEventListener("click", () => { chat.close(); showAttemptDiagnosisChoice(); }); chat.querySelector(".section-title").append(switchMode);
   }
-  $("#diagnosis-local").addEventListener("click", () => { choice.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); });
-  $("#diagnosis-web").addEventListener("click", () => { choice.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); });
-  $("#attempt-diagnosis-runner").addEventListener("change", () => void loadAttemptDiagnosticModels(state.attemptDiagnosticContext));
-  $("#attempt-diagnosis-model").addEventListener("change", () => show($("#diagnosis-custom-wrap"), $("#attempt-diagnosis-model").value === "__custom__"));
+  if (!globalThis.tokenCouponAttemptDiagnosisExport) {
+    const dialog = exported;
+    const switchMode = document.createElement("button"); switchMode.type = "button"; switchMode.className = "text-button"; switchMode.textContent = "切换分析方式";
+    switchMode.addEventListener("click", () => { dialog.close(); showAttemptDiagnosisChoice(); }); dialog.querySelector(".section-title").append(switchMode);
+  }
+  $("#attempt-diagnosis-runner").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) { context.diagnosisRunnerId = $("#attempt-diagnosis-runner").value; context.diagnosisModelId = ""; void loadAttemptDiagnosticModels(context); } });
+  $("#attempt-diagnosis-model").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) context.diagnosisModelId = $("#attempt-diagnosis-model").value; show($("#diagnosis-custom-wrap"), $("#attempt-diagnosis-model").value === "__custom__"); });
+  $("#diagnosis-custom-model").addEventListener("input", () => { if (state.attemptDiagnosticContext) state.attemptDiagnosticContext.diagnosisCustomModelId = $("#diagnosis-custom-model").value; });
   $("#attempt-diagnosis-history-select").addEventListener("change", () => { const context = state.attemptDiagnosticContext; if (context) { context.selectedId = $("#attempt-diagnosis-history-select").value; renderAttemptDiagnosticHistory(context); } });
   $("#attempt-diagnosis-reply").addEventListener("input", () => { if (state.attemptDiagnosticContext) state.attemptDiagnosticContext.unsentText = $("#attempt-diagnosis-reply").value; });
   $("#attempt-diagnosis-form").addEventListener("submit", event => { event.preventDefault(); void sendAttemptDiagnosticMessage(); });
-  $("#attempt-diagnosis-reply").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void sendAttemptDiagnosticMessage(); } });
+  const diagnosisInput = $("#attempt-diagnosis-reply"), diagnosisShortcut = document.createElement("p");
+  diagnosisShortcut.className = "composer-shortcut-hint"; diagnosisShortcut.textContent = "Enter 发送 · Shift+Enter 换行";
+  diagnosisInput.setAttribute("aria-describedby", "attempt-diagnosis-status diagnosis-shortcuts"); diagnosisShortcut.id = "diagnosis-shortcuts";
+  diagnosisInput.insertAdjacentElement("afterend", diagnosisShortcut);
+  const diagnosisComposerRoot = document.createElement("div"); diagnosisComposerRoot.id = "attempt-diagnosis-composer-root";
+  if (!reactDialog) { diagnosisInput.before(diagnosisComposerRoot); diagnosisComposerRoot.append(diagnosisInput, diagnosisShortcut); }
+  else { $("#attempt-diagnosis-composer-root").append(diagnosisShortcut); }
+  bindTextareaEnterSubmit(diagnosisInput, () => $("#attempt-diagnosis-form").requestSubmit());
   $("#diagnosis-export-copy").addEventListener("click", () => void copyExportedDiagnosticPrompt());
+}
+function attemptDiagnosisDialogModel(context = state.attemptDiagnosticContext) {
+  return {
+    contextText: context ? `本次执行 ${shortId(context.attemptId)} · 只读分析` : "",
+    statusText: context?.statusText || "",
+    sendLabel: context?.running ? "分析中…" : context?.pendingSubmission ? "检查本次发送" : "发送",
+    sendDisabled: !!context?.running,
+  };
+}
+function renderAttemptDiagnosisDialog(context = state.attemptDiagnosticContext) {
+  const mount = $("#attempt-diagnosis-dialog-root");
+  if (!mount) return;
+  const model = attemptDiagnosisDialogModel(context);
+  if (globalThis.tokenCouponAttemptDiagnosisDialog) {
+    globalThis.tokenCouponAttemptDiagnosisDialog.render(mount, model, {
+      onClose: () => $("#attempt-diagnosis-dialog").close(),
+      onSwitch: () => { $("#attempt-diagnosis-dialog").close(); showAttemptDiagnosisChoice(); },
+    });
+  } else {
+    $("#attempt-diagnosis-context").textContent = model.contextText;
+    $("#attempt-diagnosis-status").textContent = model.statusText;
+    const send = $("#attempt-diagnosis-send"); send.disabled = model.sendDisabled; send.textContent = model.sendLabel;
+  }
+}
+function setAttemptDiagnosisStatus(context, statusText) {
+  if (context) context.statusText = statusText;
+  renderAttemptDiagnosisDialog(context);
+}
+function showAttemptDiagnosisChoice() {
+  const dialog = $("#diagnosis-choice-dialog"), mount = $("#diagnosis-choice-root");
+  if (globalThis.tokenCouponAttemptDiagnosisChoice) {
+    globalThis.tokenCouponAttemptDiagnosisChoice.render(mount, {
+      onClose: () => dialog.close(),
+      onLocal: () => { dialog.close(); void openLocalAttemptDiagnosis(state.attemptDiagnosticContext); },
+      onWeb: () => { dialog.close(); void exportAttemptDiagnosis(state.attemptDiagnosticContext); },
+    });
+  }
+  dialog.showModal();
 }
 function attemptDiagnosticPath(context) {
   return `/api/v1/workspaces/${context.workspaceId}/plannings/${context.planningId}/attempts/${context.attemptId}/diagnostics`;
@@ -2735,16 +3748,21 @@ function diagnosticContextIsCurrent(context) { return !!context && state.attempt
 function selectedAttemptDiagnostic(context) { return context?.data?.diagnostics?.find(item => item.diagnosticId === context.selectedId); }
 async function loadAttemptDiagnosticModels(context, savedModel = "") {
   if (!diagnosticContextIsCurrent(context)) return;
-  const runnerId = $("#attempt-diagnosis-runner").value, request = context.modelRequest = (context.modelRequest || 0) + 1, select = $("#attempt-diagnosis-model");
-  select.replaceChildren(new Option("默认模型", ""), new Option("自定义模型…", "__custom__"));
+  const runnerId = context.diagnosisRunnerId || $("#attempt-diagnosis-runner")?.value || ( ["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex" );
+  context.diagnosisRunnerId = runnerId;
+  context.diagnosisModels = [];
+  context.diagnosisModelId = "";
+  const request = context.modelRequest = (context.modelRequest || 0) + 1;
+  renderAttemptDiagnosticControls(context);
   try {
     const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(context.workspaceId)}`);
     if (!diagnosticContextIsCurrent(context) || request !== context.modelRequest) return;
-    for (const model of catalog.models || []) select.add(new Option(model.label || model.id, model.id), select.options.length - 1);
-  } catch { if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = "候选模型暂不可读，可使用默认模型或填写模型 ID。"; }
+    context.diagnosisModels = (catalog.models || []).map(model => ({ id: model.id, label: model.label || model.id }));
+  } catch { if (diagnosticContextIsCurrent(context)) setAttemptDiagnosisStatus(context, "候选模型暂不可读，可使用默认模型或填写模型 ID。"); }
   if (!diagnosticContextIsCurrent(context) || request !== context.modelRequest) return;
-  if (savedModel && ![...select.options].some(item => item.value === savedModel)) select.add(new Option(savedModel, savedModel), select.options.length - 1);
-  select.value = savedModel; show($("#diagnosis-custom-wrap"), false);
+  if (savedModel && !context.diagnosisModels.some(model => model.id === savedModel)) context.diagnosisModels.push({ id: savedModel, label: savedModel });
+  context.diagnosisModelId = savedModel;
+  renderAttemptDiagnosticControls(context);
 }
 async function loadAttemptDiagnosticHistory(context) {
   const data = await api(attemptDiagnosticPath(context));
@@ -2756,25 +3774,80 @@ async function loadAttemptDiagnosticHistory(context) {
 function renderAttemptDiagnosticHistory(context) {
   if (!diagnosticContextIsCurrent(context)) return;
   const root = $("#attempt-diagnosis-history"), previousScroll = root.scrollTop, atBottom = root.scrollHeight - root.clientHeight - root.scrollTop < 50;
-  const records = context.data?.diagnostics || [], select = $("#attempt-diagnosis-history-select");
-  select.replaceChildren(...records.map((item, index) => new Option(`诊断 ${index + 1} · ${diagnosticStatuses[item.status] || item.status}`, item.diagnosticId))); select.value = context.selectedId || ""; show(select, records.length > 1);
-  root.replaceChildren();
+  const records = context.data?.diagnostics || [];
   const diagnostic = selectedAttemptDiagnostic(context);
-  if (!diagnostic) { const empty = document.createElement("p"); empty.className = "diagnosis-chat-empty"; empty.textContent = "从一个问题开始，例如：这次任务为什么中止？需要我确认什么？"; root.append(empty); }
-  for (const message of diagnostic?.messages || []) {
-    const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = `diagnosis-chat-message is-${message.role}`;
-    heading.textContent = message.role === "user" ? "你" : `${labels[message.runnerId || diagnostic.runnerId] || "诊断助手"}${message.modelId ? ` · ${message.modelId}` : ""}`;
-    body.className = "diagnosis-chat-body"; appendHighlightedReply(body, message.content); article.append(heading, body); root.append(article);
+  if (globalThis.tokenCouponAttemptDiagnosisHistory) {
+    const runnerId = diagnostic?.runnerId || context.runnerId;
+    globalThis.tokenCouponAttemptDiagnosisHistory.render(root, {
+      messages: (diagnostic?.messages || []).map((message, index) => ({
+        messageId: `${diagnostic?.diagnosticId || "empty"}:${index}`,
+        role: message.role === "user" ? "user" : "assistant",
+        heading: message.role === "user" ? "你" : `${labels[message.runnerId || runnerId] || "诊断助手"}${message.modelId ? ` · ${message.modelId}` : ""}`,
+        content: message.content,
+      })),
+      emptyMessage: "从一个问题开始，例如：这次任务为什么中止？需要我确认什么？",
+      showEmptyMessage: !diagnostic,
+      ...(context.pendingSubmission && context.running ? { pendingMessage: context.pendingSubmission.body.message } : {}),
+      ...(diagnostic?.error ? { errorMessage: `分析未完成：${diagnostic.error}` } : {}),
+      running: !!context.running,
+    });
+  } else {
+    root.replaceChildren();
+    if (!diagnostic) { const empty = document.createElement("p"); empty.className = "diagnosis-chat-empty"; empty.textContent = "从一个问题开始，例如：这次任务为什么中止？需要我确认什么？"; root.append(empty); }
+    for (const message of diagnostic?.messages || []) {
+      const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = `diagnosis-chat-message is-${message.role}`;
+      heading.textContent = message.role === "user" ? "你" : `${labels[message.runnerId || diagnostic.runnerId] || "诊断助手"}${message.modelId ? ` · ${message.modelId}` : ""}`;
+      body.className = "diagnosis-chat-body"; appendHighlightedReply(body, message.content); article.append(heading, body); root.append(article);
+    }
+    if (context.pendingSubmission && context.running) {
+      const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = "diagnosis-chat-message is-user"; heading.textContent = "你"; body.className = "diagnosis-chat-body"; body.textContent = context.pendingSubmission.body.message; article.append(heading, body); root.append(article);
+    }
+    if (diagnostic?.error) { const error = document.createElement("p"); error.className = "field-error"; error.textContent = `分析未完成：${diagnostic.error}`; root.append(error); }
+    if (context.running) { const pending = document.createElement("p"); pending.className = "diagnosis-chat-pending"; pending.textContent = "正在分析…"; root.append(pending); }
   }
-  if (context.pendingSubmission && context.running) {
-    const article = document.createElement("article"), heading = document.createElement("small"), body = document.createElement("div"); article.className = "diagnosis-chat-message is-user"; heading.textContent = "你"; body.className = "diagnosis-chat-body"; body.textContent = context.pendingSubmission.body.message; article.append(heading, body); root.append(article);
+  renderAttemptDiagnosticControls(context);
+  if (globalThis.tokenCouponAttemptDiagnosisComposer) {
+    const composer = $("#attempt-diagnosis-composer-root"), input = $("#attempt-diagnosis-reply");
+    globalThis.tokenCouponAttemptDiagnosisComposer.render(composer, { initialValue: context.unsentText ?? input.value, placeholder: input.placeholder }, value => { context.unsentText = value; }, () => $("#attempt-diagnosis-form").requestSubmit());
   }
-  if (diagnostic?.error) { const error = document.createElement("p"); error.className = "field-error"; error.textContent = `分析未完成：${diagnostic.error}`; root.append(error); }
-  if (context.running) { const pending = document.createElement("p"); pending.className = "diagnosis-chat-pending"; pending.textContent = "正在分析…"; root.append(pending); }
   root.scrollTop = context.scrollAfterSend || atBottom ? root.scrollHeight : previousScroll; context.scrollAfterSend = false;
-  $("#attempt-diagnosis-send").disabled = !!context.running;
-  $("#attempt-diagnosis-send").textContent = context.running ? "分析中…" : context.pendingSubmission ? "检查本次发送" : "发送";
-  for (const id of ["attempt-diagnosis-runner", "attempt-diagnosis-model", "diagnosis-custom-model", "attempt-diagnosis-history-select"]) $("#" + id).disabled = !!context.running || !!context.pendingSubmission;
+  renderAttemptDiagnosisDialog(context);
+  if (!globalThis.tokenCouponAttemptDiagnosisControls) for (const id of ["attempt-diagnosis-runner", "attempt-diagnosis-model", "diagnosis-custom-model", "attempt-diagnosis-history-select"]) $("#" + id).disabled = !!context.running || !!context.pendingSubmission;
+}
+function renderAttemptDiagnosticControls(context) {
+  if (!diagnosticContextIsCurrent(context)) return;
+  const records = context.data?.diagnostics || [], disabled = !!context.running || !!context.pendingSubmission;
+  const diagnostics = records.map((item, index) => ({ id: item.diagnosticId, label: `诊断 ${index + 1} · ${diagnosticStatuses[item.status] || item.status}` }));
+  const model = {
+    diagnostics,
+    selectedDiagnosticId: context.selectedId || "",
+    runnerId: context.diagnosisRunnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex"),
+    modelId: context.diagnosisModelId || "",
+    models: context.diagnosisModels || [],
+    customModelId: context.diagnosisCustomModelId || "",
+    disabled,
+  };
+  if (globalThis.tokenCouponAttemptDiagnosisControls) {
+    globalThis.tokenCouponAttemptDiagnosisControls.renderHistory($("#attempt-diagnosis-history-controls-root"), diagnostics, model.selectedDiagnosticId, disabled, id => {
+      context.selectedId = id;
+      renderAttemptDiagnosticHistory(context);
+    });
+    globalThis.tokenCouponAttemptDiagnosisControls.renderModels($("#attempt-diagnosis-model-controls-root"), model, {
+      onRunnerChange: runnerId => { context.diagnosisRunnerId = runnerId; context.diagnosisModelId = ""; void loadAttemptDiagnosticModels(context); },
+      onModelChange: modelId => { context.diagnosisModelId = modelId; renderAttemptDiagnosticControls(context); },
+      onCustomModelChange: modelId => { context.diagnosisCustomModelId = modelId; renderAttemptDiagnosticControls(context); },
+    });
+    return;
+  }
+  const history = $("#attempt-diagnosis-history-select");
+  history.replaceChildren(...diagnostics.map(item => new Option(item.label, item.id))); history.value = model.selectedDiagnosticId; show(history, diagnostics.length > 1); history.disabled = disabled;
+  const runner = $("#attempt-diagnosis-runner"), select = $("#attempt-diagnosis-model");
+  runner.value = model.runnerId;
+  select.replaceChildren(new Option("默认模型", ""), ...model.models.map(item => new Option(item.label, item.id)), new Option("自定义模型…", "__custom__"));
+  select.value = model.modelId;
+  $("#diagnosis-custom-model").value = model.customModelId;
+  show($("#diagnosis-custom-wrap"), model.modelId === "__custom__");
+  for (const control of [runner, select, $("#diagnosis-custom-model")]) control.disabled = disabled;
 }
 async function openAttemptDiagnosis() {
   ensureAttemptDiagnosticUI();
@@ -2782,35 +3855,35 @@ async function openAttemptDiagnosis() {
   if (!view || view.workspaceId !== state.workspace?.workspaceId || view.planningId !== state.planning?.planningId) return;
   const identity = `${view.workspaceId}:${view.planningId}:${view.attemptId}`;
   if (state.attemptDiagnosticContext?.identity !== identity) state.attemptDiagnosticContext = { identity, workspaceId: view.workspaceId, planningId: view.planningId, attemptId: view.attemptId, runnerId: view.attempt?.runnerId, modelId: view.attempt?.execution?.modelId };
+  if (state.desktopRecoveredDiagnoses?.has(identity)) { state.attemptDiagnosticContext.unsentText = state.desktopRecoveredDiagnoses.get(identity); state.desktopRecoveredDiagnoses.delete(identity); }
   const policy = functionPolicy("diagnosis");
   if (policy?.priority === "agent") await openLocalAttemptDiagnosis(state.attemptDiagnosticContext);
   else if (policy?.priority === "web") await exportAttemptDiagnosis(state.attemptDiagnosticContext);
-  else $("#diagnosis-choice-dialog").showModal();
+  else showAttemptDiagnosisChoice();
 }
 async function openLocalAttemptDiagnosis(context) {
   if (!diagnosticContextIsCurrent(context)) return;
   $("#attempt-diagnosis-dialog").showModal();
-  $("#attempt-diagnosis-context").textContent = `本次执行 ${shortId(context.attemptId)} · 只读分析`;
-  $("#attempt-diagnosis-status").textContent = "读取已保存的诊断…";
+  setAttemptDiagnosisStatus(context, "读取已保存的诊断…");
   try {
     await loadAttemptDiagnosticHistory(context);
     if (!diagnosticContextIsCurrent(context)) return;
     const saved = selectedAttemptDiagnostic(context);
     const policy = functionPolicy("diagnosis");
     const usePolicy = policy?.priority === "agent" && saved?.status !== "running";
-    $("#attempt-diagnosis-runner").value = usePolicy ? policy.agent.runnerId : saved?.runnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex");
-    await loadAttemptDiagnosticModels(context, usePolicy ? policy.agent.modelId || "" : saved ? saved.modelId || "" : (context.runnerId === $("#attempt-diagnosis-runner").value ? context.modelId : "") || "");
-    if (diagnosticContextIsCurrent(context)) { $("#attempt-diagnosis-status").textContent = saved ? "可继续讨论，或在下方切换模型后发送。" : "输入问题并发送后开始分析。"; $("#attempt-diagnosis-reply").value = context.unsentText || ""; }
-  } catch (error) { if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = `暂时无法读取：${error.message}`; }
+    context.diagnosisRunnerId = usePolicy ? policy.agent.runnerId : saved?.runnerId || (["codex", "claude-code"].includes(context.runnerId) ? context.runnerId : "codex");
+    await loadAttemptDiagnosticModels(context, usePolicy ? policy.agent.modelId || "" : saved ? saved.modelId || "" : (context.runnerId === context.diagnosisRunnerId ? context.modelId : "") || "");
+    if (diagnosticContextIsCurrent(context)) { setAttemptDiagnosisStatus(context, saved ? "可继续讨论，或在下方切换模型后发送。" : "输入问题并发送后开始分析。"); $("#attempt-diagnosis-reply").value = context.unsentText || ""; }
+  } catch (error) { if (diagnosticContextIsCurrent(context)) setAttemptDiagnosisStatus(context, `暂时无法读取：${error.message}`); }
 }
 async function sendAttemptDiagnosticMessage() {
   const context = state.attemptDiagnosticContext;
   if (!context || context.running) return;
   const text = $("#attempt-diagnosis-reply").value.trim();
   if (!context.pendingSubmission) {
-    if (!text) { $("#attempt-diagnosis-status").textContent = "先输入一个问题，例如“请分析这次失败的原因”。"; return; }
-    const runnerId = $("#attempt-diagnosis-runner").value, value = $("#attempt-diagnosis-model").value, modelId = value === "__custom__" ? $("#diagnosis-custom-model").value.trim() : value;
-    if (value === "__custom__" && !modelId) { $("#attempt-diagnosis-status").textContent = "请填写模型 ID。"; return; }
+    if (!text) { setAttemptDiagnosisStatus(context, "先输入一个问题，例如“请分析这次失败的原因”。"); return; }
+    const runnerId = context.diagnosisRunnerId || $("#attempt-diagnosis-runner").value, value = context.diagnosisModelId ?? $("#attempt-diagnosis-model").value, modelId = value === "__custom__" ? (context.diagnosisCustomModelId ?? $("#diagnosis-custom-model").value).trim() : value;
+    if (value === "__custom__" && !modelId) { setAttemptDiagnosisStatus(context, "请填写模型 ID。"); return; }
     const diagnostic = selectedAttemptDiagnostic(context), isReply = diagnostic?.status === "completed";
     context.pendingSubmission = { path: attemptDiagnosticPath(context) + (isReply ? `/${diagnostic.diagnosticId}/replies` : ""), body: { requestKey: key(), message: text, runnerId, ...(modelId ? { modelId } : {}) } };
   }
@@ -2825,32 +3898,44 @@ async function sendAttemptDiagnosticMessage() {
       context.unsentText = composer.value;
     } else if (context.unsentText?.trim() === submission.body.message) context.unsentText = "";
     while (job.status === "running") {
-      if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = "正在分析，关闭窗口后仍会保存结果。";
+      if (diagnosticContextIsCurrent(context)) setAttemptDiagnosisStatus(context, "正在分析，关闭窗口后仍会保存结果。");
       await new Promise(resolve => setTimeout(resolve, 900)); job = await api(`/api/v1/jobs/${job.jobId}`);
     }
     context.pendingSubmission = null;
     if (job.status !== "succeeded") throw new Error(job.error || "本次分析中断，请重新发送。");
     context.selectedId = job.result.diagnosticId;
     await loadAttemptDiagnosticHistory(context);
-    if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = "分析已保存，可继续追问。";
+    if (diagnosticContextIsCurrent(context)) setAttemptDiagnosisStatus(context, "分析已保存，可继续追问。");
   } catch (error) {
-    if (diagnosticContextIsCurrent(context)) $("#attempt-diagnosis-status").textContent = `分析未完成：${error.message}${context.pendingSubmission ? "。再次点击“检查本次发送”将查询同一请求，避免重复调用。" : ""}`;
+    if (diagnosticContextIsCurrent(context)) setAttemptDiagnosisStatus(context, `分析未完成：${error.message}${context.pendingSubmission ? "。再次点击“检查本次发送”将查询同一请求，避免重复调用。" : ""}`);
   } finally { context.running = false; if (diagnosticContextIsCurrent(context)) renderAttemptDiagnosticHistory(context); }
 }
 async function exportAttemptDiagnosis(context) {
   if (!diagnosticContextIsCurrent(context)) return;
-  $("#diagnosis-export-dialog").showModal(); $("#diagnosis-export-copy").disabled = true; $("#diagnosis-export-status").textContent = "正在把诊断证据保存到当前工作区…"; $("#diagnosis-export-path").value = "";
+  $("#diagnosis-export-dialog").showModal();
+  context.exportState = { status: "正在把诊断证据保存到当前工作区…", path: "", copyLabel: "复制分析提示", copyDisabled: true };
+  renderAttemptDiagnosticExport(context);
   try {
     const result = await api(`${attemptDiagnosticPath(context)}/export`, { method: "POST", body: "{}" });
     if (!diagnosticContextIsCurrent(context)) return;
-    context.exported = result; $("#diagnosis-export-path").value = result.absolutePath; $("#diagnosis-export-status").textContent = `证据已保存${result.truncated ? "（日志按限额截取）" : ""}。复制简短提示，到网页发送即可。`; $("#diagnosis-export-copy").disabled = false;
+    context.exported = result; context.exportState = { status: `证据已保存${result.truncated ? "（日志按限额截取）" : ""}。复制简短提示，到网页发送即可。`, path: result.absolutePath, copyLabel: "复制分析提示", copyDisabled: false };
+    renderAttemptDiagnosticExport(context);
     await copyExportedDiagnosticPrompt();
-  } catch (error) { if (diagnosticContextIsCurrent(context)) $("#diagnosis-export-status").textContent = `保存未完成：${error.message}`; }
+  } catch (error) { if (diagnosticContextIsCurrent(context)) { context.exportState = { status: `保存未完成：${error.message}`, path: "", copyLabel: "复制分析提示", copyDisabled: true }; renderAttemptDiagnosticExport(context); } }
+}
+function renderAttemptDiagnosticExport(context) {
+  const mount = $("#diagnosis-export-root"), model = context.exportState || { status: "正在保存证据…", path: "", copyLabel: "复制分析提示", copyDisabled: true };
+  if (globalThis.tokenCouponAttemptDiagnosisExport) {
+    globalThis.tokenCouponAttemptDiagnosisExport.render(mount, model, { onClose: () => $("#diagnosis-export-dialog").close(), onCopy: () => void copyExportedDiagnosticPrompt(), onSwitch: () => { $("#diagnosis-export-dialog").close(); showAttemptDiagnosisChoice(); } });
+    return;
+  }
+  $("#diagnosis-export-status").textContent = model.status; $("#diagnosis-export-path").value = model.path;
+  $("#diagnosis-export-copy").textContent = model.copyLabel; $("#diagnosis-export-copy").disabled = model.copyDisabled;
 }
 async function copyExportedDiagnosticPrompt() {
   const result = state.attemptDiagnosticContext?.exported;
   if (!result) return;
-  try { await navigator.clipboard.writeText(result.prompt); $("#diagnosis-export-copy").textContent = "已复制 · 再次复制"; }
+  try { await navigator.clipboard.writeText(result.prompt); if (state.attemptDiagnosticContext) { state.attemptDiagnosticContext.exportState.copyLabel = "已复制 · 再次复制"; renderAttemptDiagnosticExport(state.attemptDiagnosticContext); } }
   catch { showCopyFallback("复制网页分析提示", result.prompt); }
 }
 function reportedModelLabel(model, source) {
@@ -2862,8 +3947,8 @@ function renderAttemptContent() {
   const view = state.attemptView; if (!view) return;
   const a = view.attempt || {}, box = $("#attempt-messages"), scrollTop = box.scrollTop;
   const model = a.reportedModel || view.reportedModel;
-  $("#attempt-state").textContent = `${a.runnerId || "Runner"} / ${model ? reportedModelLabel(model, a.reportedModelSource || view.reportedModelSource) : a.execution?.modelId ? `${a.execution.modelId}（配置模型）` : "实际模型未报告"} · ${statuses[a.status] || a.status || "读取中"}${a.reason ? ` · ${a.reason}` : ""}${a.exitCode === null || a.exitCode === undefined ? "" : ` · 退出码 ${a.exitCode}`}`;
-  $("#attempt-notice").textContent = `${view.notice || ""}${view.hasMore ? " 还有历史内容待加载，当前不是完整记录。" : ""} 有更新时保留当前阅读位置。`;
+  const attemptState = `${a.runnerId || "Runner"} / ${model ? reportedModelLabel(model, a.reportedModelSource || view.reportedModelSource) : a.execution?.modelId ? `${a.execution.modelId}（配置模型）` : "实际模型未报告"} · ${statuses[a.status] || a.status || "读取中"}${a.reason ? ` · ${a.reason}` : ""}${a.exitCode === null || a.exitCode === undefined ? "" : ` · 退出码 ${a.exitCode}`}`;
+  const attemptNotice = `${view.notice || ""}${view.hasMore ? " 还有历史内容待加载，当前不是完整记录。" : ""} 有更新时保留当前阅读位置。`;
   const oldMessages = new Map([...box.querySelectorAll(".attempt-message")].map(message => [message.dataset.messageId, message]));
   const messageAnchor = [...oldMessages.values()].find(message => message.offsetTop + message.offsetHeight > box.scrollTop), anchorOffset = messageAnchor ? messageAnchor.offsetTop - box.scrollTop : 0;
   const messages = [...view.messages].map(([messageId, message]) => ({ ...message, messageId }));
@@ -2877,39 +3962,87 @@ function renderAttemptContent() {
     if (matching >= 0) messages[matching] = { ...messages[matching], text: view.finalText, completed: true, final: true };
     else messages.push({ messageId: "final-result", text: view.finalText, completed: true, final: true });
   }
-  $("#attempt-reply-heading").textContent = ["created", "running"].includes(a.status) ? "模型回复 · 接收中" : "模型回复";
+  const replyHeading = ["created", "running"].includes(a.status) ? "模型回复 · 接收中" : "模型回复";
   const conclusion = executionConclusion(a.status);
-  $("#attempt-outcome").textContent = [conclusion, a.reason, a.exitCode !== undefined && a.exitCode !== null ? `退出码 ${a.exitCode}` : ""].filter(Boolean).join(" · ");
-  $("#attempt-outcome").className = `attempt-outcome ${statusClass(a.status)}`; show($("#attempt-outcome"), !!conclusion);
   const diagnosable = ["failed", "timed_out", "cancelled", "interrupted", "needs_input"].includes(a.status);
-  show($("#attempt-diagnose"), diagnosable);
-  const orderedMessages = messages.filter(item => item.text.trim()).reverse();
-  const retained = new Set(orderedMessages.map(message => message.messageId));
-  for (const [id, element] of oldMessages) if (!retained.has(id)) element.remove();
-  if (orderedMessages.length && !oldMessages.size) box.replaceChildren();
-  for (const [index, message] of orderedMessages.entries()) {
-    const article = oldMessages.get(message.messageId) || document.createElement("article"); article.className = "attempt-message"; article.dataset.messageId = message.messageId;
-    if (!article.children.length) article.append(document.createElement("strong"), document.createElement("pre"));
-    const title = article.children[0], pre = article.children[1];
-    title.textContent = `${orderedMessages.length - index}.${index === 0 ? " 最新回复" : ""}${message.final ? " · 最终结论" : !message.completed ? " · 接收记录" : ""}`;
-    if (article.replyText !== message.text) { pre.replaceChildren(); appendHighlightedReply(pre, message.text); article.replyText = message.text; }
-    if (box.children[index] !== article) box.insertBefore(article, box.children[index] || null);
+  const outcome = [conclusion, a.reason, a.exitCode !== undefined && a.exitCode !== null ? `退出码 ${a.exitCode}` : ""].filter(Boolean).join(" · ");
+  if (globalThis.tokenCouponAttemptOverview) {
+    globalThis.tokenCouponAttemptOverview.render({ state: attemptState, notice: attemptNotice, outcome, outcomeClass: statusClass(a.status), outcomeVisible: !!conclusion, replyHeading, diagnoseVisible: diagnosable }, () => void openAttemptDiagnosis());
+  } else {
+    $("#attempt-state").textContent = attemptState;
+    $("#attempt-notice").textContent = attemptNotice;
+    $("#attempt-reply-heading").textContent = replyHeading;
+    $("#attempt-outcome").textContent = outcome;
+    $("#attempt-outcome").className = `attempt-outcome ${statusClass(a.status)}`; show($("#attempt-outcome"), !!conclusion);
+    show($("#attempt-diagnose"), diagnosable);
   }
-  if (!messages.length) box.textContent = "尚无模型正文；可展开工具活动或原始事件查看。";
-  box.scrollTop = messageAnchor?.isConnected ? messageAnchor.offsetTop - anchorOffset : scrollTop;
+  const orderedMessages = messages.filter(item => item.text.trim()).reverse();
+  if (globalThis.tokenCouponAttemptMessages) {
+    const viewMessages = orderedMessages.map((message, index) => ({
+      messageId: message.messageId,
+      title: `${orderedMessages.length - index}.${index === 0 ? " 最新回复" : ""}${message.final ? " · 最终结论" : !message.completed ? " · 接收记录" : ""}`,
+      text: message.text,
+    }));
+    globalThis.tokenCouponAttemptMessages.render({ messages: viewMessages, emptyMessage: "尚无模型正文；可展开工具活动或原始事件查看。" });
+    box.scrollTop = messageAnchor?.isConnected ? messageAnchor.offsetTop - anchorOffset : scrollTop;
+  } else {
+    const retained = new Set(orderedMessages.map(message => message.messageId));
+    for (const [id, element] of oldMessages) if (!retained.has(id)) element.remove();
+    if (orderedMessages.length && !oldMessages.size) box.replaceChildren();
+    for (const [index, message] of orderedMessages.entries()) {
+      const article = oldMessages.get(message.messageId) || document.createElement("article"); article.className = "attempt-message"; article.dataset.messageId = message.messageId;
+      if (!article.children.length) article.append(document.createElement("strong"), document.createElement("pre"));
+      const title = article.children[0], pre = article.children[1];
+      title.textContent = `${orderedMessages.length - index}.${index === 0 ? " 最新回复" : ""}${message.final ? " · 最终结论" : !message.completed ? " · 接收记录" : ""}`;
+      if (article.replyText !== message.text) { pre.replaceChildren(); appendHighlightedReply(pre, message.text); article.replyText = message.text; }
+      if (box.children[index] !== article) box.insertBefore(article, box.children[index] || null);
+    }
+    if (!messages.length) box.textContent = "尚无模型正文；可展开工具活动或原始事件查看。";
+    box.scrollTop = messageAnchor?.isConnected ? messageAnchor.offsetTop - anchorOffset : scrollTop;
+  }
   const tools = $("#attempt-tools"), toolScroll = tools.scrollTop, rawScroll = $("#attempt-raw").scrollTop;
   const oldTools = new Map([...tools.querySelectorAll("details")].map(item => [item.dataset.eventKey, item]));
-  const toolPage = activityPage(view, "tools", view.tools);
-  for (const [eventKey, element] of oldTools) if (!toolPage.some(tool => String(tool.sequence) === eventKey)) element.remove();
-  for (const [index, tool] of toolPage.entries()) { const details = oldTools.get(String(tool.sequence)) || document.createElement("details"), signature = JSON.stringify(tool);
-    if (details.dataset.signature !== signature) { details.dataset.signature = signature; details.replaceChildren(); const summary = document.createElement("summary"), pre = document.createElement("pre"); details.className = "foldout"; details.dataset.eventKey = String(tool.sequence); if (tool.exitCode && tool.exitCode !== 0 || tool.type === "stderr") details.classList.add("activity-error"); summary.textContent = `${tool.timestamp ? new Date(tool.timestamp).toLocaleTimeString() + " · " : ""}${tool.type}${tool.exitCode === undefined ? "" : ` · 退出码 ${tool.exitCode}`} · ${tool.text.slice(0, 180)}`; pre.textContent = [tool.text, tool.output].filter(Boolean).join("\n"); details.append(summary, pre); }
-    if (tools.children[index] !== details) tools.insertBefore(details, tools.children[index] || null);
+  const toolPageState = activityPageState(view, "tools", view.tools), toolPage = toolPageState.items;
+  if (globalThis.tokenCouponAttemptTools) {
+    const openEventKeys = [...oldTools.values()].filter(element => element.open).map(element => element.dataset.eventKey).filter(Boolean);
+    globalThis.tokenCouponAttemptTools.render({
+      openEventKeys,
+      tools: toolPage.map(tool => ({
+        eventKey: String(tool.sequence),
+        summary: `${tool.timestamp ? new Date(tool.timestamp).toLocaleTimeString() + " · " : ""}${tool.type}${tool.exitCode === undefined ? "" : ` · 退出码 ${tool.exitCode}`} · ${tool.text.slice(0, 180)}`,
+        text: [tool.text, tool.output].filter(Boolean).join("\n"),
+        isError: !!tool.exitCode && tool.exitCode !== 0 || tool.type === "stderr",
+      })),
+    });
+  } else {
+    for (const [eventKey, element] of oldTools) if (!toolPage.some(tool => String(tool.sequence) === eventKey)) element.remove();
+    for (const [index, tool] of toolPage.entries()) { const details = oldTools.get(String(tool.sequence)) || document.createElement("details"), signature = JSON.stringify(tool);
+      if (details.dataset.signature !== signature) { details.dataset.signature = signature; details.replaceChildren(); const summary = document.createElement("summary"), pre = document.createElement("pre"); details.className = "foldout"; details.dataset.eventKey = String(tool.sequence); if (tool.exitCode && tool.exitCode !== 0 || tool.type === "stderr") details.classList.add("activity-error"); summary.textContent = `${tool.timestamp ? new Date(tool.timestamp).toLocaleTimeString() + " · " : ""}${tool.type}${tool.exitCode === undefined ? "" : ` · 退出码 ${tool.exitCode}`} · ${tool.text.slice(0, 180)}`; pre.textContent = [tool.text, tool.output].filter(Boolean).join("\n"); details.append(summary, pre); }
+      if (tools.children[index] !== details) tools.insertBefore(details, tools.children[index] || null);
+    }
   }
-  const filter = $("#attempt-event-filter").value.trim();
-  const raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
-  $("#attempt-raw").textContent = activityPage(view, "raw", raw).map(event => JSON.stringify(event)).join("\n");
+  if (globalThis.tokenCouponAttemptToolsPagination) globalThis.tokenCouponAttemptToolsPagination.render({
+    pageLabel: toolPageState.label, previousDisabled: toolPageState.page === 0, nextDisabled: toolPageState.page + 1 >= toolPageState.pages,
+  }, {
+    onPrevious: () => { if (state.attemptView) { state.attemptView.toolsPage--; renderAttemptView(); } },
+    onNext: () => { if (state.attemptView) { state.attemptView.toolsPage++; renderAttemptView(); } },
+  });
+  const filterValue = view.rawFilter ?? $("#attempt-event-filter").value;
+  if (globalThis.tokenCouponAttemptRawEvents) globalThis.tokenCouponAttemptRawEvents.render($("#attempt-raw-root"), {
+    identity: `${view.identity}:${view.rawRevision || 0}`,
+    events: view.raw.map(event => ({ line: JSON.stringify(event), type: event.type, stream: event.payload?.stream })),
+    filterValue, initialPage: view.rawPage || 0, hasMore: !!view.hasMore,
+  }, {
+    onFilter: value => { if (state.attemptView === view) view.rawFilter = value; },
+    onPageChange: page => { if (state.attemptView === view) view.rawPage = page; },
+  });
+  else {
+    const filter = filterValue.trim(), raw = view.raw.filter(event => !filter || event.type.includes(filter) || event.payload?.stream === filter);
+    const rawPage = activityPageState(view, "raw", raw), rawLines = rawPage.items.map(event => JSON.stringify(event));
+    $("#attempt-raw").textContent = rawLines.join("\n");
+  }
   tools.scrollTop = toolScroll; $("#attempt-raw").scrollTop = rawScroll;
-  show($("#attempt-more"), !!view.hasMore);
+  renderAttemptControls();
 }
 function appendHighlightedReply(root, text) {
   let fenced = false;
@@ -2921,14 +4054,18 @@ function appendHighlightedReply(root, text) {
     root.append(document.createTextNode("\n"));
   }
 }
-function activityPage(view, kind, items) {
+function activityPageState(view, kind, items) {
   const size = 15, pages = Math.max(1, Math.ceil(items.length / size));
   view[`${kind}Page`] = Math.max(0, Math.min(view[`${kind}Page`] || 0, pages - 1));
   const page = view[`${kind}Page`];
-  $("#attempt-" + kind + "-page").textContent = `第 ${page + 1} / ${pages} 页 · 已加载 ${items.length} 条${view.hasMore ? "（还有历史待加载）" : ""}`;
-  $("#attempt-" + kind + "-prev").disabled = page === 0;
-  $("#attempt-" + kind + "-next").disabled = page + 1 >= pages;
-  return items.slice(page * size, (page + 1) * size);
+  const label = `第 ${page + 1} / ${pages} 页 · 已加载 ${items.length} 条${view.hasMore ? "（还有历史待加载）" : ""}`;
+  const reactOwned = kind === "raw" ? globalThis.tokenCouponAttemptRawEvents : kind === "tools" ? globalThis.tokenCouponAttemptToolsPagination : undefined;
+  if (!reactOwned) {
+    $("#attempt-" + kind + "-page").textContent = label;
+    $("#attempt-" + kind + "-prev").disabled = page === 0;
+    $("#attempt-" + kind + "-next").disabled = page + 1 >= pages;
+  }
+  return { items: items.slice(page * size, (page + 1) * size), page, pages, label };
 }
 function startSessionAction(action, label, extra = {}) {
   if (action === "session/pause" || action === "session/cancel") return startControlAction(action.endsWith("pause") ? "pause" : "cancel", label, extra);
@@ -3023,10 +4160,11 @@ async function renderInteractions() {
   preserveExecutionReading(() => {
   state.planning.interactions = items; state.waitingInteractions = items.length;
   renderSession();
-  $("#pending-approval-count").textContent = `${items.length} 项`;
   const questionCount = items.filter(item => item.request.kind === "question").length;
   const approvalCount = items.filter(item => item.request.kind === "approval").length;
-  $("#pending-approval-summary").textContent = !items.length ? "当前没有待处理请求。" : questionCount === items.length ? "Runner 正在等待你的回答。请选择答案或补充具体信息；回答会发送给对应任务，不代表批准计划或工具操作。" : approvalCount === items.length ? "工具正在等待你的批准。请核对操作理由、具体命令和工作目录，再决定本次允许或拒绝。" : `${questionCount} 项任务提问、${approvalCount} 项工具审批、${items.length - questionCount - approvalCount} 项表单／网页确认，请分别处理。`;
+  const summary = !items.length ? "当前没有待处理请求。" : questionCount === items.length ? "Runner 正在等待你的回答。请选择答案或补充具体信息；回答会发送给对应任务，不代表批准计划或工具操作。" : approvalCount === items.length ? "工具正在等待你的批准。请核对操作理由、具体命令和工作目录，再决定本次允许或拒绝。" : `${questionCount} 项任务提问、${approvalCount} 项工具审批、${items.length - questionCount - approvalCount} 项表单／网页确认，请分别处理。`;
+  if (globalThis.tokenCouponPendingApprovalOverview) globalThis.tokenCouponPendingApprovalOverview.render({ count: items.length, summary });
+  else { $("#pending-approval-count").textContent = `${items.length} 项`; $("#pending-approval-summary").textContent = summary; }
   $("#pending-approval-box").classList.toggle("has-pending", !!items.length);
   show($("#pending-action-banner"), !!items.length);
   $("#pending-action-label").textContent = `${items.length} 项等待你审批／回答 · ${state.workspace.label}`;
@@ -3035,9 +4173,16 @@ async function renderInteractions() {
   if (state.interactionSignature === signature) return;
   state.interactionSignature = signature;
   const answers = new Map([...root.querySelectorAll("input[data-question-id]")].map(input => [input.id, { value: input.value, checked: input.checked }]));
+  if (root.childElementCount) {
+    globalThis.tokenCouponPendingApprovalText?.unmountWithin(root);
+    globalThis.tokenCouponPendingApprovalDecision?.unmountWithin(root);
+    globalThis.tokenCouponPendingRunnerQuestions?.unmountWithin(root);
+    globalThis.tokenCouponPendingInteractionGuidance?.unmountWithin(root);
+    globalThis.tokenCouponPendingElicitation?.unmountWithin(root);
+  }
   root.replaceChildren(); state.waitingInteractions = items.length; renderPlanOverview();
   for (const interaction of items) {
-    const card = document.createElement("div"); card.className = "interaction-card";
+    const card = document.createElement("div"); card.className = "interaction-card"; card.dataset.requestId = interaction.requestId;
     const request = interaction.request;
     const task = state.planning.session?.tasks?.find(task => task.taskId === interaction.owner.taskId);
     const taskTitle = task?.title || state.planning.draft?.plan.tasks.find(entry => entry.task.id === interaction.owner.taskId)?.task.title;
@@ -3062,12 +4207,20 @@ async function renderInteractions() {
     if (request.kind === "approval") {
       if (request.operation?.command) appendApprovalText(card, "approval-command", "待审批命令", request.operation.command, `${interaction.requestId}:command`, 6, 800, true);
       if (request.cwd) { const cwd = document.createElement("p"); cwd.className = "hint"; cwd.textContent = `工作目录：${request.cwd}`; card.append(cwd); }
-      const actions = document.createElement("div"); actions.className = "interaction-actions";
-      for (const [decision, text] of [["allow-once", "本次允许"], ["deny", "拒绝本次操作"]]) {
-        const button = document.createElement("button"); button.className = `button ${decision === "allow-once" ? "button-primary" : "button-quiet"}`; button.textContent = text;
-        button.addEventListener("click", () => respondInteraction(interaction.requestId, { kind: "approval", decision })); actions.append(button);
+      if (globalThis.tokenCouponPendingApprovalDecision) {
+        const actions = document.createElement("div"); actions.className = "approval-decision-react-root"; card.append(actions);
+        globalThis.tokenCouponPendingApprovalDecision.render(actions, {
+          onAllow: () => respondInteraction(interaction.requestId, { kind: "approval", decision: "allow-once" }),
+          onDeny: () => respondInteraction(interaction.requestId, { kind: "approval", decision: "deny" }),
+        });
+      } else {
+        const actions = document.createElement("div"); actions.className = "interaction-actions";
+        for (const [decision, text] of [["allow-once", "本次允许"], ["deny", "拒绝本次操作"]]) {
+          const button = document.createElement("button"); button.className = `button ${decision === "allow-once" ? "button-primary" : "button-quiet"}`; button.textContent = text;
+          button.addEventListener("click", () => respondInteraction(interaction.requestId, { kind: "approval", decision })); actions.append(button);
+        }
+        card.append(actions);
       }
-      card.append(actions);
     } else if (request.kind === "elicitation") {
       renderCodexElicitation(card, interaction);
     } else {
@@ -3079,6 +4232,11 @@ async function renderInteractions() {
   });
 }
 function appendApprovalText(parent, className, title, text, storageKey, maxLines, maxChars, code = false) {
+  if (globalThis.tokenCouponPendingApprovalText) {
+    const mount = document.createElement("div"); mount.className = "approval-text-react-root"; parent.append(mount);
+    globalThis.tokenCouponPendingApprovalText.render(mount, { className, title, text, storageKey, maxLines, maxChars, code });
+    return;
+  }
   const lines = text.split("\n");
   const makeBody = value => { const body = document.createElement(code ? "pre" : "p"); body.className = className; body.textContent = value; return body; };
   if (lines.length <= maxLines && text.length <= maxChars) {
@@ -3095,6 +4253,16 @@ function appendApprovalText(parent, className, title, text, storageKey, maxLines
   parent.append(details);
 }
 function renderRunnerQuestions(card, interaction, drafts) {
+  if (globalThis.tokenCouponPendingRunnerQuestions) {
+    const mount = document.createElement("div"); mount.className = "runner-questions-react-root"; card.append(mount);
+    globalThis.tokenCouponPendingRunnerQuestions.render(mount, {
+      requestId: interaction.requestId,
+      questions: interaction.request.questions || [],
+      drafts: Object.fromEntries(drafts),
+      onSubmit: answers => void respondInteraction(interaction.requestId, { kind: "question", answers }),
+    });
+    return;
+  }
   const readers = [], questions = interaction.request.questions || [];
   const hint = document.createElement("p"); hint.className = "hint runner-question-help";
   const submit = document.createElement("button"); submit.type = "button"; submit.className = "button button-primary"; submit.textContent = "发送回答并继续";
@@ -3144,6 +4312,19 @@ function renderRunnerQuestions(card, interaction, drafts) {
 }
 function appendInteractionGuidance(card, interaction) {
   if (!["codex", "claude-code"].includes(interaction.owner.runnerId)) return;
+  if (globalThis.tokenCouponPendingInteractionGuidance) {
+    const mount = document.createElement("div"); mount.className = "interaction-guidance-react-root"; card.append(mount);
+    globalThis.tokenCouponPendingInteractionGuidance.render(mount, {
+      kind: interaction.request.kind,
+      onInvalid: () => showToast("请填写调整指导；当前请求尚未提交。", true),
+      onSubmit: text => {
+        const kind = interaction.request.kind;
+        const reply = kind === "approval" ? { kind, decision: "deny", guidance: text } : kind === "elicitation" ? { kind, action: "decline", guidance: text } : { kind: "question", answers: [], guidance: text };
+        void respondInteraction(interaction.requestId, reply);
+      },
+    });
+    return;
+  }
   const area = document.createElement("div"); area.className = "approval-guidance";
   const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "button button-quiet interaction-no"; toggle.textContent = "NO, tell what to do · 拒绝并指导"; toggle.setAttribute("aria-expanded", "false");
   const editor = document.createElement("div"); editor.className = "guidance-editor hidden";
@@ -3163,6 +4344,21 @@ function appendInteractionGuidance(card, interaction) {
 }
 function renderCodexElicitation(card, interaction) {
   const request = interaction.request, elicitation = request.elicitation || {};
+  if (globalThis.tokenCouponPendingElicitation) {
+    const schema = elicitation.requestedSchema;
+    const mode = elicitation.mode === "url" ? "url" : elicitation.mode === "form" && schema?.properties ? "form" : "unsupported";
+    const mount = document.createElement("div"); mount.className = "elicitation-react-root"; card.append(mount);
+    globalThis.tokenCouponPendingElicitation.render(mount, {
+      mode,
+      url: elicitation.url,
+      schema,
+      onAcceptUrl: () => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "accept" }),
+      onSubmit: content => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "accept", content }),
+      onDecline: () => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "decline" }),
+      onCancel: () => void respondInteraction(interaction.requestId, { kind: "elicitation", action: "cancel" }),
+    });
+    return;
+  }
   if (elicitation.mode === "url") {
     const destination = document.createElement("p"); destination.className = "elicitation-destination";
     let host = "目标网站";
@@ -3267,11 +4463,34 @@ function notifyPendingApprovals(items) {
   for (const item of fresh) state.notifiedRequests.add(item.requestId);
   const base = `${state.planning?.draft?.plan.title || "Token Coupon"} · Token Coupon`;
   document.title = items.length ? `【${items.length} 项待审批】${base}` : base;
-  if (fresh.length && typeof Notification !== "undefined" && Notification.permission === "granted" && (document.hidden || !document.hasFocus())) {
-    try { const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId; const note = new Notification("Token Coupon · 需要你的决定", { body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, tag: `tc-${state.workspace?.workspaceId}-${state.planning?.planningId}` }); note.onclick = () => { window.focus(); if (workspaceId && planningId) void navigate(`/workspaces/${encodeURIComponent(workspaceId)}/plans/${encodeURIComponent(planningId)}/execution`); note.close(); }; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
+  if (fresh.length && (document.hidden || !document.hasFocus())) {
+    const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId;
+    const requestedTaskId = fresh.length === 1 ? fresh[0].owner?.taskId ?? fresh[0].taskId : undefined;
+    const taskId = typeof requestedTaskId === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(requestedTaskId) ? requestedTaskId : undefined;
+    if (window.tokenCouponDesktop && state.desktopNotificationsEnabled) {
+      void window.tokenCouponDesktop.showNotification({ title: "Token Coupon · 需要你的决定", body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, ...(workspaceId && planningId ? { workspaceId, planningId, ...(taskId ? { taskId } : {}) } : {}) })
+        .then(shown => { if (!shown) $("#notification-status").textContent = "系统通知不可用，页面内仍会显示待审批。"; })
+        .catch(() => { $("#notification-status").textContent = "系统通知不可用，页面内仍会显示待审批。"; });
+    } else if (!window.tokenCouponDesktop && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { const note = new Notification("Token Coupon · 需要你的决定", { body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, tag: `tc-${state.workspace?.workspaceId}-${state.planning?.planningId}` }); note.onclick = () => { window.focus(); if (workspaceId && planningId) void navigate(`/workspaces/${encodeURIComponent(workspaceId)}/plans/${encodeURIComponent(planningId)}/execution`); note.close(); }; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
+    }
   }
   while (state.notifiedRequests.size > 500) state.notifiedRequests.delete(state.notifiedRequests.values().next().value);
 }
+
+window.addEventListener("token-coupon:navigate-to-task", event => {
+  const target = event.detail;
+  if (!target || !/^[A-Za-z0-9_-]{1,128}$/.test(target.workspaceId || "") || !/^[A-Za-z0-9_-]{1,128}$/.test(target.planningId || "") ||
+      target.taskId !== undefined && !/^[A-Za-z0-9._-]{1,100}$/.test(target.taskId)) return;
+  const path = `/workspaces/${encodeURIComponent(target.workspaceId)}/plans/${encodeURIComponent(target.planningId)}/execution`;
+  void navigate(path).then(() => {
+    if (state.route?.workspaceId !== target.workspaceId || state.route?.planningId !== target.planningId || !target.taskId) return;
+    const row = [...document.querySelectorAll(".task-row")].find(item => item.dataset.taskId === target.taskId);
+    if (!row) return;
+    row.classList.add("desktop-notification-focus"); row.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => row.classList.remove("desktop-notification-focus"), 3200);
+  });
+});
 function statusClass(status) { if (["succeeded", "approved"].includes(status)) return "badge-success"; if (["failed", "timed_out", "cancelled", "interrupted"].includes(status)) return "badge-error"; if (["running", "pausing", "blocked", "paused", "unavailable"].includes(status)) return "badge-warning"; return "badge-neutral"; }
 
 const planningStages = { preparing: "准备调用", starting: "启动 Agent", initializing: "初始化连接", waiting_model: "等待模型回复", receiving: "正在接收回复", validating: "校验回复", repairing: "自动修正回复", completed: "校验完成，正在保存", failed: "调用已结束，正在保存", cancelled: "取消收尾中" };
@@ -3608,11 +4827,17 @@ $("#start-planning").addEventListener("click", async () => {
   const model = $("#planner-model").value.trim();
   const payload = { request, provider, ...(model ? { model } : {}), executionDefaults: { runnerId: $("#runner-id").value, mode: "managed", ...( $("#runner-model").value.trim() ? { modelId: $("#runner-model").value.trim() } : {}) } };
   const job = await startJob("开始规划", (requestKey) => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings`, { method: "POST", body: JSON.stringify({ ...payload, requestKey }) }));
-  if (job && ["running", "succeeded"].includes(job.status)) $("#request-text").value = "";
+  if (job && ["running", "succeeded"].includes(job.status)) {
+    $("#request-text").value = "";
+    globalThis.tokenCouponPlannerRequestComposer?.setValue("");
+  }
 });
+if (!globalThis.tokenCouponPlannerRequestComposer) bindTextareaEnterSubmit($("#request-text"), () => $("#start-planning").click());
 $("#new-task").addEventListener("click", startNewTask);
 $("#new-task-sidebar").addEventListener("click", startNewTask);
-$("#refresh-models").addEventListener("click", () => { void loadRunnerModels(true); void loadPlannerModels(true); });
+const refreshModelCatalogs = () => { void loadRunnerModels(true); void loadPlannerModels(true); };
+document.addEventListener("token-coupon:refresh-models", refreshModelCatalogs);
+if (!globalThis.tokenCouponModelCatalogStatus) $("#refresh-models").addEventListener("click", refreshModelCatalogs);
 $("#reply-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (state.replying) return;
   const message = $("#reply-text").value.trim();
@@ -3621,13 +4846,14 @@ $("#reply-form").addEventListener("submit", async (event) => {
   if (functionPolicy("planning") && !state.operationRoutingSupported) { showToast("请重启后台并刷新页面，以按设置继续规划。", true); return; }
   if (!await confirmPlanChanges()) return;
   const path = `/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/replies`;
-  state.replying = true; $("#reply-text").disabled = true; renderRequirements();
+  state.replying = true; $("#reply-text").disabled = true; globalThis.tokenCouponReplyComposer?.setDisabled(true); renderRequirements();
   try {
     const planner = policySelection("planning");
     const job = await startJob("提交回复", (requestKey) => api(path, { method: "POST", body: JSON.stringify({ requestKey, message, ...(planner ? { planner } : {}) }) }), true);
-    if (job?.status === "succeeded") $("#reply-text").value = "";
-  } finally { state.replying = false; $("#reply-text").disabled = false; if (state.planning) renderRequirements(); }
+    if (job?.status === "succeeded") { $("#reply-text").value = ""; globalThis.tokenCouponReplyComposer?.setValue(""); }
+  } finally { state.replying = false; $("#reply-text").disabled = false; globalThis.tokenCouponReplyComposer?.setDisabled(false); if (state.planning) renderRequirements(); }
 });
+if (!globalThis.tokenCouponReplyComposer) bindTextareaEnterSubmit($("#reply-text"), () => $("#reply-form").requestSubmit());
 $("#review-button").addEventListener("click", async () => {
   if (!state.planning || !await confirmPlanChanges()) return;
   const mode = $("#reviewer-mode")?.value || "planning";
@@ -3677,19 +4903,21 @@ $("#run-button").addEventListener("click", async () => {
   if (!job) state.runRequestKey = null;
   state.runInFlight = false; renderRunConfiguration();
 });
-function persistRunConfiguration() {
+function persistRunConfiguration(modeOverride, deferReactRender = false, fieldOverride) {
   if (!state.runConfiguration || !state.runConfigKey) return;
   state.runConfiguration.edited = true; state.runConfiguration.needsReconfirm = false;
-  state.runConfiguration.mode = document.querySelector('input[name="run-mode-choice"]:checked')?.value || state.runConfiguration.mode;
-  state.runConfiguration.maxParallel = Number($("#run-parallel").value);
-  state.runConfiguration.isolation = $("#run-isolation").value;
-  state.runConfiguration.verificationTaskId = $("#run-verification").value;
+  const selectedMode = modeOverride === "default" || modeOverride === "custom" ? modeOverride : undefined;
+  state.runConfiguration.mode = selectedMode ?? document.querySelector('input[name="run-mode-choice"]:checked')?.value ?? state.runConfiguration.mode;
+  state.runConfiguration.maxParallel = Number(fieldOverride?.field === "parallel" ? fieldOverride.value : $("#run-parallel").value);
+  state.runConfiguration.isolation = fieldOverride?.field === "isolation" ? fieldOverride.value : $("#run-isolation").value;
+  state.runConfiguration.verificationTaskId = fieldOverride?.field === "verification" ? fieldOverride.value : $("#run-verification").value;
   if (state.runConfiguration.isolation === "shared") { state.runConfiguration.maxParallel = 1; $("#run-parallel").value = "1"; }
   try { localStorage.setItem(state.runConfigKey, JSON.stringify(state.runConfiguration)); } catch { /* Keep current selection in memory. */ }
-  renderRunConfiguration();
+  if (deferReactRender) queueMicrotask(renderRunConfiguration);
+  else renderRunConfiguration();
 }
-for (const input of document.querySelectorAll('input[name="run-mode-choice"]')) input.addEventListener("change", persistRunConfiguration);
-for (const id of ["run-parallel", "run-isolation", "run-verification"]) $("#" + id).addEventListener("change", persistRunConfiguration);
+if (!globalThis.tokenCouponRunModeSelector) for (const input of document.querySelectorAll('input[name="run-mode-choice"]')) input.addEventListener("change", persistRunConfiguration);
+if (!globalThis.tokenCouponRunParameters) for (const id of ["run-parallel", "run-isolation", "run-verification"]) $("#" + id).addEventListener("change", persistRunConfiguration);
 $("#revise-run-tasks")?.remove();
 $("#configure-task-agents").addEventListener("click", openTaskAgentConfig);
 $("#task-agent-config-cancel").addEventListener("click", () => $("#task-agent-config-dialog").close());
@@ -3706,17 +4934,20 @@ $("#local-state-cancel").addEventListener("click", () => decideLocalInputNavigat
 $("#unsaved-local-state-dialog").addEventListener("cancel", event => { event.preventDefault(); decideLocalInputNavigation("cancel"); });
 window.addEventListener("beforeunload", (event) => { if (planHasChanges()) { event.preventDefault(); event.returnValue = ""; } });
 $("#cancel-job").addEventListener("click", async () => { if (!state.activeJob) return; try { await api(`/api/v1/jobs/${state.activeJob.jobId}/cancel`, { method: "POST", body: JSON.stringify({ workspaceId: state.activeJob.workspaceId }) }); $("#job-label").textContent = "已请求取消，正在等待 Runner 收尾"; } catch (error) { showToast(error.message, true); } });
-$("#refresh").addEventListener("click", () => { void refreshAll(); void refreshRemoteConnection(); }); $("#reconnect").addEventListener("click", () => { state.reconnectAttempts = 0; void init(); }); $("#clear-log").addEventListener("click", () => { $("#event-log").replaceChildren(); });
+$("#refresh").addEventListener("click", () => { void refreshAll(); void refreshRemoteConnection(); void globalThis.tokenCouponGlobalPending?.refresh(); }); $("#reconnect").addEventListener("click", () => { void reconnectDesktop(); }); $("#clear-log").addEventListener("click", () => { $("#event-log").replaceChildren(); });
+$("#desktop-reconnect").addEventListener("click", () => { void reconnectDesktop(); });
+$("#desktop-restore-inputs").addEventListener("click", () => { void restoreDesktopRecovery(); });
+$("#desktop-connection-close").addEventListener("click", () => { show($("#desktop-connection-banner"), false); });
 $("#toast-close").addEventListener("click", () => { clearTimeout(state.toastTimer); show($("#toast"), false); });
 $("#budget-extension-confirm").addEventListener("click", () => void confirmBudgetExtension());
 $("#budget-extension-cancel").addEventListener("click", () => { $("#budget-extension-dialog").close(); state.budgetOperationId = null; });
 $("#confirm-action-yes").addEventListener("click", () => settleConfirmAction(true));
 $("#confirm-action-no").addEventListener("click", () => settleConfirmAction(false));
 $("#confirm-action-dialog").addEventListener("cancel", event => { event.preventDefault(); settleConfirmAction(false); });
-$("#session-continue").addEventListener("click", openSessionContinue);
+if (!globalThis.tokenCouponSessionContinue) $("#session-continue").addEventListener("click", openSessionContinue);
 $("#session-continue-confirm").addEventListener("click", () => void confirmSessionContinue());
 $("#session-continue-cancel").addEventListener("click", () => { $("#session-continue-dialog").close(); state.continueContext = null; });
-$("#dag-focus").addEventListener("change", () => { if (!state.dagView) return; state.dagView.focusId = $("#dag-focus").value; state.dagView.autoFocus = false; updateTaskDag(true); });
+if (!globalThis.tokenCouponDagFocusSelector) $("#dag-focus").addEventListener("change", () => { if (!state.dagView) return; state.dagView.focusId = $("#dag-focus").value; state.dagView.autoFocus = false; updateTaskDag(true); });
 $("#dag-current").addEventListener("click", () => { if (!state.dagView) return; state.dagView.autoFocus = true; state.dagView.depth = 2; updateTaskDag(true); });
 $("#dag-expand").addEventListener("click", () => { if (!state.dagView) return; state.dagView.depth++; updateTaskDag(true); fitTaskDag(); });
 $("#dag-collapse").addEventListener("click", () => { if (!state.dagView) return; state.dagView.depth = Math.max(1, state.dagView.depth - 1); updateTaskDag(true); fitTaskDag(); });
@@ -3736,7 +4967,7 @@ $("#dag-dialog").addEventListener("click", event => { if (event.target === $("#d
 $("#dag-dialog").addEventListener("close", () => { state.dagView = null; });
 $("#task-results-close").addEventListener("click", () => { $("#task-results-dialog").close(); state.taskResultView = null; });
 $("#task-results-dialog").addEventListener("cancel", () => { state.taskResultView = null; });
-$("#task-results-more").addEventListener("click", () => { const view = state.taskResultView; if (view && view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); });
+if (!globalThis.tokenCouponTaskResults) $("#task-results-more").addEventListener("click", () => { const view = state.taskResultView; if (view && view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); });
 $("#copy-fallback-close").addEventListener("click", () => $("#copy-fallback-dialog").close());
 $("#copy-fallback-select").addEventListener("click", () => { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); });
 $("#copy-fallback-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#copy-fallback-text").value); $("#copy-fallback-dialog").close(); showToast("文本已复制。"); } catch { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); showToast("浏览器仍未授予剪贴板权限，请按 Ctrl+C 复制选中文本。", true); } });
@@ -3768,6 +4999,7 @@ function confirmConnectionReplacement(port, mode) {
   return askConfirm("重新配置网页连接", "此操作会重新配置当前连接，地址可能变化，原网页授权可能失效。完成后请核对 MCP 地址，并按提示重新授权。", "继续配置");
 }
 $("#remote-quick").addEventListener("click", async () => {
+  if (state.remoteStatus?.quickTunnel?.available === false) { showToast(state.remoteStatus.quickTunnel.reason || "当前后台暂不支持快捷连接。", true); return; }
   let port;
   try {
     if (!$("#quick-consent").checked) throw new Error("请先确认使用 Cloudflare 和自动下载连接组件。");
@@ -3923,7 +5155,7 @@ async function previewReferenceFile(path, startLine = 1) {
   } catch (error) { if (request === state.filePreviewRequest) { show($("#file-preview-wrap"), false); $("#file-error").textContent = error.message; show($("#file-error")); } }
 }
 for (const button of document.querySelectorAll("[data-route]")) button.addEventListener("click", () => void navigate(button.dataset.route));
-for (const button of document.querySelectorAll("[data-plan-tab]")) button.addEventListener("click", () => void planTab(button.dataset.planTab));
+if (!globalThis.tokenCouponPlanTabs) for (const button of document.querySelectorAll("[data-plan-tab]")) button.addEventListener("click", () => void planTab(button.dataset.planTab));
 window.addEventListener("hashchange", () => { if (state.initialized) void applyRoute(location.hash.slice(1) || "/connect", true); });
 $("#connection-next").addEventListener("click", () => void navigate("/workspaces"));
 $("#connection-local").addEventListener("click", () => void navigate("/workspaces"));
@@ -3994,13 +5226,17 @@ $("#git-save-identity").addEventListener("click", async () => {
   await startJob("保存仓库身份", requestKey => api(`/api/v1/workspaces/${state.workspace.workspaceId}/git/identity`, { method: "POST", body: JSON.stringify({ requestKey, confirmed: true, name: $("#git-name").value, email: $("#git-email").value }) }), true);
   await refreshGitReadiness(true);
 });
-$("#attempt-select").addEventListener("change", () => { if (state.attemptSelection) state.attemptSelection.mode = "history"; void selectAttempt(); });
-$("#attempt-show-latest").addEventListener("click", () => { if (state.attemptSelection) state.attemptSelection.mode = "auto"; $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; void selectAttempt(); });
+if (!globalThis.tokenCouponAttemptSelection) {
+  $("#attempt-select").addEventListener("change", () => { if (state.attemptSelection) { state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = $("#attempt-select").value; } void selectAttempt(); });
+  $("#attempt-show-latest").addEventListener("click", () => { if (state.attemptSelection) { state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || ""; } $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; void selectAttempt(); });
+}
 $("#execution-latest-details").addEventListener("click", () => void openTaskDetails());
 $("#copy-execution-clarification").addEventListener("click", () => void openRevisionPlanning());
-$("#attempt-refresh").addEventListener("click", () => readSelectedAttempt(true));
-$("#attempt-more").addEventListener("click", () => readSelectedAttempt(true));
-$("#attempt-event-filter").addEventListener("input", () => { if (state.attemptView) state.attemptView.rawPage = 0; renderAttemptView(); });
+if (!globalThis.tokenCouponAttemptRecordControls) {
+  $("#attempt-refresh").addEventListener("click", () => readSelectedAttempt(true));
+  $("#attempt-more").addEventListener("click", () => readSelectedAttempt(true));
+}
+if (!globalThis.tokenCouponAttemptRawEvents) $("#attempt-event-filter").addEventListener("input", () => { if (state.attemptView) { state.attemptView.rawFilter = $("#attempt-event-filter").value; state.attemptView.rawPage = 0; } renderAttemptView(); });
 
 $("#composer-back").addEventListener("click", () => state.workspace && selectWorkspace(state.workspace.workspaceId));
 $("#copy-plan-resume").addEventListener("click", copyResumePrompt);
@@ -4037,48 +5273,71 @@ function renderFileSelection() {
 function cancelDirectoryPicker(message = "") {
   const controller = state.directoryPickerController; if (!controller) return;
   state.directoryPickerController = null; controller.abort(); state.nativePicking = false;
-  const button = $("#choose-workspace-native"); button.disabled = false; button.textContent = "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy");
+  const button = $("#choose-workspace-native"); button.disabled = false; button.textContent = desktopFolderPicker ? "选择文件夹" : "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy");
   show($("#cancel-directory-picker"), false);
   if (message) { $("#workspace-picker-status").textContent = message; $("#workspace-manual-path").open = true; }
 }
 const pickerStatus = document.createElement("p"); pickerStatus.id = "workspace-picker-status"; pickerStatus.className = "hint"; pickerStatus.setAttribute("role", "status"); pickerStatus.setAttribute("aria-live", "polite");
-const cancelPicker = document.createElement("button"); cancelPicker.id = "cancel-directory-picker"; cancelPicker.type = "button"; cancelPicker.className = "button button-quiet hidden"; cancelPicker.textContent = "取消 Windows 选择";
+const desktopFolderPicker = typeof window.tokenCouponDesktop?.chooseWorkspaceFolder === "function";
+const cancelPicker = document.createElement("button"); cancelPicker.id = "cancel-directory-picker"; cancelPicker.type = "button"; cancelPicker.className = "button button-quiet hidden"; cancelPicker.textContent = "取消选择";
 const nativeChoice = document.createElement("details"); nativeChoice.id = "workspace-native-choice"; nativeChoice.className = "foldout";
-nativeChoice.innerHTML = '<summary>同机使用：Windows 原生窗口</summary><p class="hint">仅在运行后台的 Windows 已解锁桌面打开，另一台电脑看不到此窗口。远程使用请点“浏览后台目录”。</p><button id="choose-workspace-native" type="button" class="button button-quiet">在后台 Windows 打开选择窗口</button>';
+nativeChoice.innerHTML = desktopFolderPicker
+  ? '<summary>桌面应用：本机文件夹选择器</summary><p class="hint">在当前电脑选择工作区文件夹。</p><button id="choose-workspace-native" type="button" class="button button-quiet">选择文件夹</button>'
+  : '<summary>同机使用：Windows 原生窗口</summary><p class="hint">仅在运行后台的 Windows 已解锁桌面打开，另一台电脑看不到此窗口。远程使用请点“浏览后台目录”。</p><button id="choose-workspace-native" type="button" class="button button-quiet">在后台 Windows 打开选择窗口</button>';
 $("#choose-workspace-directory").textContent = "浏览后台目录";
 $("#choose-workspace-directory").after(nativeChoice); nativeChoice.append(cancelPicker, pickerStatus);
 cancelPicker.addEventListener("click", () => cancelDirectoryPicker("已取消 Windows 选择；可浏览后台目录或手动填写路径。"));
 async function openDirectoryPicker() {
-  if (state.nativePicking) { showActionFeedback("系统选择窗口仍在等待", "请在运行后台的 Windows 桌面选择或取消；也可返回选择已有工作区。"); return; }
+  if (state.nativePicking) { showActionFeedback("系统选择窗口仍在等待", desktopFolderPicker ? "请完成或取消当前文件夹选择。" : "请在运行后台的 Windows 桌面选择或取消；也可返回选择已有工作区。"); return; }
   const generation = state.folderSelectionGeneration, button = $("#choose-workspace-native"), controller = new AbortController();
   state.directoryPickerController = controller;
   state.nativePicking = true; button.disabled = true; button.textContent = "正在选择文件夹…"; button.setAttribute("aria-busy", "true");
-  show(cancelPicker); pickerStatus.textContent = "正在请求 Windows 文件夹窗口；未看到窗口时，可取消并手动填写。";
-  showActionFeedback("正在打开文件夹选择窗口", "请在运行后台的 Windows 桌面选择或取消；如果窗口在后台，可通过任务栏切换。也可返回选择已有工作区。");
-  const reminder = setTimeout(() => { if (state.directoryPickerController === controller && generation === state.folderSelectionGeneration) { pickerStatus.textContent = "仍在等待 Windows 窗口。若桌面没有弹窗，请取消选择并手动填写路径；最多等待 5 分钟。"; showActionFeedback("等待系统文件夹选择", pickerStatus.textContent); } }, 12000);
-  const deadline = setTimeout(() => { if (state.directoryPickerController === controller) cancelDirectoryPicker("本次选择等待超时，已请求取消。可重试或手动填写路径。"); }, 310000);
+  show(cancelPicker, !desktopFolderPicker); pickerStatus.textContent = desktopFolderPicker ? "正在打开本机文件夹选择器；如需取消，请关闭系统窗口。" : "正在请求 Windows 文件夹窗口；未看到窗口时，可取消并手动填写。";
+  showActionFeedback("正在打开文件夹选择窗口", desktopFolderPicker ? "请在当前电脑选择或取消文件夹。" : "请在运行后台的 Windows 桌面选择或取消；如果窗口在后台，可通过任务栏切换。也可返回选择已有工作区。");
+  const reminder = desktopFolderPicker ? undefined : setTimeout(() => { if (state.directoryPickerController === controller && generation === state.folderSelectionGeneration) { pickerStatus.textContent = "仍在等待 Windows 窗口。若桌面没有弹窗，请取消选择并手动填写路径；最多等待 5 分钟。"; showActionFeedback("等待系统文件夹选择", pickerStatus.textContent); } }, 12000);
+  const deadline = desktopFolderPicker ? undefined : setTimeout(() => { if (state.directoryPickerController === controller) cancelDirectoryPicker("本次选择等待超时，已请求取消。可重试或手动填写路径。"); }, 310000);
   try {
-    const result = await api("/api/v1/native-picker", { method: "POST", body: JSON.stringify({ kind: "directory" }), signal: controller.signal });
+    const result = desktopFolderPicker
+      ? await window.tokenCouponDesktop.chooseWorkspaceFolder()
+      : await api("/api/v1/native-picker", { method: "POST", body: JSON.stringify({ kind: "directory" }), signal: controller.signal });
     if (controller.signal.aborted || !workspaceFormIsCurrent(generation)) return;
-    if (result.cancelled) { closeWorkspaceForm(); showActionFeedback("已取消新建工作区", "已返回工作区选择，原有授权选择与任务保留。"); return; }
-    $("#workspace-path").value = result.paths[0]; $("#workspace-selected-path").textContent = result.paths[0]; show($("#workspace-form")); show($("#workspace-path-error"), false);
+    if (result.cancelled || result.canceled) { closeWorkspaceForm(); showActionFeedback("已取消新建工作区", "已返回工作区选择，原有授权选择与任务保留。"); return; }
+    const selectedPath = result.path || result.paths?.[0];
+    if (typeof selectedPath !== "string" || !selectedPath) throw new Error("folder_picker_result_invalid：文件夹选择器没有返回路径");
+    $("#workspace-path").value = selectedPath; $("#workspace-selected-path").textContent = selectedPath; show($("#workspace-form")); show($("#workspace-path-error"), false);
     pickerStatus.textContent = "文件夹已选择，填写名称后添加项目。";
-    showActionFeedback("已选择文件夹", `${result.paths[0]}。填写名称后点击“添加项目”登记。`);
+    showActionFeedback("已选择文件夹", `${selectedPath}。填写名称后点击“添加项目”登记。`);
   } catch (error) {
     if (controller.signal.aborted || !workspaceFormIsCurrent(generation)) return;
     pickerStatus.textContent = "系统选择未完成，可重新选择或手动填写。";
     $("#workspace-path-error").textContent = error.message; show($("#workspace-path-error")); $("#workspace-manual-path").open = true; showActionFeedback("系统选择器未打开", `${error.message}。可手动填写路径或返回已有工作区。`, "validation");
   }
-  finally { clearTimeout(reminder); clearTimeout(deadline); if (state.directoryPickerController === controller) { state.directoryPickerController = null; state.nativePicking = false; button.disabled = false; button.textContent = "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy"); show(cancelPicker, false); } }
+  finally { if (reminder) clearTimeout(reminder); if (deadline) clearTimeout(deadline); if (state.directoryPickerController === controller) { state.directoryPickerController = null; state.nativePicking = false; button.disabled = false; button.textContent = desktopFolderPicker ? "选择文件夹" : "在后台 Windows 打开选择窗口"; button.removeAttribute("aria-busy"); show(cancelPicker, false); } }
 }
 $("#choose-workspace-directory").addEventListener("click", () => { cancelDirectoryPicker(); void openDirectoryBrowser(); });
 $("#choose-workspace-native").addEventListener("click", openDirectoryPicker);
 $("#open-runtime-model").addEventListener("click", async () => { await planTab("models"); if (state.route?.tab === "models") $("#runtime-model-task").focus({ preventScroll: true }); });
-$("#runtime-model-task").addEventListener("change", () => { void loadRuntimeModelChoices(); if (state.planning?.session) renderRuntimeModelPanel(state.planning.session.tasks); });
-$("#runtime-model-choice").addEventListener("change", () => show($("#runtime-model-custom").parentElement, $("#runtime-model-choice").value === "__custom__"));
+if (!globalThis.tokenCouponRuntimeModelControls) {
+  $("#runtime-model-task").addEventListener("change", () => selectRuntimeModelTask($("#runtime-model-task").value));
+  $("#runtime-model-choice").addEventListener("change", () => { state.runtimeModelChoice = $("#runtime-model-choice").value; renderRuntimeModelControls(); });
+  $("#runtime-model-custom").addEventListener("input", () => { state.runtimeModelCustomValue = $("#runtime-model-custom").value; });
+}
 $("#runtime-model-save").addEventListener("click", () => changeRuntimeModel(false));
 $("#runtime-model-retry").addEventListener("click", () => changeRuntimeModel(true));
 $("#enable-notifications").addEventListener("click", async () => {
+  if (window.tokenCouponDesktop) {
+    const enabled = !state.desktopNotificationsEnabled;
+    try {
+      state.desktopNotificationsEnabled = await window.tokenCouponDesktop.setNotificationsEnabled(enabled);
+      $("#enable-notifications").textContent = state.desktopNotificationsEnabled ? "关闭桌面提醒" : "开启桌面提醒";
+      $("#notification-status").textContent = state.desktopNotificationsEnabled ? "已开启：新审批到达且页面在后台时发送系统通知。" : "桌面提醒已关闭，页面内仍会显示待审批。";
+      if (state.desktopNotificationsEnabled) {
+        const shown = await window.tokenCouponDesktop.showNotification({ title: "Token Coupon", body: "桌面提醒已开启。" });
+        if (!shown) $("#notification-status").textContent = "桌面提醒设置已保存，但当前系统不支持弹出通知；页面内仍会显示待审批。";
+      }
+    } catch { $("#notification-status").textContent = "桌面提醒设置未保存；请检查本机应用状态。"; }
+    return;
+  }
   if (typeof Notification === "undefined") { $("#notification-status").textContent = "当前浏览器不支持系统通知，仍保留页签和页面提醒。"; return; }
   try { const permission = await Notification.requestPermission(); $("#notification-status").textContent = permission === "granted" ? "已开启：新审批到达且页面在后台时发送系统通知。" : "未开启系统通知，仍保留页签和页面提醒。"; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
 });
@@ -4092,7 +5351,8 @@ $("#workspace-browse").addEventListener("click", openWorkspaceForm);
 $("#session-check").addEventListener("click", () => refreshAll());
 $("#session-recover").addEventListener("click", diagnoseAndRecover);
 $("#pending-action-open").addEventListener("click", async () => { await planTab("execution"); $("#pending-approval-box").scrollIntoView({ block: "start", behavior: "smooth" }); });
-for (const kind of ["tools", "raw"]) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-" + kind + "-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView[`${kind}Page`] += delta; renderAttemptView(); });
+if (!globalThis.tokenCouponAttemptToolsPagination) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-tools-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.toolsPage += delta; renderAttemptView(); });
+if (!globalThis.tokenCouponAttemptRawEvents) for (const [direction, delta] of [["prev", -1], ["next", 1]]) $("#attempt-raw-" + direction).addEventListener("click", () => { if (!state.attemptView) return; state.attemptView.rawPage += delta; renderAttemptView(); });
 if (!state.remotePoll) state.remotePoll = setInterval(() => void refreshRemoteConnection(), 3000);
 setInterval(() => { if (state.workspace && (!state.activeJob || ["planning.run", "session.resume", "session.retry"].includes(state.activeJob.kind))) { void refreshAll(); if (state.planning?.session?.status === "running") void readSelectedAttempt(); } }, 5000);
 void init();

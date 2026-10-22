@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnNative as spawn, resolveNativeExecutable, resolveAgentExecutable } from "@token-coupon/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { networkFetch } from "./network-fetch.js";
 
@@ -25,7 +26,8 @@ export class ModelCatalog {
 export async function discoverRunnerModels(id: string, cwd: string, command?: { executable: string; args?: string[] }): Promise<ModelCatalogResult> {
   if (id === "mock") return { source: "mock", models: [], customAllowed: false };
   if (id === "claude-code" && !command) return claudeModels(cwd);
-  const rpc = new CatalogRpc(command?.executable ?? (id === "codex" ? "codex" : "dsh"), [...(command?.args ?? []), ...(id === "codex" ? ["app-server", "--stdio"] : ["--profile", "acp"])], cwd);
+  const executable = !command && id === "codex" ? await resolveAgentExecutable("codex") : await resolveNativeExecutable(command?.executable ?? "dsh");
+  const rpc = new CatalogRpc(executable, [...(command?.args ?? []), ...(id === "codex" ? ["app-server", "--stdio"] : ["--profile", "acp"])], cwd);
   let sessionId: string | undefined;
   try {
     await rpc.request("initialize", id === "codex" ? { clientInfo: { name: "token-coupon-model-catalog", version: "1" }, capabilities: {} } : { protocolVersion: 1, clientInfo: { name: "token-coupon-model-catalog", version: "1" }, clientCapabilities: {} });
@@ -58,9 +60,12 @@ export async function discoverRunnerModels(id: string, cwd: string, command?: { 
 }
 
 async function claudeModels(cwd: string): Promise<ModelCatalogResult> {
+  const executable = await resolveAgentExecutable("claude-code");
   const controller = new AbortController();
   async function* idle(): AsyncGenerator<never> { await new Promise<void>((resolve) => { if (controller.signal.aborted) resolve(); else controller.signal.addEventListener("abort", () => resolve(), { once: true }); }); }
-  const session = query({ prompt: idle(), options: { cwd, abortController: controller, persistSession: false, settingSources: ["user", "project"], permissionMode: "dontAsk", allowedTools: [], canUseTool: async () => ({ behavior: "deny", message: "Model discovery cannot execute tools" }) } });
+  const session = query({ prompt: idle(), options: { cwd, pathToClaudeCodeExecutable: executable, abortController: controller, persistSession: false, settingSources: ["user", "project"], permissionMode: "dontAsk", allowedTools: [], canUseTool: async () => ({ behavior: "deny", message: "Model discovery cannot execute tools" }),
+    ...(process.platform === "win32" ? { spawnClaudeCodeProcess: options => spawn(options.command, options.args, { ...(options.cwd ? { cwd: options.cwd } : {}), env: options.env, signal: options.signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }) } : {}),
+  } });
   const close = () => { controller.abort(); try { session.close(); } catch { /* Already closed. */ } };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
