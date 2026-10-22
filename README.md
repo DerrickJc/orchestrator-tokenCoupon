@@ -6,6 +6,12 @@
 
 Electron 桌面预览已具备本机后台启动、托盘、目录选择与通知桥接；Windows NSIS 预览构建、包内 daemon 与真实 Electron GUI 生命周期已通过原生 CI。人工安装升级和真实 Runner 仍待验收，详见[实施与验收状态](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md)。
 
+### Windows 桌面预览安装
+
+打开 [Releases](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases)，选择最新的 **Windows preview / Pre-release**，在 Assets 中下载 `Token-Coupon-0.1.0-x64-preview-setup.exe`。直接运行安装器，完成后从开始菜单启动；应用携带 Node，无需下载源码或启动开发命令。`SHA256SUMS` 提供校验值，可在 PowerShell 执行 `Get-FileHash .\Token-Coupon-0.1.0-x64-preview-setup.exe -Algorithm SHA256` 核对。当前是未签名预览，干净 Windows 安装升级和真实业务验收仍待完成。
+
+优先使用 Release 安装器直链；Actions 产物 ZIP 用于测试追溯，含报告和截图且只保留 7 天。预发布不占用 GitHub 的稳定版 `latest`，因此请使用上面的 Releases 页面而非 `/releases/latest`。
+
 ### 桌面预览构建
 
 在目标系统本机执行 `npm ci`。构建桌面资源需另备该系统/架构的官方 Node **22.12.0** 可执行文件；该运行时会随包携带。Windows PowerShell：

@@ -1321,6 +1321,23 @@ Windows 同口径实测对比（MiB，四舍五入；优化前 CI `39624633039`�
 
 最终体积和报告以相应提交的 `desktop-build.json` 与 GUI `desktop-measurements.json` 为准，不混用压缩字节、文件逻辑字节和实际磁盘分配。此优化不将当前预览升级为已完成干净 Windows 安装升级、真实业务 Runner 或 Windows 全量 Vitest 的全部验收。
 
+### 13.96 Windows 预览版 Release 分发（2026-10-22）
+
+改用 GitHub Release 提供用户安装入口，Actions 继续保存测试报告和截图。本次同一 WSL/代理的单连接小样本测速中，Actions 的 `productionresultssa16.blob.core.windows.net` 约 40 KiB/s，参考项目的 `release-assets.githubusercontent.com` 约 717–788 KiB/s；这说明当前网络对两种分发路径的表现不同，不代表 GitHub 对本仓库限速或所有 Release 都保证相同速度。
+
+`.github/workflows/desktop-runtime-validation.yml` 新增预发布标签入口：只有推送 `desktop-preview-*` 标签，才会在 Windows 与 Linux 全部构建、测试、真实临时组件安装及 GUI 验证成功后进入发布任务。普通 PR、main 更新与手动验证不会自动发布。无需合并 main，标签可以指向已审查的功能分支提交；标签对应的提交即构建来源。
+
+发布任务在 GitHub runner 内下载本次 Windows artifact，避免安装器绕经开发者本机的慢速下载/上传链路。`scripts/prepare-desktop-release.mjs` 核对构建提交、Windows x64 安装器格式、运行时 smoke、Agent 排除规则以及安装器实际字节数和 SHA-256；只允许发布该安装器与 `SHA256SUMS`，不发布内部构建报告、截图或日志。生成的说明标明未签名预览及尚待人工验收的边界。先上传到 draft，资产全部成功后才转为 prerelease，且不更新稳定版 `latest`；已有版本不会被覆盖。上传或发布失败可能保留 draft，需要维护者检查后重试或删除，不能视作已交付。
+
+维护者操作（仅在明确授权发布时执行；将标签后缀换成本次唯一编号，不复用或移动已发布标签）：
+
+```bash
+git tag -a desktop-preview-0.1.0-YYYYMMDD-1 -m "Token Coupon Windows desktop preview"
+git push origin desktop-preview-0.1.0-YYYYMMDD-1
+```
+
+用户打开 [Releases](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases)，选择 Windows preview 并下载 `.exe`。PowerShell 使用 `Get-FileHash <安装器路径> -Algorithm SHA256` 与同页 `SHA256SUMS` 比较。预发布不会通过 `/releases/latest` 返回；安装器直链采用 `/releases/download/<tag>/Token-Coupon-0.1.0-x64-preview-setup.exe`，避免用户下载源码归档或 Actions ZIP。应用仍不自动更新，发布不表示已签名或完成所有 Windows 人工验收。每次发布后检查资产字节、校验值、链接及同环境下载速度；短时测速只用于定位链路，不承诺持续带宽。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。
