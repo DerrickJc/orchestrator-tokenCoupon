@@ -7,13 +7,14 @@ import { ApplicationService } from "../packages/daemon/dist/application-service.
 import { CloudflaredComponent } from "../packages/daemon/dist/cloudflared-component.js";
 import { RemoteMcpConnection } from "../packages/daemon/dist/oauth-gateway.js";
 import { PersistentQuickTunnelAdapter, readTunnelRecord } from "../packages/daemon/dist/persistent-tunnel.js";
+import { probeRemoteMcp } from "../packages/daemon/dist/remote-probe.js";
 
-const args = process.argv.slice(2), live = args.includes("--public"), componentOnly = args.includes("--component-only");
+const args = process.argv.slice(2), live = args.includes("--public"), local = args.includes("--local"), componentOnly = args.includes("--component-only");
 const outputIndex = args.indexOf("--output"), output = outputIndex < 0 ? undefined : resolve(args[outputIndex + 1] ?? "");
-if (live === componentOnly || args.some((arg, index) => !["--public", "--component-only", "--output"].includes(arg) && !(outputIndex >= 0 && index === outputIndex + 1)) || outputIndex >= 0 && (!args[outputIndex + 1] || args[outputIndex + 1].startsWith("--"))) throw new Error("Usage: quick-connection-smoke.mjs --public|--component-only [--output report.json]");
+if ([live, local, componentOnly].filter(Boolean).length !== 1 || args.some((arg, index) => !["--public", "--local", "--component-only", "--output"].includes(arg) && !(outputIndex >= 0 && index === outputIndex + 1)) || outputIndex >= 0 && (!args[outputIndex + 1] || args[outputIndex + 1].startsWith("--"))) throw new Error("Usage: quick-connection-smoke.mjs --public|--local|--component-only [--output report.json]");
 const root = await mkdtemp(join(tmpdir(), "tc-live-快捷连接 "));
 const data = join(root, "profile"), directory = join(data, "components", "tunnel-runtime");
-const report = { platform: process.platform, mode: live ? "public" : "component-only", realWebClientAuthorization: "pending", status: "running" };
+const report = { platform: process.platform, mode: live ? "public" : local ? "local-fixture" : "component-only", realWebClientAuthorization: "pending", status: "running" };
 let remote, service, failed;
 const controller = new AbortController(), budget = setTimeout(() => controller.abort(), 240000);
 const code = error => String(error?.message ?? error).match(/^[a-z][a-z0-9_]+(?=：|:|$)/)?.[0] ?? "public_connection_unverified";
@@ -29,21 +30,31 @@ async function ready() {
 }
 try {
   await mkdir(data, { recursive: true });
-  const component = new CloudflaredComponent(data);
+  if (local) {
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "tunnel"), "process.stderr.write('https://local-fixture.trycloudflare.com\\n');setInterval(()=>{},1000);process.on('SIGTERM',()=>process.exit(0));");
+  }
+  const component = local ? { async get() { return { executable: process.execPath, version: "local-node-fixture", source: "existing" }; } } : new CloudflaredComponent(data);
   const info = await component.get(controller.signal, phase => console.log(JSON.stringify({ component: phase })));
   report.component = { version: info.version, source: info.source };
-  if (live) {
+  if (live || local) {
     const listener = createServer(); await new Promise((resolve, reject) => { listener.once("error", reject); listener.listen(0, "127.0.0.1", resolve); });
     const port = listener.address().port; await new Promise(resolve => listener.close(resolve));
     service = new ApplicationService({ dataDirectory: data }); await service.initialize();
-    remote = new RemoteMcpConnection(service, data, port, { component, healthIntervalMs: 0 }); await remote.initialize();
+    const dependencies = { component, healthIntervalMs: 0, ...(local ? { probe: (origin, token, signal) => probeRemoteMcp(origin, token, signal, async (input, init) => {
+      const incoming = input instanceof Request ? new Request(input, init) : new Request(input, init), url = new URL(incoming.url), localUrl = new URL(incoming.url);
+      localUrl.protocol = "http:"; localUrl.hostname = "127.0.0.1"; localUrl.port = String(port);
+      const headers = new Headers(incoming.headers); headers.set("host", url.host);
+      return fetch(new Request(localUrl, { method: incoming.method, headers, body: incoming.body, duplex: "half", signal: incoming.signal }));
+    }) } : {}) };
+    remote = new RemoteMcpConnection(service, data, port, dependencies); await remote.initialize();
     await remote.startQuick({ consent: true, connectionOnly: true, scopes: ["planning:read"] });
     const before = await ready(), record = await readTunnelRecord(directory);
     assert.equal(before.quickTunnel.available, true); assert.equal(before.validGrants, 0);
     assert(record?.child?.processStart); assert.equal(record.child.platform, process.platform);
-    report.publicMetadataAndMcpProbe = "passed";
+    report[local ? "localHttpMetadataAndMcpProbe" : "publicMetadataAndMcpProbe"] = "passed";
     await remote.shutdown();
-    remote = new RemoteMcpConnection(service, data, port, { component, healthIntervalMs: 0 }); await remote.initialize();
+    remote = new RemoteMcpConnection(service, data, port, dependencies); await remote.initialize();
     const after = await ready(), restored = await readTunnelRecord(directory);
     assert.equal(restored?.pid, record.pid); assert.equal(restored?.origin, record.origin);
     assert.equal(after.validGrants, 0);

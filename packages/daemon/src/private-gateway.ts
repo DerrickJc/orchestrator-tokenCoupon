@@ -112,17 +112,19 @@ export async function prepareTunnelDirectory(directory: string): Promise<void> {
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("tunnel_directory_invalid");
   if (process.platform !== "win32") { await chmod(directory, 0o700); return; }
   const encoded = Buffer.from(resolve(directory), "utf8").toString("base64");
-  const script = `$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));
+  const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));
     $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
     $ids=@($sid,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));
     $item=Get-Item -LiteralPath $p -Force; if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse' };
-    $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false);
+    $owner=[IO.Directory]::GetAccessControl($p).GetOwner([Security.Principal.SecurityIdentifier]); if ($owner.Value -notin $ids.Value) { throw 'owner' };
+    $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetAccessRuleProtection($true,$false);
     foreach ($id in $ids) { $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow')) };
-    Set-Acl -LiteralPath $p -AclObject $acl;
+    [IO.Directory]::SetAccessControl($p,$acl);
     foreach ($f in Get-ChildItem -LiteralPath $p -Force) {
       if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse' };
-      if (-not $f.PSIsContainer) { $a=[Security.AccessControl.FileSecurity]::new(); $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false);
-        foreach ($id in $ids) { $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','Allow')) }; Set-Acl -LiteralPath $f.FullName -AclObject $a }
+      if (-not $f.PSIsContainer) { $owner=[IO.File]::GetAccessControl($f.FullName).GetOwner([Security.Principal.SecurityIdentifier]); if ($owner.Value -notin $ids.Value) { throw 'owner' };
+        $a=[Security.AccessControl.FileSecurity]::new(); $a.SetAccessRuleProtection($true,$false);
+        foreach ($id in $ids) { $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','Allow')) }; [IO.File]::SetAccessControl($f.FullName,$a) }
     }`;
   try {
     await execute(join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),

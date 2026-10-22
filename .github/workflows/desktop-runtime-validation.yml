@@ -66,6 +66,9 @@ jobs:
       - name: Install optional Agents in a temporary profile (no model calls)
         run: node scripts/agent-component-smoke.mjs --agent both --output "${{ runner.temp }}/token-coupon-desktop/agent-components.json"
 
+      - name: Private gateway and persistent connection lifecycle (local fixture)
+        run: node scripts/quick-connection-smoke.mjs --local --output "${{ runner.temp }}/token-coupon-desktop/quick-connection-local.json"
+
       # External network evidence is separate from deterministic protocol/lifecycle tests.
       - name: Native Windows public Quick Tunnel probe (network-dependent)
         if: runner.os == 'Windows'
@@ -100,6 +103,7 @@ jobs:
             ${{ runner.temp }}/token-coupon-desktop/desktop-build.json
             ${{ runner.temp }}/token-coupon-desktop/agent-components.json
             ${{ runner.temp }}/token-coupon-desktop/quick-connection.json
+            ${{ runner.temp }}/token-coupon-desktop/quick-connection-local.json
             ${{ runner.temp }}/token-coupon-desktop/gui-smoke/**
             ${{ runner.temp }}/token-coupon-desktop/*-preview-setup.exe
 

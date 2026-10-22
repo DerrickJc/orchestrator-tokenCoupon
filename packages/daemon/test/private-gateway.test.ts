@@ -100,7 +100,7 @@ it.runIf(process.platform === "win32")("removes explicit broad ACLs from saved c
   const execute = promisify(execFile), powershell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const path = `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(file).toString("base64")}'))`;
   const run = (script: string) => execute(powershell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true });
-  await run(`$ErrorActionPreference='Stop';$p=${path};$a=Get-Acl -LiteralPath $p;$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'Read','Allow'));Set-Acl -LiteralPath $p -AclObject $a`);
+  await run(`$ErrorActionPreference='Stop';$p=${path};$a=[IO.File]::GetAccessControl($p);$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'Read','Allow'));[IO.File]::SetAccessControl($p,$a)`);
   await prepareTunnelDirectory(root);
   const result = await run(`$ErrorActionPreference='Stop';$p=${path};$a=Get-Acl -LiteralPath $p;[Console]::Write(($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {$_.IdentityReference.Value}) -join ',')`);
   expect(result.stdout).not.toContain("S-1-1-0"); expect(result.stdout).not.toContain("S-1-5-11"); expect(result.stdout).not.toContain("S-1-5-32-545");

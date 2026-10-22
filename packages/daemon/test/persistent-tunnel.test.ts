@@ -9,6 +9,7 @@ import { PersistentQuickTunnelAdapter, readTunnelRecord, tunnelControl, tunnelRe
 import { createPrivateGateway, protectPrivateGateway, removePrivateGateway } from "../src/private-gateway.js";
 
 const testTimeout = process.platform === "win32" ? 90000 : 15000;
+const pollOptions = { timeout: process.platform === "win32" ? 30000 : 5000, interval: 100 };
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -70,6 +71,15 @@ it("keeps a newly attached backend when the previous daemon detaches late", asyn
   await recovered!.stop();
 }, testTimeout);
 
+it("does not use an authenticated control response to override a different platform identity", async () => {
+  const h = await fixture(), runtime = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
+  const record = (await readTunnelRecord(h.directory))!;
+  await writeFile(tunnelRecordPath(h.directory), JSON.stringify({ ...record, platform: process.platform === "win32" ? "linux" : "win32" }));
+  try { await expect(h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {})).rejects.toThrow("tunnel_platform_conflict"); }
+  finally { await writeFile(tunnelRecordPath(h.directory), JSON.stringify(record)); }
+  expect((await readFile(join(h.root, "starts"), "utf8")).trim()).toBe("start"); await runtime.stop();
+}, testTimeout);
+
 it("does not start a public tunnel over a port occupied by another service", async () => {
   const h = await fixture(), other = createServer((_request, response) => response.end("sentinel"));
   await new Promise<void>(resolve => other.listen(h.port, "127.0.0.1", resolve));
@@ -113,7 +123,7 @@ it("verifies a dead supervisor and cleans its own orphan before allowing a repla
   await runtime.detach!();
   const record = (await readTunnelRecord(h.directory))!;
   process.kill(record.pid, "SIGKILL");
-  await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }).toBe(true);
+  await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }, pollOptions).toBe(true);
   expect(await h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {})).toBeUndefined();
   const replacement = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
   expect((await readTunnelRecord(h.directory))?.pid).not.toBe(record.pid);
@@ -124,9 +134,9 @@ it("verifies a dead supervisor and cleans its own orphan before allowing a repla
 it("cancels a starting tunnel without leaving its supervisor or child running", async () => {
   const h = await fixture(10_000), controller = new AbortController();
   const pending = h.adapter.start(h.executable, h.port, h.directory, controller.signal, () => {});
-  await expect.poll(() => readTunnelRecord(h.directory)).toBeDefined();
+  await expect.poll(() => readTunnelRecord(h.directory), pollOptions).toBeDefined();
   const record = (await readTunnelRecord(h.directory))!;
   controller.abort(); await expect(pending).rejects.toBeDefined();
-  await expect.poll(() => readTunnelRecord(h.directory)).toBeUndefined();
-  await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }).toBe(true);
+  await expect.poll(() => readTunnelRecord(h.directory), pollOptions).toBeUndefined();
+  await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }, pollOptions).toBe(true);
 }, testTimeout);

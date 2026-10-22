@@ -55,6 +55,9 @@ export async function tunnelControl(record: TunnelRecord, action: "status" | "st
 
 async function liveRecord(directory: string): Promise<TunnelRecord | undefined> {
   const record = await readTunnelRecord(directory); if (!record) return undefined;
+  if (record.platform && record.platform !== process.platform || process.platform === "win32" && !record.platform) {
+    throw new Error("tunnel_platform_conflict：连接属于其他运行平台或缺少平台身份；请在原 Windows/WSL 后台停止，不能跨平台接管");
+  }
   const owner = await observeTunnelOwner(record);
   if (owner.state === "owner_exited" || owner.state === "owner_identity_changed") {
     // A killed supervisor may have left its child behind. Only signal a verified child.
