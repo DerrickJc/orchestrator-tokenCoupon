@@ -27,6 +27,16 @@ node scripts/package-desktop.mjs --mode installer --output "C:\release-output\To
 
 原生 Windows 当前禁用快捷隧道，页面显示限制原因，后台也会在下载或启动组件前拒绝该操作。本机 Agent 入口保留；网页 MCP 可使用已在外部配置的固定 HTTPS 网关，或使用 Linux／WSL 后台的快捷连接。固定 HTTPS 的原生 Windows 网页联调仍待验收；公网代理只能转发 MCP/OAuth 网关，不能发布本机控制台。
 
+### Agent 工具按需使用
+
+桌面安装包携带 Electron、独立 Node 和后台必需依赖，不预装 Codex／Claude Code 执行器。已有本机工具会自动复用；Claude 的执行与模型目录查询均绑定到同一已发现的 CLI，SDK 仅保留协议适配代码。
+
+打开 **系统设置 → Agent 组件**，点击“重新检测”。缺少工具时可选择“按需安装”，核对官方包、固定版本和用户目录后确认；此入口需要可用的 npm，禁用包安装脚本，不执行全局安装或自动升级。没有 npm 时可复制官方手动安装说明，安装后重新检测。组件就绪后，点击“复制启动命令”，在终端启动工具并按提示完成登录；检测到程序不表示已登录或模型可用。此设置入口在桌面与 4177 中共用，安装和版本校验本身不调用模型。
+
+可选组件默认保存在 `~/.token-coupon/agents/<runnerId>/current`，与应用和项目目录分离；可设置 `TOKEN_COUPON_AGENT_HOME` 指定绝对目录。工具发现顺序为显式路径、本机 PATH／已知用户安装目录、私有组件目录。需要指定其他安装时，使用 `TOKEN_COUPON_CODEX_EXECUTABLE` 或 `TOKEN_COUPON_CLAUDE_EXECUTABLE` 设置绝对路径。正常使用不会自动下载安装；取消或失败不会启用半成品，已有可用安装不会被覆盖。安装中可在组件卡片取消；后台安全停止也会核对组件安装是否仍在运行。
+
+构建只复制后台依赖闭包及已构建网页，保留许可证，排除 Agent 本体、开发声明、源码映射和测试资源。Electron 只保留简体中文与英文资源。`desktop-build.json` 记录最终资源体积、安装器字节数和校验值；不含独立 Node 的后台资源预算为 40 MiB，重新打入 Agent 本体或超出预算会阻断构建。
+
 ## 环境
 
 - Node.js 22.12 或更高版本

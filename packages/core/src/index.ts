@@ -1,6 +1,6 @@
 export type { PlanDefinition, PlannedTask } from "./plan.js";
 export { resolveNativeExecutable, spawnNative } from "./native-command.js";
-export { resolveAgentExecutable, agentComponentHome } from "./agent-executable.js";
+export { resolveAgentExecutable, agentComponentHome, managedClaudePackage } from "./agent-executable.js";
 export type { ExternalAgentId } from "./agent-executable.js";
 export type { DecisionReference, PlanDecisionContext, SelectedDecision } from "./plan.js";
 export { decisionValueHash } from "./plan.js";

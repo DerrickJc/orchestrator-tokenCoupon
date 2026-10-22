@@ -63,7 +63,9 @@ async function claudeModels(cwd: string): Promise<ModelCatalogResult> {
   const executable = await resolveAgentExecutable("claude-code");
   const controller = new AbortController();
   async function* idle(): AsyncGenerator<never> { await new Promise<void>((resolve) => { if (controller.signal.aborted) resolve(); else controller.signal.addEventListener("abort", () => resolve(), { once: true }); }); }
-  const session = query({ prompt: idle(), options: { cwd, pathToClaudeCodeExecutable: executable, abortController: controller, persistSession: false, settingSources: ["user", "project"], permissionMode: "dontAsk", allowedTools: [], canUseTool: async () => ({ behavior: "deny", message: "Model discovery cannot execute tools" }) } });
+  const session = query({ prompt: idle(), options: { cwd, pathToClaudeCodeExecutable: executable, abortController: controller, persistSession: false, settingSources: ["user", "project"], permissionMode: "dontAsk", allowedTools: [], canUseTool: async () => ({ behavior: "deny", message: "Model discovery cannot execute tools" }),
+    ...(process.platform === "win32" ? { spawnClaudeCodeProcess: options => spawn(options.command, options.args, { ...(options.cwd ? { cwd: options.cwd } : {}), env: options.env, signal: options.signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }) } : {}),
+  } });
   const close = () => { controller.abort(); try { session.close(); } catch { /* Already closed. */ } };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

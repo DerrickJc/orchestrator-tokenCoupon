@@ -204,6 +204,27 @@ async function verifyAppearance(page, origin) {
   return { workspaceId: workspace.workspaceId, planningId: todo.planningId };
 }
 
+async function verifyAgentComponents(page) {
+  console.log("GUI smoke：检查可选组件状态与安装确认，不在界面测试中下载安装…");
+  const route = "**/api/v1/agent-components", writes = [];
+  const record = request => { if (request.method() === "POST" && request.url().includes("/agent-components/")) writes.push(request.url()); };
+  page.on("request", record);
+  const item = { id: "codex", label: "Codex · 安装确认测试", package: "@openai/codex", version: "0.163.0", docs: "https://developers.openai.com/codex/cli/", available: false, canInstall: true, installDirectory: join(root, "isolated-agent-fixture") };
+  await page.route(route, request => request.fulfill({ json: [item] }));
+  try {
+    await page.locator("#agent-components-refresh").click();
+    const row = page.locator("#agent-components-list .agent-component-row").filter({ hasText: item.label }); await row.waitFor();
+    await row.getByRole("button", { name: "按需安装", exact: true }).click();
+    await page.locator("#agent-component-dialog").waitFor({ state: "visible" });
+    assert(await page.locator("#agent-component-install-confirm").isDisabled());
+    assert((await page.locator("#agent-component-install-details").textContent()).includes("@openai/codex"));
+    await page.locator("#agent-component-consent").check(); assert(await page.locator("#agent-component-install-confirm").isEnabled());
+    await page.locator("#agent-component-install-close").click();
+    assert.deepEqual(writes, [], "viewing or cancelling confirmation must not install an Agent");
+  } finally { await page.unroute(route); page.off("request", record); }
+  await page.locator("#agent-components-refresh").click();
+}
+
 async function verifySecondInstance(attachment) {
   console.log("GUI smoke：检查相同/不同后台目录的第二次启动…");
   await application.evaluate(({ dialog }) => {
@@ -328,6 +349,7 @@ try {
   const frame = await iframe.asElement().contentFrame();
   assert(frame); assert.equal(await frame.evaluate(() => typeof window.tokenCouponDesktop), "undefined");
   await iframe.evaluate(element => element.remove());
+  await verifyAgentComponents(page);
   const todo = await verifyAppearance(page, attachment.origin);
   await verifySecondInstance(attachment);
   attachment = await verifyLiveReconnect(page, attachment, todo);
@@ -351,6 +373,7 @@ try {
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
     liveDaemonReconnect: "passed", draftRecoveryNoReplay: "passed", secondInstanceProfileGuard: "passed",
+    optionalAgentConsentNoImplicitInstall: "passed",
     systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed", planningTodoNavigation: "passed",
     chromiumSandbox: noSandbox ? "disabled-for-linux-test" : "enabled", nativeWindowsAcceptance: false };
   await writeFile(join(outputDirectory, "desktop-gui-smoke.json"), `${JSON.stringify(report, null, 2)}\n`);

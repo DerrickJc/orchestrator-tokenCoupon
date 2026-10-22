@@ -17,6 +17,7 @@ import { ModelCatalog, discoverPlannerModels, type ModelCatalogResult } from "./
 import { planningWorkflow } from "./planning-workflow.js";
 import { LocalAgentPlanner } from "./local-agent-planner.js";
 import { SystemSettingsStore, type FunctionName } from "./system-settings.js";
+import { AgentComponents } from "./agent-components.js";
 import { projectPlanningProgress, type PlanningProgress } from "./planning-progress.js";
 import {
   PlannerStore, SessionStore, ReviewStore, approvePlannerDraft, createDefaultRunnerRegistry, createPlanReviewer, validateVerificationTask, ensureRuntimeMetadataIgnored,
@@ -71,6 +72,7 @@ export class ApplicationService {
   private eventSequence = 0;
   private readonly modelCatalog = new ModelCatalog();
   private readonly settingsStore: SystemSettingsStore;
+  readonly agentComponents = new AgentComponents();
   private plannerModelsCache: { expires: number; result: Promise<ModelCatalogResult> } | undefined;
 
   constructor(options: ServiceOptions = {}) {
@@ -681,13 +683,14 @@ export class ApplicationService {
 
   async shutdown(): Promise<void> {
     for (const controller of this.jobControllers.values()) controller.abort(new Error("daemon 正在停止，请保存诊断后恢复"));
-    await Promise.allSettled([...this.workers]);
+    await Promise.allSettled([...this.workers, this.agentComponents.close()]);
   }
 
   daemonStopAssessment(): { canStop: boolean; activeJobs: Array<{ jobId: string; kind: string; planningId?: string }> } {
     const activeJobs = [...this.jobs.values()].filter(job => job.status === "running")
       .map(({ jobId, kind, planningId }) => ({ jobId, kind, ...(planningId ? { planningId } : {}) }));
-    return { canStop: activeJobs.length === 0, activeJobs };
+    const all = [...activeJobs, ...this.agentComponents.active()];
+    return { canStop: all.length === 0, activeJobs: all };
   }
 
   async getJob(jobId: string): Promise<JobRecord> {

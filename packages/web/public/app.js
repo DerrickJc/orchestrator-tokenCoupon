@@ -757,7 +757,7 @@ async function applyRoute(path, replace = false) {
       state.planToolsExpanded ??= new Map(); state.planToolsExpanded.set(`${route.workspaceId}:${route.planningId}`, true);
     }
     renderRoute(); renderPlanningList();
-    if (route.page === "settings") renderSystemSettings();
+    if (route.page === "settings") { renderSystemSettings(); void refreshAgentComponents(); }
     if (route.page === "new" && (previous?.page !== "new" || previous.workspaceId !== route.workspaceId || state.resetPlanningPolicy)) { applyPlanningPolicy(); state.resetPlanningPolicy = false; }
     if (route.page === "plan" && state.planning) { renderReviewerControls(state.planning); renderRequirements(); renderReview(); renderPlanOverview(); renderPlanWorkflowBanner(); }
     if (route.page === "plan" && previous?.page === "plan" && previous.planningId === route.planningId && previous.tab !== route.tab) $(`#${route.tab}-tab`)?.scrollIntoView({ block: "start" });
@@ -1106,6 +1106,74 @@ $("#system-settings-continue").addEventListener("click", () => { state.initialSe
 function recoveryStorageKey(key, kind) {
   return kind === "local" ? key.startsWith("tc-run:") || key === "tc-runner-id" || key.startsWith("tc-model-") : key.startsWith("tc-review-") || key.startsWith("tc-planning-");
 }
+async function refreshAgentComponents() {
+  if (!state.agentComponentsSupported) return;
+  show($("#agent-components"));
+  clearTimeout(state.componentRefreshTimer);
+  const generation = state.componentRefreshGeneration = (state.componentRefreshGeneration || 0) + 1;
+  try {
+    const components = await api("/api/v1/agent-components");
+    if (generation !== state.componentRefreshGeneration) return;
+    const becameAvailable = components.some(item => item.available && state.agentComponents?.some(previous => previous.id === item.id && !previous.available));
+    state.agentComponents = components;
+    const root = $("#agent-components-list"), expanded = new Set([...root.querySelectorAll("details[open]")].map(node => node.dataset.component));
+    root.replaceChildren();
+    for (const item of components) {
+      const row = document.createElement("section"); row.className = "agent-component-row"; row.dataset.componentId = item.id;
+      const header = document.createElement("div"); header.className = "section-title";
+      const title = document.createElement("strong"); title.textContent = item.label;
+      const badge = document.createElement("span"); badge.className = `badge ${item.available ? "badge-success" : "badge-neutral"}`;
+      const busy = item.operation?.phase === "installing";
+      badge.textContent = busy ? "安装中" : item.available ? item.source === "managed" ? "组件已就绪" : "复用本机工具" : "尚未就绪";
+      header.append(title, badge); row.append(header);
+      const message = document.createElement("p"); message.className = "hint"; message.setAttribute("role", "status");
+      message.textContent = item.operation?.message || (item.available ? "将复用此工具。可复制启动命令，在终端完成登录；检测到程序不代表已登录或模型可用。" : item.reason || "使用时再安装。"); row.append(message);
+      const details = document.createElement("details"); details.dataset.component = item.id; details.open = expanded.has(item.id);
+      const summary = document.createElement("summary"); summary.textContent = "路径与安装信息"; details.append(summary);
+      for (const text of [item.executable ? `当前程序：${item.executable}` : "当前程序：未检测到", `按需安装：${item.package}@${item.version}`, `组件目录：${item.installDirectory}`, `官方说明：${item.docs}`]) { const line = document.createElement("p"); line.className = "hint"; line.textContent = text; details.append(line); }
+      row.append(details);
+      const actions = document.createElement("div"); actions.className = "button-row";
+      if (item.available && item.executable) {
+        const launch = document.createElement("button"); launch.type = "button"; launch.className = "button button-quiet"; launch.textContent = "复制启动命令";
+        launch.addEventListener("click", async () => { const windows = state.environment?.platform === "win32", quoted = "'" + item.executable.replaceAll("'", windows ? "''" : "'\\''") + "'", text = (windows ? "& " : "") + quoted; try { await navigator.clipboard.writeText(text); showToast("启动命令已复制。在终端运行并按工具提示登录。"); } catch { showCopyFallback("启动 Agent", text); } }); actions.append(launch);
+      }
+      if (!item.available && !busy) {
+        const install = document.createElement("button"); install.type = "button"; install.className = "button button-primary"; install.textContent = "按需安装"; install.disabled = !item.canInstall;
+        install.addEventListener("click", () => openAgentInstall(item)); actions.append(install);
+      }
+      if (busy) {
+        const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "button button-quiet"; cancel.textContent = "取消安装";
+        cancel.addEventListener("click", async () => { cancel.disabled = true; try { await api(`/api/v1/agent-components/${item.id}/cancel`, { method: "POST", body: JSON.stringify({ operationId: item.operation.operationId }) }); await refreshAgentComponents(); } catch (error) { $("#agent-components-status").textContent = `取消未完成：${error.message}`; cancel.disabled = false; } }); actions.append(cancel);
+      }
+      const instructions = document.createElement("button"); instructions.type = "button"; instructions.className = "button button-quiet"; instructions.textContent = "复制手动安装说明";
+      instructions.addEventListener("click", async () => { const text = `${item.label} 官方安装与登录说明：${item.docs}\n安装完成后回到系统设置点击“重新检测”，会优先复用本机工具。`; try { await navigator.clipboard.writeText(text); showToast("手动安装说明已复制。"); } catch { showCopyFallback("手动安装说明", text); } }); if (!item.available) actions.append(instructions);
+      row.append(actions); root.append(row);
+    }
+    $("#agent-components-status").textContent = "检测完成。规划、审查和执行使用相同的工具发现规则；不会自动安装或升级工具。";
+    if (becameAvailable) void refreshAgentRunners();
+    if (components.some(item => item.operation?.phase === "installing") && state.route?.page === "settings") state.componentRefreshTimer = setTimeout(() => void refreshAgentComponents(), 2000);
+  } catch (error) { if (generation === state.componentRefreshGeneration) $("#agent-components-status").textContent = `组件状态读取未完成：${error.message}。可点击重新检测。`; }
+}
+function openAgentInstall(item) {
+  state.componentInstallTarget = item.id;
+  const root = $("#agent-component-install-details"); root.replaceChildren();
+  for (const [label, text] of [["工具", item.label], ["官方包", item.package], ["固定版本", item.version], ["安装目录", item.installDirectory]]) { const term = document.createElement("dt"), value = document.createElement("dd"); term.textContent = label; value.textContent = text; root.append(term, value); }
+  $("#agent-component-consent").checked = false; $("#agent-component-install-confirm").disabled = true; $("#agent-component-install-error").textContent = ""; $("#agent-component-dialog").showModal();
+}
+$("#agent-components-refresh").addEventListener("click", () => { void refreshAgentComponents(); void refreshAgentRunners(); });
+$("#agent-component-consent").addEventListener("change", () => { $("#agent-component-install-confirm").disabled = !$("#agent-component-consent").checked; });
+$("#agent-component-install-close").addEventListener("click", () => $("#agent-component-dialog").close());
+$("#agent-component-install-confirm").addEventListener("click", async () => {
+  if (!state.componentInstallTarget || !$("#agent-component-consent").checked) return;
+  const button = $("#agent-component-install-confirm"); button.disabled = true;
+  try {
+    await api(`/api/v1/agent-components/${state.componentInstallTarget}/install`, { method: "POST", body: JSON.stringify({ confirmed: true }) });
+    $("#agent-component-dialog").close(); await refreshAgentComponents();
+  } catch (error) { $("#agent-component-install-error").textContent = `安装未提交：${error.message}`; button.disabled = false; }
+});
+async function refreshAgentRunners() {
+  try { state.runners = await api("/api/v1/runners"); state.providers = await api("/api/v1/providers"); renderRunners(); renderProviders(); } catch { /* Availability remains unknown; leave current selections intact. */ }
+}
 function captureDesktopRecovery() {
   const storage = {};
   for (const [kind, source] of [["local", localStorage], ["session", sessionStorage]]) {
@@ -1232,6 +1300,8 @@ async function init() {
   } catch (error) { disconnected(error); }
 }
 function applyDaemonHandshake(health) {
+    state.agentComponentsSupported = health.capabilities?.agentComponents === 1;
+    show($("#agent-components"), state.agentComponentsSupported);
     state.environment = health.workspaceEnvironment;
     state.executionSelectionSupported = health.capabilities?.executionSelection === 1;
     state.systemSettingsSupported = health.capabilities?.systemSettings === 1;

@@ -61,6 +61,9 @@ jobs:
           npm run build
           node scripts/package-desktop.mjs --mode installer --output $output
 
+      - name: Install optional Agents in a temporary profile (no model calls)
+        run: node scripts/agent-component-smoke.mjs --agent both --output "${{ runner.temp }}/token-coupon-desktop/agent-components.json"
+
       - name: Real Linux Electron GUI lifecycle
         if: runner.os == 'Linux'
         shell: bash
@@ -87,5 +90,6 @@ jobs:
           if-no-files-found: ignore
           path: |
             ${{ runner.temp }}/token-coupon-desktop/desktop-build.json
+            ${{ runner.temp }}/token-coupon-desktop/agent-components.json
             ${{ runner.temp }}/token-coupon-desktop/gui-smoke/**
             ${{ runner.temp }}/token-coupon-desktop/*-preview-setup.exe

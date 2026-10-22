@@ -422,7 +422,7 @@ it("reconciles a restarted daemon without replaying mutations or discarding loca
   h.w.eval("connectEvents();");
   expect(sources[1].url).toContain("after=2&epoch=restarted");
 });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; desktopReconnect?: boolean; desktopRecovery?: string; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; desktopReconnect?: boolean; desktopRecovery?: string; agentComponents?: any[]; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopNotificationCalls: any[] = [];
@@ -523,6 +523,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   if (options.multiple) workspaces.push({ workspaceId: "other", label: "其他项目", path: "/projects/other" });
   const nativeCalls: any[] = [], nativeResults: any = { directory: { cancelled: false, paths: ["/projects/新项目"] }, files: { cancelled: false, paths: ["README.md"] } };
   let settings = options.settings;
+  const components = structuredClone(options.agentComponents || []);
   let pendingInteractions: any[] = [];
   let gitStatus: any = { state: options.gitState || "ready", message: options.gitState === "not_repository" ? "此文件夹还不是 Git 仓库" : "Git 已就绪", commands: ["git init"] };
   const tasks = [
@@ -540,6 +541,11 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       const body = JSON.parse(String(init.body));
       if (path === "/api/v1/native-picker") { nativeCalls.push(body); return Response.json(nativeResults[body.kind]); }
       posts.push({ path, body });
+      if (path.startsWith("/api/v1/agent-components/")) {
+        const component = components.find(item => item.id === path.split("/")[4]);
+        component.operation = { operationId: "install-test-operation", phase: path.endsWith("/cancel") ? "cancelled" : "installing", message: path.endsWith("/cancel") ? "安装已取消" : "正在下载官方组件" };
+        return Response.json(component);
+      }
       if (path === "/api/v1/settings") { settings = { ...body, revision: body.revision + 1, initialized: true }; return Response.json(settings); }
       if (path.includes("/interactions/")) { pendingInteractions = []; return Response.json({ ok: true }); }
       if (path === "/api/v1/workspaces") { const added = { workspaceId: "folder-project", path: body.path, label: body.label || "新项目" }; workspaces.push(added); return Response.json(added); }
@@ -566,7 +572,8 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       }
       throw new Error(`unexpected POST ${path}`);
     }
-    if (path.endsWith("/health")) return Response.json({ epoch: "test", ...(options.legacyDaemon ? {} : { capabilities: { executionSelection: 1, ...(settings ? { systemSettings: 1, operationRouting: 1 } : {}) } }), workspaceEnvironment: { currentDirectory: "/projects" }, mcp: { localReady: true, url: "http://127.0.0.1:4177/mcp" } });
+    if (path.endsWith("/health")) return Response.json({ epoch: "test", ...(options.legacyDaemon ? {} : { capabilities: { executionSelection: 1, ...(options.agentComponents ? { agentComponents: 1 } : {}), ...(settings ? { systemSettings: 1, operationRouting: 1 } : {}) } }), workspaceEnvironment: { currentDirectory: "/projects" }, mcp: { localReady: true, url: "http://127.0.0.1:4177/mcp" } });
+    if (path === "/api/v1/agent-components") return Response.json(components);
     if (path === "/api/v1/settings") return Response.json(settings);
     if (path === "/api/v1/workspaces") return Response.json(workspaces);
     if (path.endsWith("/git")) return Response.json(gitStatus);
@@ -646,6 +653,33 @@ it("retains recovery text for another plan until explicitly restored in the matc
   expect(h.posts).toHaveLength(0);
 });
 
+it("installs optional Agent components only after reviewing the fixed package and explicit consent, and shows cancellable progress", async () => {
+  const h = await page({ hash: "#/settings", settings: defaultSystemSettings(), agentComponents: [{ id: "claude-code", label: "Claude Code", package: "@anthropic-ai/claude-code-linux-x64", version: "2.1.308", docs: "https://code.claude.com/docs/en/setup", installDirectory: "/home/test/.token-coupon/agents/claude-code/current", available: false, canInstall: true }] });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("尚未就绪");
+  expect(h.posts).toHaveLength(0);
+  const install = h.element("agent-components-list").querySelector<HTMLButtonElement>("button")!; install.click();
+  expect(h.element("agent-component-dialog").hasAttribute("open")).toBe(true);
+  expect(h.element("agent-component-install-details").textContent).toContain("@anthropic-ai/claude-code-linux-x64");
+  expect((h.element("agent-component-install-confirm") as HTMLButtonElement).disabled).toBe(true); h.element("agent-component-install-confirm").click(); expect(h.posts).toHaveLength(0);
+  (h.element("agent-component-consent") as HTMLInputElement).checked = true; h.element("agent-component-consent").dispatchEvent(new h.w.Event("change")); h.element("agent-component-install-confirm").click();
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toEqual({ path: "/api/v1/agent-components/claude-code/install", body: { confirmed: true } });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("正在下载官方组件");
+  expect(h.element("agent-component-dialog").hasAttribute("open")).toBe(false);
+  [...h.element("agent-components-list").querySelectorAll("button")].find(button => button.textContent === "取消安装")!.click();
+  await expect.poll(() => h.posts.length).toBe(2); expect(h.posts[1]).toMatchObject({ path: "/api/v1/agent-components/claude-code/cancel", body: { operationId: "install-test-operation" } });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("安装已取消");
+});
+it("reuses local Agents without installation, offers manual instructions, and hides the component panel for older daemons", async () => {
+  const h = await page({ hash: "#/settings", settings: defaultSystemSettings(), agentComponents: [{ id: "codex", label: "Codex", package: "@openai/codex", version: "0.163.0", docs: "https://developers.openai.com/codex/cli/", installDirectory: "/home/test/.token-coupon/agents/codex/current", available: true, source: "local", executable: "/usr/local/bin/codex", canInstall: false }] });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("复用本机工具");
+  expect(h.element("agent-components-list").textContent).toContain("/usr/local/bin/codex");
+  expect([...h.element("agent-components-list").querySelectorAll("button")].some(button => button.textContent === "按需安装")).toBe(false);
+  h.element("agent-components-list").querySelector<HTMLButtonElement>("button")!.click(); await expect.poll(() => h.copied.length).toBe(1);
+  expect(h.copied[0]).toBe("'/usr/local/bin/codex'"); expect(h.posts).toHaveLength(0);
+  const older = await page({ hash: "#/settings", settings: defaultSystemSettings() });
+  expect(older.visible("agent-components")).toBe(false); expect(older.reads).not.toContain("/api/v1/agent-components");
+});
 it("keeps quick navigation usable when the compiled React entry is unavailable", async () => {
   const h = await page({ ready: true });
   h.element("command-palette-open").click();

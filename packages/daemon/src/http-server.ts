@@ -12,6 +12,7 @@ import { pickNativePath, nativePickerCapability, normalizePickedPaths, type Nati
 import { API_PROTOCOL, daemonChallengePayload, EPOCH_HEADER, PROTOCOL_HEADER, type DaemonChallenge } from "@token-coupon/client";
 import { readDaemonOwnerCredential } from "@token-coupon/client/node";
 import { DAEMON_BUILD_INFO } from "./build-info.js";
+import { componentId } from "./agent-components.js";
 
 const BODY_LIMIT = 64 * 1024;
 const PUBLIC_DIRECTORY = fileURLToPath(new URL("../../web/public/", import.meta.url));
@@ -218,7 +219,7 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
       sendJson(response, 200, { status: "ok", epoch: service.epoch, instanceId: service.epoch, applicationVersion: DAEMON_BUILD_INFO.applicationVersion, buildId: DAEMON_BUILD_INFO.buildId, protocol: API_PROTOCOL,
         profile: { id: profileId, kind: service.workspaceEnvironment().isWsl ? "wsl" : "native", platform: process.platform },
-        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, pendingQueue: 1, planningTodos: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
+        phase: "7-incremental", capabilities: { executionSelection: 1, systemSettings: 1, agentComponents: 1, operationRouting: 1, plannerProgress: 1, protocolHandshake: 1, eventReconciliation: 1, pendingQueue: 1, planningTodos: 1, daemonDiscovery: discoveryReady ? 1 : 0 }, host: options.host, workspaceEnvironment: service.workspaceEnvironment(), nativePicker: nativePickerCapability(),
         mcp: { url: `${expectedOrigin}/mcp`, transport: "Streamable HTTP / optional stdio", localReady: true, chatgptVerified: false, tokenFile: join(options.dataDirectory, "mcp-access-token") } }); return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/remote-connection") { sendJson(response, 200, options.remoteMcp?.status() ?? { configured: false, enabled: false, gateway: "stopped", pendingApprovals: 0, validGrants: 0, remoteClientVerified: false }); return; }
@@ -287,6 +288,12 @@ export async function createLocalServer(service: ApplicationService, options: { 
     if (request.method === "GET" && url.pathname === "/api/v1/providers") { sendJson(response, 200, await service.planningProviderOptions()); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/providers/deepseek-api/models") { sendJson(response, 200, await service.plannerModels(url.searchParams.get("refresh") === "1")); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/runners") { sendJson(response, 200, await service.runnerOptions()); return; }
+    if (request.method === "GET" && url.pathname === "/api/v1/agent-components") { sendJson(response, 200, await service.agentComponents.list()); return; }
+    if (request.method === "POST" && parts[0] === "agent-components" && parts.length === 3) {
+      const id = componentId(parts[1]!), body = await readJsonBody(request);
+      if (parts[2] === "install") { sendJson(response, 202, await service.agentComponents.install(id, body.confirmed === true)); return; }
+      if (parts[2] === "cancel") { service.agentComponents.cancel(id, stringField(body.operationId, "operationId", 36)); sendJson(response, 200, { accepted: true }); return; }
+    }
     if (request.method === "GET" && parts[0] === "runners" && parts.length === 3 && parts[2] === "models") {
       sendJson(response, 200, await service.runnerModels(parts[1]!, url.searchParams.get("workspaceId") ?? undefined, url.searchParams.get("refresh") === "1")); return;
     }

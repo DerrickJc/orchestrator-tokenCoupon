@@ -1286,6 +1286,29 @@ R1 增加桌面断连提示、页面和托盘的“重新连接后台”入口�
 
 修复后复查了 main/preload 的 IPC 来源限制、重新附着调用链、重连失败与并发、草案原版本保留、跨计划输入归属和业务写请求路径；R1/R2 已关闭，本轮修复范围未发现新的阻塞缺陷。当前仍保留预览定位；第 14 节列出的平台和发布缺口继续保留。此次未合并到 `main`。
 
+### 13.95 安装包精简与按需 Agent 组件（2026-10-22）
+
+原 Windows 预览安装器为 241,774,362 字节（230.6 MiB），安装后逻辑文件总量为 778,124,093 字节（742.1 MiB）。其中后台资源约 374.1 MiB，包含约 247.5 MiB 的 Claude 原生程序包和约 79.0 MiB 的独立 Node。此处数字来自 CI `39624633039` 的体积报告及相同版本官方发布物核对；未将安装后的逻辑字节当成压缩安装器体积。
+
+本次保留 Electron 和共享 daemon 架构，优先拆分可选工具并裁剪资源，不同时迁移桌面框架。参考 [agent-orchestrator 的 forge 配置](https://github.com/OrchestratorInc/agent-orchestrator/blob/ad4968a1bb3cd22857bcaa6f7b81af586951af30/frontend/forge.config.ts)：它同样使用 Electron，通过已构建网页和少量外部依赖白名单控制资源，并按平台配置 sidecar；并非完全不携带 Node 或必然只有几十 MB。参考其 [systeminstall 服务](https://github.com/OrchestratorInc/agent-orchestrator/blob/ad4968a1bb3cd22857bcaa6f7b81af586951af30/backend/internal/service/systeminstall/systeminstall.go)，借鉴固定目标/命令白名单、显式安装操作及保留已有安装的原则，未执行或复制参考项目的安装脚本。
+
+实施内容：
+
+- `scripts/runtime-dependencies.mjs` 从 daemon、core、client、CLI 的生产依赖关系收集闭包；网页只带构建产物，不携带 React 构建依赖。保留必需 JSON/JavaScript/原生资源、README 和许可证；README 可能就是 SDK 指定的许可文件，不能一律删除。排除测试、开发声明和源码映射，拒绝源目录以外的依赖链接。
+- Claude SDK 只保留轻量协议适配库；SDK 自带的各平台执行器不进入桌面包。Claude 执行、模型目录和普通 CLI 调用均使用同一外部工具发现规则，Windows 元数据子进程也使用已有受控进程适配器。Codex 本体同样不打包。
+- Electron 只保留 `zh-CN` 与 `en-US`。独立 Node 仍用于后台脱离窗口运行、Web/CLI 共用与 Windows Job 进程管理，不直接以 Electron 代替标准 Node。
+- 构建增加 `desktop-size-audit.mjs`：禁止打入 Agent 原生包，并限制不含 Node 的后台资源不超过 40 MiB。最终 `desktop-build.json` 记录资源构成、被排除的 Agent 包和安装器实际字节数，后续按同一口径比较。
+
+使用流程：进入 **系统设置 → Agent 组件**。已有工具显示“复用本机工具”，无需重复安装；缺少时点击“按需安装”，核对官方包、固定版本及目录并勾选确认。当前可选安装为 Codex `0.163.0`、Claude Code 原生包 `2.1.308`。仅安装选中的工具，使用官方 npm 仓库、禁用包安装脚本，安装完成只执行 `--version` 核验；不登录、不发送模型任务。组件通过校验后原子启用，安装中显示进度并可取消；失败清理本次暂存目录，已有目录不被覆盖。若 daemon/系统被强制终止，可能保留未启用的暂存目录，不会当成已安装完成或自动恢复下载。
+
+自动安装需要本机已有 npm；随包 Node 不包含 npm。缺少 npm 时显示原因并提供官方手动安装说明，用户也可自行安装原生 Agent 后重新检测。组件就绪后可复制正确引用路径的启动命令，在终端完成工具登录；可用性检测不等于认证或真实模型调用通过。默认组件目录为 `~/.token-coupon/agents/<runnerId>/current`，不占项目目录，不随应用升级覆盖；`TOKEN_COUPON_AGENT_HOME` 可更换绝对目录。优先复用显式 `TOKEN_COUPON_CODEX_EXECUTABLE`／`TOKEN_COUPON_CLAUDE_EXECUTABLE`、PATH 和已知用户目录，再查私有组件。卸载应用不会主动删除用户工具或该组件目录。
+
+安装 API 仅由本机授权调用，不暴露为网页 MCP 安装工具；要求当前 epoch、固定 Runner ID 和显式确认，不接受任意包名、版本或 shell 文本。并发安装去重且有跨进程协调；安全停止后台会把活动组件安装列为阻断项，正常关闭会取消并等待安装进程退出。安装错误不回传 npm 原始输出或代理凭据。
+
+已完成本机类型检查、生产构建与 859 项全量回归（2 项 Windows 专属用例跳过）。精简 Linux 资源包通过包内 Node 22.12.0 的真实 HTTP 规划/审查/批准/执行/重启闭环，约 134.4 MiB，其中独立 Node 约 114.3 MiB、其余约 20.2 MiB。真实打包 GUI 验证组件确认无隐式安装、任务页、窗口内重连与未提交输入恢复。本机一次性目录的 Codex/Claude 真实按需安装、版本核验与复用均通过，未调用模型；精简资源包还能读取已有本机两种 CLI 的模型目录。`scripts/agent-component-smoke.mjs --agent both` 可显式重跑这项网络测试，完成后清理临时组件，不改已有全局工具。
+
+Windows/Linux 原生 CI 已纳入新增安装边界、资源裁剪和真实临时安装测试；Windows 最终安装器体积以相应提交的 `desktop-build.json` 为准，不能用 Linux 资源总量直接推算。此优化不将当前预览升级为已完成安装升级或真实业务 Runner 的全部验收。
+
 ## 14. 剩余实施台账（2026-10-21）
 
 13 节记录的是已完成的增量，不代表 WIN-01 至 WIN-13 或第 10 节全部验收。后续按依赖连续推进，独立功能验证后提交；公开发布与推送另需用户授权。

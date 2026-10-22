@@ -18,7 +18,7 @@ it("reuses PATH tools before privately installed components, without invoking th
   await mkdir(bin); await mkdir(managed, { recursive: true });
   const filename = process.platform === "win32" ? "codex.cmd" : "codex";
   for (const directory of [bin, managed]) { await writeFile(join(directory, filename), "discovery must never execute this file"); await chmod(join(directory, filename), 0o755); }
-  const environment = { PATH: bin, PATHEXT: ".EXE;.CMD", TOKEN_COUPON_AGENT_HOME: join(root, "components") };
+  const environment = { HOME: root, USERPROFILE: root, PATH: bin, PATHEXT: ".EXE;.CMD", TOKEN_COUPON_AGENT_HOME: join(root, "components") };
   expect(await resolveAgentExecutable("codex", environment)).toBe(join(bin, filename));
   await rm(join(bin, filename));
   expect(await resolveAgentExecutable("codex", environment)).toBe(join(managed, filename));

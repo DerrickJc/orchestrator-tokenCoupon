@@ -62,6 +62,11 @@
 .task-row { align-items: start; }
 .task-row.desktop-notification-focus { outline: 2px solid #b1762e; outline-offset: 2px; background: #fff7e9; }
 .desktop-connection-banner { position:relative; padding-right:2.5rem; }
+.agent-components-list { display:grid; gap:12px; }
+.agent-component-row { border:1px solid var(--line); border-radius:10px; padding:14px; }
+.agent-component-row .button-row { margin-top:8px; }
+.agent-component-install-details { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 14px; }
+.agent-component-install-details dd { margin:0; overflow-wrap:anywhere; }
 .task-row .task-name, .task-row .task-sub { display: block; overflow-wrap: anywhere; }
 .task-row > button { grid-column: 2 / -1; justify-self: start; white-space: normal; }
 .task-row > span { min-width: 0; }
