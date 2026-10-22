@@ -1201,6 +1201,8 @@ CI 改为 Linux 运行完整 Vitest 套件，Windows 运行 `npm run test:window
 
 ### 13.91 原生 Windows 快捷连接能力边界与构建命令修正（2026-10-21）
 
+本节保留当时预览版本的限制记录。2026-10-22 已实施的 Windows 私有管道与快捷连接适配见 13.98；旧安装器不随源码更新自动获得新能力。
+
 常驻快捷连接仍使用 POSIX `gateway.sock`、目录权限与 socket 文件身份检查，因此原生 Windows 预览暂不开放该功能。状态接口返回 `quickTunnel.available=false` 和原因；前端禁用新建、复用及重测快捷连接的入口，保留固定 HTTPS 配置和本机 Agent。后台在组件下载、创建连接配置或启动隧道前返回 `remote_quick_tunnel_unsupported`，adapter 的直接启动/恢复也有同样的边界。旧配置在启动时保留原文并说明限制，不自动更换地址或撤销授权。
 
 原生 Windows 命名管道或受保护 loopback 适配与真实公网 OAuth 联调仍是后续工作。固定 HTTPS 入口保留不代表已取得该平台真实网页联调证据；其代理只可发布 MCP/OAuth 网关。回归新增保存配置不变、无组件启动副作用、固定 HTTPS 切换，以及前端禁用和说明展示；Windows 原生 CI 入口同时加入该用例。
@@ -1232,9 +1234,9 @@ README 的自定义构建命令改为先 `npm run build`，再 `node scripts/pac
 | daemon/model-switch.test.ts | 4 | 未观察到预期运行状态/交互；待复验 |
 | daemon/native-picker.test.ts | 1 | 长短路径断言；已规范化 realpath，对应原生 CI 测试通过 |
 | daemon/pending-queue.test.ts | 1 | 测试操作未在时限内结束；待复验 |
-| daemon/persistent-tunnel.test.ts | 5 | POSIX 常驻隧道夹具/网关不适用于 Windows；现明确禁用原生 Windows 快捷连接 |
+| daemon/persistent-tunnel.test.ts | 5 | 当时 POSIX 夹具/网关不适用于 Windows；13.98 已增加原生管道、跨平台夹具和 Windows 回归 |
 | daemon/protocol-handshake.test.ts | 1 | owner 发现能力未就绪；ACL 修复后包内 smoke 通过，原文件仍需复验 |
-| daemon/quick-connection.test.ts | 3 | `gateway.sock` listen EACCES；现由平台能力门禁提前拒绝 |
+| daemon/quick-connection.test.ts | 3 | 当时 `gateway.sock` listen EACCES；13.98 已改用 Windows 私有管道并加入原生 OAuth/恢复回归 |
 | daemon/runtime-stage.test.ts | 1 | Windows ACL 查询失败；包内 daemon smoke 已通过，原文件仍需复验 |
 | daemon/session-control.test.ts | 2 | 运行/取消的预期状态未出现；待复验 |
 | daemon/session-observation.test.ts | 2 | interrupted 被报告为 unavailable；待平台恢复诊断复验 |
@@ -1250,7 +1252,7 @@ README 的自定义构建命令改为先 `npm run build`，再 `node scripts/pac
 | --- | --- |
 | Linux／WSL 后台及共享 Web | 完整 Linux 回归和 GUI smoke 通过；真实 Runner 按各阶段证据单列 |
 | 原生 Windows x64 桌面与 Mock 主流程 | 原生测试集、NSIS 构建、包内 daemon 与正常 sandbox GUI 生命周期通过 |
-| 原生 Windows 快捷连接 | 明确禁用；原生私有转发适配与网页 OAuth 联调待实现 |
+| 原生 Windows 快捷连接 | 源码适配与独立验证见 13.98；旧预览安装器仍禁用，真实网页账号联调单独验收 |
 | 原生 Windows 固定 HTTPS | 入口保留；隔离假 probe 用例不替代公网/真实客户端联调 |
 | 原生 Windows 真实 Codex／Claude、worktree 并行、活动任务异常恢复 | 不以 Mock/原生测试子集宣称验收；逐项完成后再扩大支持范围 |
 | ARM64、人工安装升级/卸载、系统通知/原生弹窗、签名发布 | 没有完整验收证据；仍为后续台账 |
@@ -1402,13 +1404,45 @@ NSIS 外壳及归档头等另有少量开销。完整 Electron 与独立 Node �
 
 1. 私有 IPC/双向认证、Windows 专用目录权限及单元测试；`feat: add authenticated Windows private gateway transport`。
 2. 接入 gateway 与常驻隧道，修复 Windows 子进程身份，开放平台能力；保留 POSIX 老协议兼容。`feat: enable persistent quick connections on native Windows`。
-3. 原生 Windows/Linus 集成测试及包内 smoke、文档/界面边界说明；`test: verify native Windows quick connection lifecycle`。
+3. 原生 Windows/Linux 集成测试及包内 smoke、文档/界面边界说明；`test: verify native Windows quick connection lifecycle`。
 
 必须覆盖：无凭证/错误凭证/伪造后端在业务数据发送前失败；错误路径和畸形握手；握手超时、客户端中断、后台停止时清理；网关端口占用时不启动公网隧道；普通用户目录、中文/空格路径；重复启动只创建一个隧道；daemon 断开时返回 503、恢复后原地址可用；旧实例 detach 不解绑新实例；显式停止与启动中取消清理两个进程；supervisor 崩溃及 PID 复用不误杀；旧 WSL 路径和固定 HTTPS 回归。
 
 Windows CI 使用真实 Node 子进程、Named Pipe、Mutex、进程身份和 HTTP 转发，cloudflared 行为由明确标注的本地假组件隔离；另进行官方 cloudflared 的公网实际启动、元数据及 MCP 自检。真实 ChatGPT/Claude 登录、连接授权与工具调用需要对应网页账号配合，必须与模拟 OAuth 回归分开记录；网络/代理导致公网验证失败时给出实际错误，不能据此宣称网页联调已通过。Quick Tunnel 的无 SLA、地址随新隧道变化、不支持 SSE 等上游边界见 [Cloudflare 官方说明](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)，沿用 JSON 响应型 MCP，不把完整控制台代理到公网。
 
-只有实现、原生 CI 与运行验证完成后，才将历史的“原生 Windows 暂不支持”更新为准确能力说明。安装器发布另行确认，旧预览不自动具备新功能；失败时保留本机 Agent 与固定 HTTPS 配置，不自动撤销已有网页授权或新建替代连接。
+安装器发布另行确认，旧预览不自动具备新功能；失败时保留本机 Agent 与固定 HTTPS 配置，不自动撤销已有网页授权或新建替代连接。
+
+#### 已实施与独立实机验证（2026-10-22）
+
+私有传输位于 `packages/daemon/src/private-gateway.ts`，连接、常驻控制与生命周期分别由 `oauth-gateway.ts`、`persistent-tunnel.ts` 和 `tunnel-supervisor.ts` 接入。Windows 专用目录只设置受限 DACL，不请求普通用户没有的审计权限；状态文件已有宽权限时一并收紧。新增绝对握手期限、伪造后端/反射证明拒绝、跨 Windows/WSL 接管拒绝、旧实例延迟 detach 保护，以及停止时等待实际进程退出，避免 Windows 工作目录占用与清理竞态。
+
+验证记录按层区分：
+
+- Linux 协议/常驻/OAuth 定向回归 47 项通过，Windows ACL 专属 1 项跳过；停止时序调整后的常驻与 OAuth 39 项通过。仓库 typecheck 通过。
+- 最终代码基线 `a104c99` 的 [Windows/Linux CI #39802091775](https://github.com/DerrickJc/orchestrator-tokenCoupon/actions/runs/39802091775) 通过：Linux 完整套件 151 文件、872 项通过，1 文件/2 项平台跳过；Windows 原生集 23 文件、96 项通过、4 项平台跳过。Windows NSIS 安装器构建、包内 daemon smoke、真实 Electron GUI、本地隧道生命周期及官方 cloudflared 公网 smoke 全部通过；这不是 Windows 全量 Vitest 或人工安装升级验收。CI 首次另有既有命令 smoke 的 20 秒超时，同代码重跑通过，未放宽该断言。产物位于本次运行的 Windows artifact，未发布新 Release。
+- 实际 Windows 普通用户、Node 22.12、中文和空格临时目录：本地夹具验证真实 Named Pipe、Mutex、受限 ACL、HTTP/OAuth 元数据与 MCP 自检，重启后原隧道复用、显式停止及清理通过；外部隧道在此项使用假组件，不作为公网证据。
+- 实际 Windows、官方 cloudflared 2026.10.0：首次不显式配置代理时 `remote_probe_timeout`，清理通过；在隔离测试进程中使用本机可达 HTTP 代理重试后，公网元数据、MCP 自检、后台重启保留原地址、显式停止和清理全部通过。没有改动用户代理配置、已有工作区或连接。Linux 官方组件公网同类 smoke 也通过。
+- 真实 ChatGPT／Claude 账号授权及业务工具调用仍待人工验证。内部 `connection_probe` 成功不代表网页已登录，也不会授予工作区权限。
+
+Windows 测试入口先执行构建再运行原生测试集，避免从未构建的 `dist/tunnel-supervisor.js` 启动后台。CI 将确定性的本地生命周期 smoke 与网络依赖的官方公网 smoke 分开记录；公网 step 允许保留失败证据，因此不能只看 CI 总体绿色就宣称公网通过。
+
+开发验证使用新构建和隔离 profile，不启动真实业务任务：
+
+```bash
+npm run build
+node scripts/quick-connection-smoke.mjs --local --output /tmp/quick-local.json
+node scripts/quick-connection-smoke.mjs --public --output /tmp/quick-public.json
+```
+
+Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json"`。`--local` 不访问 Cloudflare；`--public` 会按需获取官方组件并建立临时公网隧道，结束时自动停止。报告必须同时核对 `status`、公网/本地 probe、重启、停止和 `cleanup`；`realWebClientAuthorization=pending` 是刻意保留的边界。`cleanup=manual_check_required` 时保留临时 profile 供核查，不删除用户现有连接。
+
+#### 新构建的用户操作与故障处理
+
+1. 在 Windows 使用包含本节改动的新构建，打开连接中心，选择新建或复用快捷连接。首次获取组件需确认；复用时先保留当前地址重测。
+2. 公网自检通过后复制当前 `/mcp` 地址，在 ChatGPT／Claude 网页添加连接并发起 OAuth。回到本机处理授权，明确选择工作区、来源与权限，再返回原网页完成令牌交换。
+3. 网页发送只读验证请求，要求调用 `workspace_query` 核实当前获准项目。只有实际网页工具调用通过，才算完成网页端联调；随后再规划、审查，批准与执行由本机处理。
+4. `remote_probe_timeout`／`ECONNRESET` 先检查应用进程实际继承的代理与公网访问，再重测原地址；不要反复创建连接或授权。HTTP 530 是公网转发尚不可达，不等同 OAuth 失效。组件下载、入口自检、令牌交换和业务工具验证为不同状态。
+5. 业务 daemon 重启后先复用存量隧道；只有明确停止或确认隧道退出后才新建。Windows 与 WSL 的进程身份不能交叉接管；切换运行平台前在原平台停止。安装器当前未重新发布，旧标签资产保持不变。
 
 ## 14. 剩余实施台账（2026-10-21）
 

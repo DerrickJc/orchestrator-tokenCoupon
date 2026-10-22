@@ -31,7 +31,11 @@ node scripts/package-desktop.mjs --mode installer --output "C:\release-output\To
 
 `--mode dir` 生成解包目录；在直接调用脚本时可追加 `--electron-dist "C:\release-tools\electron"`，复用同版本的官方 Electron 解压目录。每次构建会启动最终包内的 daemon 完成离线 smoke，并生成 `desktop-build.json`；输出目录必须是新的专用目录，已存在目录不会被覆盖。安装包为未签名预览，默认不申请管理员权限、不自动发布或安装后启动，卸载保留用户数据和工作区。Windows 安装、升级和真实 Runner 仍需对应平台验收。
 
-原生 Windows 当前禁用快捷隧道，页面显示限制原因，后台也会在下载或启动组件前拒绝该操作。本机 Agent 入口保留；网页 MCP 可使用已在外部配置的固定 HTTPS 网关，或使用 Linux／WSL 后台的快捷连接。固定 HTTPS 的原生 Windows 网页联调仍待验收；公网代理只能转发 MCP/OAuth 网关，不能发布本机控制台。
+当前源码已支持原生 Windows 与 Linux／WSL 网页快捷连接，无需为 Windows 安装 WSL。连接中心选择“新建快捷连接”，确认按需获取官方 cloudflared，等待公网自检后复制 MCP 地址，在 ChatGPT／Claude 网页添加连接并发起授权；回到本机选择工作区与权限，再返回原网页完成登录。实际网页工具调用通过后才显示已验证；本机保存权限不代表网页完成登录。
+
+常驻隧道可在业务后台重启后复用原地址；明确停止后重新创建、隧道进程退出或系统重启，地址仍可能变化。公网只开放 MCP/OAuth 网关。本机网络需要代理时，应让启动应用的进程继承可用的 `HTTP_PROXY`／`HTTPS_PROXY`；组件下载成功不代表公网自检通过。实现、验证边界和排查方法见[原生 Windows 快捷连接方案](docs/WINDOWS_DESKTOP_REQUIREMENTS_AND_TECHNICAL_PLAN.md#1398-原生-windows-网页快捷连接实施方案)。
+
+已发布的 `desktop-preview-0.1.0-20261022-1` 安装器尚不包含此次快捷连接适配；需要使用本分支的新构建。新的安装器发布另行确认，不会修改已发布资产。
 
 ### Agent 工具按需使用
 
