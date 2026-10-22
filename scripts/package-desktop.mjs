@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assembleDesktopRuntime, installDesktopRuntimeStage, smokeDesktopResources } from "./assemble-desktop-resources.mjs";
+import { auditDesktopRuntime } from "./desktop-size-audit.mjs";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
 
@@ -51,6 +52,7 @@ export function desktopBuilderConfiguration({ appDirectory, outputDirectory, ele
     directories: { app: appDirectory, output: outputDirectory },
     files: ["dist/**/*", "node_modules/@token-coupon/client/**/*", "package.json"],
     asar: true, npmRebuild: false, nodeGypRebuild: false, forceCodeSigning: false, publish: null,
+    electronLanguages: ["en-US", "zh-CN"],
     ...(electronDist ? { electronDist } : {}),
     win: { icon: join(appDirectory, "dist/token-coupon.ico"), requestedExecutionLevel: "asInvoker", signAndEditExecutable: false },
     nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
@@ -93,8 +95,9 @@ export async function packageDesktop({ outputDirectory, mode = "dir", bundledNod
       // Builder's application file filters prune node_modules; preserve the entire isolated daemon tree.
       await installDesktopRuntimeStage(runtime.directory, resources);
       console.log("验证最终桌面包内的 daemon 与构建身份…");
+      const size = await auditDesktopRuntime(join(resources, "token-coupon-runtime"));
       const smoke = await smokeDesktopResources(resources);
-      smokeResults.push({ directory: relative(outputDirectory, context.appOutDir), result: JSON.parse(smoke.output) });
+      smokeResults.push({ directory: relative(outputDirectory, context.appOutDir), result: JSON.parse(smoke.output), size });
     };
     const artifacts = await build({ projectDir: appDirectory, targets: Platform.current().createTarget(mode === "installer" ? "nsis" : "dir", Arch[process.arch]),
       config: configuration, publish: "never" });
@@ -104,7 +107,7 @@ export async function packageDesktop({ outputDirectory, mode = "dir", bundledNod
     for (const artifact of artifacts) {
       const path = relative(outputDirectory, artifact);
       if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) throw new Error("desktop_package_artifact_outside_output");
-      report.artifacts.push({ path, sha256: await hashFile(artifact) });
+      report.artifacts.push({ path, bytes: (await stat(artifact)).size, sha256: await hashFile(artifact) });
     }
     await writeFile(join(outputDirectory, "desktop-build.json"), `${JSON.stringify(report, null, 2)}\n`);
     console.log(JSON.stringify({ outputDirectory, ...report }));

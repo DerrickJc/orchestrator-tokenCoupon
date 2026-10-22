@@ -55,6 +55,7 @@ describe("desktop preview packaging", () => {
   it("keeps runtime resources outside ASAR, disables publication and preserves user data", () => {
     const config = desktopBuilderConfiguration({ appDirectory: "/app", outputDirectory: "/out", resourcesDirectory: "/stage", electronVersion: "44.9.1" });
     expect(config.asar).toBe(true);
+    expect(config.electronLanguages).toEqual(["en-US", "zh-CN"]);
     // Runtime resources are copied atomically by afterPack, outside builder's node_modules filters.
     expect(config.extraResources).toBeUndefined();
     expect(config.publish).toBeNull();

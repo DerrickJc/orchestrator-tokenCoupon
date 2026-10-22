@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 const { assembleDesktopRuntime, installDesktopRuntimeStage } = await import("../../../scripts/assemble-desktop-resources.mjs");
 // @ts-expect-error The staging helper is a maintainer ESM script.
 const { validateBundledNodeIdentity, validateDesktopBuildIdentity } = await import("../../../scripts/stage-desktop-runtime.mjs");
+// @ts-expect-error Maintainer ESM build-time resource budget.
+const { auditDesktopRuntime } = await import("../../../scripts/desktop-size-audit.mjs");
 const roots: string[] = [];
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "token-coupon-resource-")); roots.push(root); return root; }
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -57,5 +59,13 @@ describe("Electron extraResources assembly", () => {
 
   it("requires the explicitly pinned Node runtime before assembling a package", async () => {
     await expect(assembleDesktopRuntime(join(await fixture(), "resources"), "")).rejects.toThrow("desktop_resources_node_required");
+  });
+  it("enforces an Agent-free runtime and a measured non-Node resource budget", async () => {
+    const root = await fixture(), stage = await runtimeStage(root), path = join(stage, "runtime-manifest.json");
+    expect(await auditDesktopRuntime(stage)).toMatchObject({ bundledAgentExecutables: false, budgetBytes: 40 * 1024 * 1024 });
+    await expect(auditDesktopRuntime(stage, 1)).rejects.toThrow("desktop_runtime_budget_exceeded");
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...manifest, packages: [...manifest.packages, "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64"] }));
+    await expect(auditDesktopRuntime(stage)).rejects.toThrow("desktop_bundled_agent_forbidden");
   });
 });

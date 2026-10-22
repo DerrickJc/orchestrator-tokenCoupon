@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runtimeDependencies, runtimeFileAllowed } from "./runtime-dependencies.mjs";
 
 export function validateBundledNodeIdentity(identity, platform = process.platform, arch = process.arch) {
   if (!identity || identity.platform !== platform) {
@@ -32,12 +33,12 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
   const buildInfo = JSON.parse(await readFile(join(source, "packages/daemon/dist/build-info.json"), "utf8"));
   const buildIdentity = validateDesktopBuildIdentity(buildInfo, application.version);
   const root = await mkdtemp(join(tmpdir(), "token-coupon-runtime-"));
-  const skippedOptional = [], copied = [];
+  const copied = [];
   async function copy(sourcePath, destination) {
     await mkdir(dirname(destination), { recursive: true });
     await cp(sourcePath, destination, { recursive: true, dereference: true, filter: async candidate => {
       const child = relative(sourcePath, candidate);
-      if (child.split(sep).includes("node_modules")) return false;
+      if (child && !runtimeFileAllowed(child)) return false;
       const resolved = await realpath(candidate);
       const within = relative(source, resolved);
       if (within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within)) throw new Error("runtime_resource_outside_source");
@@ -45,14 +46,9 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
     } });
   }
   try {
-    const lock = JSON.parse(await readFile(join(source, "package-lock.json"), "utf8"));
-    for (const [path, entry] of Object.entries(lock.packages).sort(([a], [b]) => a.localeCompare(b))) {
-      if (!path.startsWith("node_modules/") || entry.dev || entry.link) continue;
-      if (path.split("/").some(part => part === ".." || part === ".") || path.includes("\\")) throw new Error("runtime_dependency_path_invalid");
-      const from = join(source, path);
-      try { await lstat(from); }
-      catch (error) { if (error.code === "ENOENT" && entry.optional) { skippedOptional.push(path); continue; } throw error; }
-      await copy(from, join(root, path)); copied.push(path);
+    const closure = await runtimeDependencies(source);
+    for (const dependency of closure.dependencies) {
+      await copy(dependency.path, join(root, dependency.destination)); copied.push(dependency.destination);
     }
     for (const name of ["client", "core", "daemon", "web", "cli"]) {
       const from = join(source, "packages", name), destination = join(root, "node_modules", "@token-coupon", name);
@@ -79,7 +75,8 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
       await cp(nodePath, join(root, nodeExecutable));
     }
     const manifest = { format: 1, kind: "unpacked-development-stage", hostPlatform: process.platform, hostArch: process.arch,
-      ...buildIdentity, packages: copied, skippedOptional,
+      ...buildIdentity, packages: copied, skippedOptional: closure.skippedOptional,
+      omittedAgentPackages: closure.omittedAgentPackages, externalAgentCommands: ["codex", "claude"],
       daemonEntry: "node_modules/@token-coupon/daemon/dist/main.js",
       ...(nodeExecutable ? { nodeExecutable } : {}),
       releaseReady: false };
