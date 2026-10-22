@@ -1,4 +1,5 @@
 import { resolveNativeExecutable, spawnNative } from "../native-command.js";
+import { resolveAgentExecutable } from "../agent-executable.js";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
@@ -14,7 +15,7 @@ export interface ClaudeManagedSettings {
 }
 
 async function findExecutable(name: string): Promise<string> {
-  return resolveNativeExecutable(name, "Claude Code");
+  return name === "claude" ? resolveAgentExecutable("claude-code") : resolveNativeExecutable(name, "Claude Code");
 }
 
 export class ClaudeManagedRunner implements Runner {
@@ -28,7 +29,7 @@ export class ClaudeManagedRunner implements Runner {
 
   async run(input: RunnerInput, context: RunnerContext): Promise<RunnerResult> {
     if (!context.requestInteraction) throw new Error("Claude managed 模式缺少人工交互 owner");
-    await findExecutable("claude");
+    const executable = await findExecutable("claude");
     const abortController = new AbortController();
     let started = false;
     let nativeOutcome: RunnerResult["nativeOutcome"] = "unknown";
@@ -91,6 +92,7 @@ export class ClaudeManagedRunner implements Runner {
       prompt: input.prompt,
       options: {
         cwd: input.cwd,
+        pathToClaudeCodeExecutable: executable,
         ...(input.execution.modelId ? { model: input.execution.modelId } : {}),
         permissionMode: this.settings.permissionMode ?? "default",
         ...(this.settings.allowedTools ? { allowedTools: this.settings.allowedTools } : {}),

@@ -1,10 +1,11 @@
-import { resolveNativeExecutable, spawnNative } from "../native-command.js";
+import { spawnNative } from "../native-command.js";
+import { resolveAgentExecutable } from "../agent-executable.js";
 import type { Runner, RunnerInput, RunnerContext, RunnerOutput } from "../runner.js";
 import { runChildProcess } from "./child-process.js";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 
 async function findExecutable(name: string): Promise<string> {
-  return resolveNativeExecutable(name, "Claude Code");
+  return resolveAgentExecutable("claude-code");
 }
 
 export class ClaudeCodeRunner implements Runner {

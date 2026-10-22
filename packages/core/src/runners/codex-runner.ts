@@ -1,4 +1,5 @@
 import { spawnNative as spawn, resolveNativeExecutable } from "../native-command.js";
+import { resolveAgentExecutable } from "../agent-executable.js";
 import { StringDecoder } from "node:string_decoder";
 import { diagnoseNativeCli } from "../runner-diagnostics.js";
 import { parseCodexElicitation } from "./codex-elicitation.js";
@@ -575,6 +576,7 @@ function makeAsyncCodexQuestion(rawQuestions: unknown[], nativeRequestId: string
 }
 
 async function findExecutable(name: string): Promise<string> {
+  if (name === "codex") return resolveAgentExecutable("codex");
   return resolveNativeExecutable(name, "Codex CLI");
 }
 
