@@ -67,5 +67,7 @@ describe("Electron extraResources assembly", () => {
     const manifest = JSON.parse(await readFile(path, "utf8"));
     await writeFile(path, JSON.stringify({ ...manifest, packages: [...manifest.packages, "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64"] }));
     await expect(auditDesktopRuntime(stage)).rejects.toThrow("desktop_bundled_agent_forbidden");
+    await writeFile(path, JSON.stringify({ ...manifest, packages: [...manifest.packages, "node_modules\\@anthropic-ai\\claude-agent-sdk-win32-x64"] }));
+    await expect(auditDesktopRuntime(stage)).rejects.toThrow("desktop_bundled_agent_forbidden");
   });
 });

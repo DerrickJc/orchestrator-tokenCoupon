@@ -19,7 +19,7 @@ export async function runtimeDependencies(source) {
         await access(join(candidate, "package.json"));
         const actual = await realpath(candidate), within = relative(source, actual);
         if (within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within)) throw new Error("runtime_resource_outside_source");
-        const destination = relative(source, candidate);
+        const destination = relative(source, candidate).split(sep).join("/");
         if (!selected.has(destination)) { selected.set(destination, { path: actual, destination, name }); queue.push({ path: actual }); }
         return;
       } catch (error) { if (error.code !== "ENOENT") throw error; }
