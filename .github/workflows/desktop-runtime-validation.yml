@@ -66,6 +66,12 @@ jobs:
       - name: Install optional Agents in a temporary profile (no model calls)
         run: node scripts/agent-component-smoke.mjs --agent both --output "${{ runner.temp }}/token-coupon-desktop/agent-components.json"
 
+      # External network evidence is separate from deterministic protocol/lifecycle tests.
+      - name: Native Windows public Quick Tunnel probe (network-dependent)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: node scripts/quick-connection-smoke.mjs --public --output "${{ runner.temp }}/token-coupon-desktop/quick-connection.json"
+
       - name: Real Linux Electron GUI lifecycle
         if: runner.os == 'Linux'
         shell: bash
@@ -93,6 +99,7 @@ jobs:
           path: |
             ${{ runner.temp }}/token-coupon-desktop/desktop-build.json
             ${{ runner.temp }}/token-coupon-desktop/agent-components.json
+            ${{ runner.temp }}/token-coupon-desktop/quick-connection.json
             ${{ runner.temp }}/token-coupon-desktop/gui-smoke/**
             ${{ runner.temp }}/token-coupon-desktop/*-preview-setup.exe
 

@@ -26,9 +26,9 @@ async function fixture(delay = 0) {
   cleanups.push(() => adapter.stopSaved(directory));
   return { root, directory, executable, adapter, port };
 }
-async function backend() {
+async function backend(body = "backend-connected") {
   const endpoint = await createPrivateGateway(), { socketPath } = endpoint;
-  const server = createServer((_request, response) => response.end("backend-connected"));
+  const server = createServer((_request, response) => response.end(body));
   const dispose = endpoint.token ? protectPrivateGateway(server, endpoint.token) : () => {};
   await new Promise<void>(resolve => server.listen(socketPath, resolve));
   cleanups.push(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await removePrivateGateway(endpoint); });
@@ -39,6 +39,8 @@ it("retains the tunnel, reserves its port during restart, authenticates control 
   const h = await fixture();
   const runtime = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
   const record = (await readTunnelRecord(h.directory))!;
+  expect(record.child?.platform).toBe(process.platform);
+  expect(record.child?.processStart).toMatch(/^\d+$/);
   expect(runtime.persistent).toBe(true);
   expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
   expect((await fetch(`http://127.0.0.1:${record.controlPort}/stop`, { method: "POST" })).status).toBe(403);
@@ -55,6 +57,17 @@ it("retains the tunnel, reserves its port during restart, authenticates control 
   expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("backend-connected");
   expect((await readFile(join(h.root, "starts"), "utf8")).trim().split("\n")).toHaveLength(1);
   await restored!.stop(); expect(await readTunnelRecord(h.directory)).toBeUndefined();
+}, testTimeout);
+
+it("keeps a newly attached backend when the previous daemon detaches late", async () => {
+  const h = await fixture(), first = await backend("first"), second = await backend("second");
+  const original = await h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {});
+  await original.attach!(first.socketPath, first.token);
+  const recovered = await h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {});
+  await recovered!.attach!(second.socketPath, second.token);
+  await original.detach!();
+  expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("second");
+  await recovered!.stop();
 }, testTimeout);
 
 it("does not start a public tunnel over a port occupied by another service", async () => {

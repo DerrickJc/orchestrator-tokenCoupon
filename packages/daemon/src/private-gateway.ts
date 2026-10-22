@@ -54,20 +54,21 @@ function frame(socket: Socket): Promise<string> {
 }
 
 /** Authenticate before giving any bytes to the HTTP parser; no static secret crosses IPC. */
-export function protectPrivateGateway(server: Server, key: string): () => void {
+export function protectPrivateGateway(server: Server, key: string, timeoutMs = 5000): () => void {
   if (!hex.test(key)) throw new Error("gateway_key_invalid");
   const listeners = server.listeners("connection"), pending = new Set<Socket>();
   server.removeAllListeners("connection");
   server.on("connection", (socket: Socket) => {
     pending.add(socket); socket.once("close", () => pending.delete(socket));
-    const timeout = () => socket.destroy(); socket.setTimeout(5000, timeout);
+    const timeout = setTimeout(() => socket.destroy(), timeoutMs); timeout.unref();
+    socket.once("close", () => clearTimeout(timeout));
     void (async () => {
       const greeting = await frame(socket), client = greeting.startsWith("TCG1 ") ? greeting.slice(5) : "";
       if (!hex.test(client)) throw new Error("gateway_auth_invalid");
       const nonce = randomBytes(32).toString("hex");
       socket.write(`${nonce} ${proof(key, "server", client, nonce)}\n`);
       if (!matches(proof(key, "client", client, nonce), await frame(socket))) throw new Error("gateway_auth_failed");
-      socket.setTimeout(0); socket.removeListener("timeout", timeout); pending.delete(socket);
+      clearTimeout(timeout); pending.delete(socket);
       socket.write("OK\n");
       for (const listener of listeners) listener.call(server, socket);
       socket.resume();
@@ -78,8 +79,7 @@ export function protectPrivateGateway(server: Server, key: string): () => void {
 
 export async function connectPrivateGateway(socketPath: string, key: string): Promise<Socket> {
   if (!hex.test(key)) throw new Error("gateway_key_invalid");
-  const socket = connect(socketPath), timeout = () => socket.destroy();
-  socket.setTimeout(5000, timeout);
+  const socket = connect(socketPath), timeout = setTimeout(() => socket.destroy(), 5000); timeout.unref();
   try {
     await new Promise<void>((resolve, reject) => {
       const error = () => { socket.removeListener("connect", ready); socket.removeListener("close", error); reject(new Error("gateway_auth_failed")); };
@@ -91,9 +91,9 @@ export async function connectPrivateGateway(socketPath: string, key: string): Pr
     if (!nonce || !hex.test(nonce) || !supplied || extra !== undefined || !matches(proof(key, "server", client, nonce), supplied)) throw new Error("gateway_auth_failed");
     socket.write(`${proof(key, "client", client, nonce)}\n`);
     if (await frame(socket) !== "OK") throw new Error("gateway_auth_failed");
-    socket.setTimeout(0); socket.removeListener("timeout", timeout);
     return socket;
   } catch { socket.destroy(); throw new Error("gateway_auth_failed"); }
+  finally { clearTimeout(timeout); }
 }
 
 export function privateGatewayAgent(socketPath: string, key: string): Agent {
