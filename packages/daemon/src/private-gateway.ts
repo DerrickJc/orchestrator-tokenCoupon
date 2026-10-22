@@ -23,12 +23,13 @@ export async function createPrivateGateway(platform: NodeJS.Platform = process.p
 export async function removePrivateGateway(endpoint?: PrivateGatewayEndpoint): Promise<void> {
   if (endpoint?.directory) await rm(endpoint.directory, { recursive: true, force: true });
 }
-export async function validatePrivateGateway(socketPath: unknown, token: unknown, platform: NodeJS.Platform = process.platform): Promise<void> {
+export async function validatePrivateGateway(socketPath: unknown, token: unknown, platform: NodeJS.Platform = process.platform, requireLive = true): Promise<void> {
   if (platform === "win32") {
     if (typeof socketPath !== "string" || !pipe.test(socketPath) || typeof token !== "string" || !hex.test(token)) throw new Error("gateway_endpoint_invalid");
     return;
   }
   if (token !== undefined || typeof socketPath !== "string" || !isAbsolute(socketPath) || basename(socketPath) !== "gateway.sock" || dirname(dirname(socketPath)) !== resolve(tmpdir()) || !basename(dirname(socketPath)).startsWith("tc-gateway-")) throw new Error("gateway_endpoint_invalid");
+  if (!requireLive) return;
   const parent = await lstat(dirname(socketPath)), entry = await lstat(socketPath);
   if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077) || !entry.isSocket() || entry.isSymbolicLink() || process.getuid && parent.uid !== process.getuid()) throw new Error("gateway_endpoint_invalid");
 }

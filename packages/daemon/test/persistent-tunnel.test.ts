@@ -1,11 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { PersistentQuickTunnelAdapter, readTunnelRecord, tunnelControl, tunnelRecordPath } from "../src/persistent-tunnel.js";
+import { createPrivateGateway, protectPrivateGateway, removePrivateGateway } from "../src/private-gateway.js";
+
+const testTimeout = process.platform === "win32" ? 90000 : 15000;
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -16,19 +19,20 @@ async function freePort() {
 }
 async function fixture(delay = 0) {
   const root = await mkdtemp(join(tmpdir(), "tc-persistent-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const directory = join(root, "runtime"), executable = join(root, "cloudflared-fixture");
+  const directory = join(root, "runtime"), executable = process.execPath;
   await mkdir(directory, { mode: 0o700 });
-  await writeFile(executable, `#!${process.execPath}\nimport('node:fs').then(fs=>fs.appendFileSync(${JSON.stringify(join(root, "starts"))},'start\\n'));\nsetTimeout(()=>process.stderr.write('https://persistent-test.trycloudflare.com\\n'),${delay});\nsetInterval(()=>{},1000);\nprocess.on('SIGTERM',()=>process.exit(0));\n`, { mode: 0o755 });
-  const adapter = new PersistentQuickTunnelAdapter(5000, 50), port = await freePort();
+  await writeFile(join(directory, "tunnel"), `require('node:fs').appendFileSync(${JSON.stringify(join(root, "starts"))},'start\\n');\nsetTimeout(()=>process.stderr.write('https://persistent-test.trycloudflare.com\\n'),${delay});\nsetInterval(()=>{},1000);\nprocess.on('SIGTERM',()=>process.exit(0));\n`);
+  const adapter = new PersistentQuickTunnelAdapter(process.platform === "win32" ? 30000 : 5000, 250), port = await freePort();
   cleanups.push(() => adapter.stopSaved(directory));
   return { root, directory, executable, adapter, port };
 }
 async function backend() {
-  const directory = await mkdtemp(join(tmpdir(), "tc-gateway-")); await chmod(directory, 0o700);
-  const socketPath = join(directory, "gateway.sock"), server = createServer((_request, response) => response.end("backend-connected"));
+  const endpoint = await createPrivateGateway(), { socketPath } = endpoint;
+  const server = createServer((_request, response) => response.end("backend-connected"));
+  const dispose = endpoint.token ? protectPrivateGateway(server, endpoint.token) : () => {};
   await new Promise<void>(resolve => server.listen(socketPath, resolve));
-  cleanups.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); });
-  return { socketPath, server };
+  cleanups.push(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await removePrivateGateway(endpoint); });
+  return { socketPath, server, token: endpoint.token };
 }
 
 it("retains the tunnel, reserves its port during restart, authenticates control and reconnects a private backend", async () => {
@@ -38,20 +42,20 @@ it("retains the tunnel, reserves its port during restart, authenticates control 
   expect(runtime.persistent).toBe(true);
   expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
   expect((await fetch(`http://127.0.0.1:${record.controlPort}/stop`, { method: "POST" })).status).toBe(403);
-  const front = await backend(); await runtime.attach!(front.socketPath);
+  const front = await backend(); await runtime.attach!(front.socketPath, front.token);
   await expect(runtime.attach!(join(h.root, "arbitrary.sock"))).rejects.toThrow("tunnel_control_unavailable");
   expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("backend-connected");
   await runtime.detach!();
   expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
   const conflicting = createServer();
   await expect(new Promise<void>((resolve, reject) => { conflicting.once("error", reject); conflicting.listen(h.port, "127.0.0.1", resolve); })).rejects.toMatchObject({ code: "EADDRINUSE" });
-  const restored = await new PersistentQuickTunnelAdapter(5000, 50).recover(h.port, h.directory, new AbortController().signal, () => {});
+  const restored = await h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {});
   expect(restored?.origin).toBe(runtime.origin); expect((await readTunnelRecord(h.directory))?.pid).toBe(record.pid);
-  await restored!.attach!(front.socketPath);
+  await restored!.attach!(front.socketPath, front.token);
   expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("backend-connected");
   expect((await readFile(join(h.root, "starts"), "utf8")).trim().split("\n")).toHaveLength(1);
   await restored!.stop(); expect(await readTunnelRecord(h.directory)).toBeUndefined();
-}, 15_000);
+}, testTimeout);
 
 it("does not start a public tunnel over a port occupied by another service", async () => {
   const h = await fixture(), other = createServer((_request, response) => response.end("sentinel"));
@@ -60,7 +64,7 @@ it("does not start a public tunnel over a port occupied by another service", asy
   await expect(h.adapter.start(h.executable, h.port, h.directory, new AbortController().signal, () => {})).rejects.toThrow("remote_port_in_use");
   expect(await readTunnelRecord(h.directory)).toBeUndefined();
   await expect(readFile(join(h.root, "starts"))).rejects.toMatchObject({ code: "ENOENT" });
-}, 15_000);
+}, testTimeout);
 
 it("survives SIGKILL of the launching business process and can be recovered by another process owner", async () => {
   const h = await fixture();
@@ -76,7 +80,7 @@ it("survives SIGKILL of the launching business process and can be recovered by a
   expect(restored?.origin).toBe(before.origin); expect((await readTunnelRecord(h.directory))?.pid).toBe(before.pid);
   expect((await fetch(`http://127.0.0.1:${h.port}/mcp`)).status).toBe(503);
   await restored!.stop();
-}, 15_000);
+}, testTimeout);
 
 it("rejects changed ports and inaccessible control instead of silently replacing an alive tunnel", async () => {
   const h = await fixture();
@@ -88,7 +92,7 @@ it("rejects changed ports and inaccessible control instead of silently replacing
   try { await expect(h.adapter.recover(h.port, h.directory, new AbortController().signal, () => {})).rejects.toThrow("tunnel_control_unavailable"); }
   finally { await writeFile(tunnelRecordPath(h.directory), JSON.stringify(record), { mode: 0o600 }); }
   expect((await readFile(join(h.root, "starts"), "utf8")).trim()).toBe("start");
-}, 15_000);
+}, testTimeout);
 
 it("verifies a dead supervisor and cleans its own orphan before allowing a replacement", async () => {
   const h = await fixture();
@@ -102,7 +106,7 @@ it("verifies a dead supervisor and cleans its own orphan before allowing a repla
   expect((await readTunnelRecord(h.directory))?.pid).not.toBe(record.pid);
   expect((await readFile(join(h.root, "starts"), "utf8")).trim().split("\n")).toHaveLength(2);
   await replacement.stop();
-}, 15_000);
+}, testTimeout);
 
 it("cancels a starting tunnel without leaving its supervisor or child running", async () => {
   const h = await fixture(10_000), controller = new AbortController();
@@ -112,4 +116,4 @@ it("cancels a starting tunnel without leaving its supervisor or child running", 
   controller.abort(); await expect(pending).rejects.toBeDefined();
   await expect.poll(() => readTunnelRecord(h.directory)).toBeUndefined();
   await expect.poll(async () => { try { await tunnelControl(record, "status"); return false; } catch { return true; } }).toBe(true);
-}, 15_000);
+}, testTimeout);

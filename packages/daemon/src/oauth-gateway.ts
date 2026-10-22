@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
@@ -19,6 +18,7 @@ import { PersistentQuickTunnelAdapter } from "./persistent-tunnel.js";
 import { createProbeMcpServer, probeRemoteMcp, ProbeError, retryableProbeFailure, type PublicProbe } from "./remote-probe.js";
 import { ConnectionDiagnostics, type ConnectionObservation } from "./connection-diagnostics.js";
 import { assertQuickTunnelSupported, quickTunnelSupport } from "./connection-platform.js";
+import { createPrivateGateway, protectPrivateGateway, removePrivateGateway, type PrivateGatewayEndpoint } from "./private-gateway.js";
 
 const require = createRequire(import.meta.url);
 const express = require("express") as ExpressFactory;
@@ -87,8 +87,8 @@ export class RemoteMcpConnection {
   private state: PersistedState = { version: 1, clients: [], requests: [], grants: [], codes: [] };
   private stateQueue: Promise<void> = Promise.resolve();
   private server: Server | undefined;
-  private gatewaySocket: string | undefined;
-  private gatewaySocketDirectory: string | undefined;
+  private gatewayEndpoint: PrivateGatewayEndpoint | undefined;
+  private gatewayAuthCleanup: (() => void) | undefined;
   private config: ConnectionConfig | undefined;
   private startupError: string | undefined;
   private loadFailed = false;
@@ -326,7 +326,7 @@ export class RemoteMcpConnection {
     }
     if (signal.aborted) { if (signal.reason === PRESERVE_TUNNEL && runtime.detach) await runtime.detach(); else await runtime.stop(); signal.throwIfAborted(); }
     this.runtime = runtime;
-    if (runtime.attach && this.gatewaySocket) await runtime.attach(this.gatewaySocket);
+    if (runtime.attach && this.gatewayEndpoint) await runtime.attach(this.gatewayEndpoint.socketPath, this.gatewayEndpoint.token);
     const origin = validatePublicOrigin(runtime.origin);
     if (!/^https:\/\/[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com$/.test(origin)) throw new Error("tunnel_origin_invalid：组件未返回有效 Quick Tunnel 地址");
     if (this.recoveredTunnel && previousOrigin !== origin) await this.revokeAll();
@@ -662,15 +662,14 @@ export class RemoteMcpConnection {
     });
     const privateGateway = this.tunnel.persistentGateway && this.config?.mode === "quick_tunnel";
     if (privateGateway) {
-      this.gatewaySocketDirectory = await mkdtemp(join(tmpdir(), "tc-gateway-"));
-      await chmod(this.gatewaySocketDirectory, 0o700);
-      this.gatewaySocket = join(this.gatewaySocketDirectory, "gateway.sock");
+      this.gatewayEndpoint = await createPrivateGateway();
+      if (this.gatewayEndpoint.token) this.gatewayAuthCleanup = protectPrivateGateway(server, this.gatewayEndpoint.token);
     }
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         const ready = () => { server.removeListener("error", reject); resolve(); };
-        if (this.gatewaySocket) server.listen(this.gatewaySocket, ready); else server.listen(this.port, "127.0.0.1", ready);
+        if (this.gatewayEndpoint) server.listen({ path: this.gatewayEndpoint.socketPath, readableAll: false, writableAll: false }, ready); else server.listen(this.port, "127.0.0.1", ready);
       });
     } catch (error) { await this.clearGatewaySocket(); throw error; }
     this.server = server;
@@ -678,14 +677,15 @@ export class RemoteMcpConnection {
 
   private async stopGateway(): Promise<void> {
     this.gatewayHandler = undefined;
+    this.gatewayAuthCleanup?.(); this.gatewayAuthCleanup = undefined;
     const server = this.server; this.server = undefined;
     if (server?.listening) await new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); });
     await this.clearGatewaySocket();
   }
 
   private async clearGatewaySocket(): Promise<void> {
-    if (this.gatewaySocketDirectory) await rm(this.gatewaySocketDirectory, { recursive: true, force: true });
-    this.gatewaySocket = undefined; this.gatewaySocketDirectory = undefined;
+    this.gatewayAuthCleanup?.(); this.gatewayAuthCleanup = undefined;
+    await removePrivateGateway(this.gatewayEndpoint); this.gatewayEndpoint = undefined;
   }
 
   private async registerClient(input: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">): Promise<OAuthClientInformationFull> {

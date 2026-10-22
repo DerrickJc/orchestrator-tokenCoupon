@@ -69,7 +69,7 @@ export {
 } from "./planner-conversation.js";
 export type { ExternalPlannerPreparation } from "./planner-conversation.js";
 export type { PlannerOperationResult, PlannerRunOptions, PlannerStartOptions } from "./planner-conversation.js";
-export { currentOwner, observeOwner, inspectLock, acquireLockCoordination } from "./owner-lock.js";
+export { currentOwner, processStart, observeOwner, inspectLock, acquireLockCoordination } from "./owner-lock.js";
 export { diagnoseSession, formatSessionDiagnosis, recoverSession } from "./session-recovery.js";
 export type { SessionDiagnosis } from "./session-recovery.js";
 export { PLANNING_DECISION_IDS, PLANNING_STATUSES } from "./planning-protocol.js";

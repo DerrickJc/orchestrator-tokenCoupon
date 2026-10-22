@@ -1,8 +1,8 @@
-/** The persistent gateway currently relies on POSIX socket paths and permissions. */
+/** Windows uses authenticated named pipes; Linux retains its private Unix socket. */
 export function quickTunnelSupport(platform: NodeJS.Platform = process.platform): { available: boolean; reason?: string } {
-  return platform === "win32"
-    ? { available: false, reason: "原生 Windows 暂不支持快捷连接。可继续使用本机 Agent；网页 MCP 可连接已单独配置的固定 HTTPS 网关，或使用 Linux／WSL 后台的快捷连接。" }
-    : { available: true };
+  return platform === "win32" || platform === "linux"
+    ? { available: true }
+    : { available: false, reason: "当前快捷连接支持原生 Windows 和 Linux／WSL；本平台可使用本机 Agent 或单独配置固定 HTTPS 网关。" };
 }
 
 export function assertQuickTunnelSupported(platform: NodeJS.Platform = process.platform): void {

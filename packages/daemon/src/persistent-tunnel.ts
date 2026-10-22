@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireLockCoordination, observeOwner } from "@token-coupon/core";
 import { networkFetch } from "./network-fetch.js";
 import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
 import { assertQuickTunnelSupported } from "./connection-platform.js";
+import { prepareTunnelDirectory } from "./private-gateway.js";
 
 type ProcessOwner = NonNullable<Parameters<typeof observeOwner>[0]>;
 export interface TunnelRecord extends ProcessOwner {
@@ -38,10 +39,10 @@ export async function writeTunnelRecord(directory: string, item: TunnelRecord, c
   finally { await unlink(temporary).catch(() => undefined); }
 }
 
-export async function tunnelControl(record: TunnelRecord, action: "status" | "stop" | "attach" | "detach", signal?: AbortSignal, socketPath?: string): Promise<TunnelRecord> {
+export async function tunnelControl(record: TunnelRecord, action: "status" | "stop" | "attach" | "detach", signal?: AbortSignal, socketPath?: string, gatewayToken?: string): Promise<TunnelRecord> {
   const response = await networkFetch(`http://127.0.0.1:${record.controlPort}/${action}`, {
     method: "POST", headers: { Authorization: `Bearer ${record.token}`, "X-Token-Coupon-Tunnel": "1" },
-    ...(socketPath ? { body: JSON.stringify({ socketPath }) } : {}),
+    ...(socketPath ? { body: JSON.stringify({ socketPath, ...(gatewayToken ? { gatewayToken } : {}) }) } : {}),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(4000)]) : AbortSignal.timeout(4000), redirect: "error",
   });
   if (!response.ok) throw new Error("tunnel_control_unavailable：无法验证常驻连接进程，请检查连接组件；不会创建重复隧道");
@@ -94,7 +95,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
 
   async recover(port: number, directory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime | undefined> {
     assertQuickTunnelSupported();
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await prepareTunnelDirectory(directory);
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     try {
       const record = await liveRecord(directory); if (!record) return undefined;
@@ -105,7 +106,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
 
   async start(executable: string, port: number, directory: string, signal: AbortSignal, exited: () => void): Promise<TunnelRuntime> {
     assertQuickTunnelSupported();
-    await mkdir(directory, { recursive: true, mode: 0o700 }); signal.throwIfAborted();
+    await prepareTunnelDirectory(directory); signal.throwIfAborted();
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     let record: TunnelRecord | undefined;
     let launch: string | undefined;
@@ -145,6 +146,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   }
 
   async stopSaved(directory: string): Promise<void> {
+    await prepareTunnelDirectory(directory);
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
     try { const record = await liveRecord(directory); if (record) await tunnelControl(record, "stop"); }
     finally { await release(); }
@@ -159,9 +161,9 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
     }
     signal.throwIfAborted();
     if (record.phase !== "running" || !record.origin) throw new Error("tunnel_process_exited：常驻隧道已退出，请重新建立连接");
-    let detached = false, timer: ReturnType<typeof setTimeout> | undefined, backendSocket: string | undefined;
+    let detached = false, timer: ReturnType<typeof setTimeout> | undefined, backendSocket: string | undefined, backendToken: string | undefined;
     const unwatch = () => { detached = true; clearTimeout(timer); signal.removeEventListener("abort", cancelled); };
-    const detach = async () => { unwatch(); if (backendSocket) await tunnelControl(record, "detach", undefined, backendSocket); };
+    const detach = async () => { unwatch(); if (backendSocket) await tunnelControl(record, "detach", undefined, backendSocket, backendToken); };
     const cancelled = () => { unwatch(); };
     signal.addEventListener("abort", cancelled, { once: true });
     const check = async () => {
@@ -177,7 +179,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
     };
     timer = setTimeout(() => void check(), this.pollIntervalMs); timer.unref();
     return { origin: record.origin, persistent: true, detach,
-      attach: async socketPath => { await tunnelControl(record, "attach", undefined, socketPath); backendSocket = socketPath; },
+      attach: async (socketPath, gatewayToken) => { await tunnelControl(record, "attach", undefined, socketPath, gatewayToken); backendSocket = socketPath; backendToken = gatewayToken; },
       stop: async () => { unwatch(); await tunnelControl(record, "stop"); },
     };
   }
