@@ -1307,7 +1307,19 @@ R1 增加桌面断连提示、页面和托盘的“重新连接后台”入口�
 
 已完成本机类型检查、生产构建与 859 项全量回归（2 项 Windows 专属用例跳过）。精简 Linux 资源包通过包内 Node 22.12.0 的真实 HTTP 规划/审查/批准/执行/重启闭环，约 134.4 MiB，其中独立 Node 约 114.3 MiB、其余约 20.2 MiB。真实打包 GUI 验证组件确认无隐式安装、任务页、窗口内重连与未提交输入恢复。本机一次性目录的 Codex/Claude 真实按需安装、版本核验与复用均通过，未调用模型；精简资源包还能读取已有本机两种 CLI 的模型目录。`scripts/agent-component-smoke.mjs --agent both` 可显式重跑这项网络测试，完成后清理临时组件，不改已有全局工具。
 
-Windows/Linux 原生 CI 已纳入新增安装边界、资源裁剪和真实临时安装测试；Windows 最终安装器体积以相应提交的 `desktop-build.json` 为准，不能用 Linux 资源总量直接推算。此优化不将当前预览升级为已完成安装升级或真实业务 Runner 的全部验收。
+修复后的 [Windows/Linux CI 39750787710](https://github.com/DerrickJc/orchestrator-tokenCoupon/actions/runs/39750787710) 已通过：Windows 为 19 个文件、48 项专项通过、2 项跳过，并通过真实临时安装两种 Agent、NSIS 构建及启用 sandbox 的 GUI 验收。资源清单统一使用正斜杠；体积门禁同时识别两种分隔符，防止 Windows 路径绕过 Agent 包排除规则。
+
+Windows 同口径实测对比（MiB，四舍五入；优化前 CI `39624633039`，优化后 CI `39750787710`）：
+
+| 项目 | 优化前 | 优化后 | 减少 |
+| --- | ---: | ---: | ---: |
+| 压缩安装器 | 230.6 | 132.6 | 42.5% |
+| 安装后逻辑文件总量 | 742.1 | 420.0 | 43.4% |
+| 后台运行资源（含 Node） | 374.1 | 99.2 | 73.5% |
+
+优化后的安装器为 139,052,393 字节；后台非 Node 资源为 21,177,066 字节，未携带 Agent 执行器。后续安装所选 Agent 会另外占用用户组件目录，不算进基础安装包。保留 Electron 与独立 Node 意味着仍有运行时基础体积；本轮没有承诺压到几十 MB，也未以删除必需 DLL 或关闭安全隔离来缩小体积。参考项目 `v0.14.4` 的 Windows 安装器亦为约 181.1 MiB（189,848,786 字节），来源可核对其 [版本发布页](https://github.com/OrchestratorInc/agent-orchestrator/releases/tag/v0.14.4)。功能数量与安装器体积不直接对应。
+
+最终体积和报告以相应提交的 `desktop-build.json` 与 GUI `desktop-measurements.json` 为准，不混用压缩字节、文件逻辑字节和实际磁盘分配。此优化不将当前预览升级为已完成干净 Windows 安装升级、真实业务 Runner 或 Windows 全量 Vitest 的全部验收。
 
 ## 14. 剩余实施台账（2026-10-21）
 
