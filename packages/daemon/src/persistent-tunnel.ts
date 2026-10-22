@@ -91,6 +91,19 @@ async function observeTunnelOwner(owner: ProcessOwner) {
   return observation;
 }
 
+async function stopTunnel(record: TunnelRecord): Promise<void> {
+  await tunnelControl(record, "stop");
+  // The response precedes process exit. Windows keeps its cwd locked until exit,
+  // so reporting completion earlier races directory cleanup and a new launch.
+  const deadline = Date.now() + 5000;
+  do {
+    const owner = await observeTunnelOwner(record);
+    if (owner.state === "owner_exited" || owner.state === "owner_identity_changed") return;
+    await pause(40);
+  } while (Date.now() < deadline);
+  throw new Error("tunnel_stopping：连接进程仍在退出，请稍后重试；不会结束身份不明的进程");
+}
+
 /** A detached owner drains cloudflared output and survives application daemon restarts. */
 export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   readonly persistentGateway = true;
@@ -143,7 +156,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
       } while (Date.now() < deadline);
       throw new Error("tunnel_supervisor_timeout：常驻连接进程未能启动");
     } catch (error) {
-      if (record && signal.aborted && signal.reason !== PRESERVE_TUNNEL) await tunnelControl(record, "stop").catch(() => undefined);
+      if (record && signal.aborted && signal.reason !== PRESERVE_TUNNEL) await stopTunnel(record).catch(() => undefined);
       throw error;
     } finally { if (launch) await unlink(launch).catch(() => undefined); await release(); }
   }
@@ -151,7 +164,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
   async stopSaved(directory: string): Promise<void> {
     await prepareTunnelDirectory(directory);
     const release = await acquireLockCoordination([tunnelRecordPath(directory)], 3);
-    try { const record = await liveRecord(directory); if (record) await tunnelControl(record, "stop"); }
+    try { const record = await liveRecord(directory); if (record) await stopTunnel(record); }
     finally { await release(); }
   }
 
@@ -183,7 +196,7 @@ export class PersistentQuickTunnelAdapter implements TunnelAdapter {
     timer = setTimeout(() => void check(), this.pollIntervalMs); timer.unref();
     return { origin: record.origin, persistent: true, detach,
       attach: async (socketPath, gatewayToken) => { await tunnelControl(record, "attach", undefined, socketPath, gatewayToken); backendSocket = socketPath; backendToken = gatewayToken; },
-      stop: async () => { unwatch(); await tunnelControl(record, "stop"); },
+      stop: async () => { unwatch(); await stopTunnel(record); },
     };
   }
 }

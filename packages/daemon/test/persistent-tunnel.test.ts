@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, it } from "vitest";
+import { observeOwner } from "@token-coupon/core";
 import { PersistentQuickTunnelAdapter, readTunnelRecord, tunnelControl, tunnelRecordPath } from "../src/persistent-tunnel.js";
 import { createPrivateGateway, protectPrivateGateway, removePrivateGateway } from "../src/private-gateway.js";
 
@@ -58,6 +59,7 @@ it("retains the tunnel, reserves its port during restart, authenticates control 
   expect(await (await fetch(`http://127.0.0.1:${h.port}/mcp`)).text()).toBe("backend-connected");
   expect((await readFile(join(h.root, "starts"), "utf8")).trim().split("\n")).toHaveLength(1);
   await restored!.stop(); expect(await readTunnelRecord(h.directory)).toBeUndefined();
+  if (process.platform === "win32") expect((await observeOwner(record)).state).toBe("owner_exited");
 }, testTimeout);
 
 it("keeps a newly attached backend when the previous daemon detaches late", async () => {
