@@ -671,9 +671,10 @@ it("installs optional Agent components only after reviewing the fixed package an
   await expect.poll(() => h.element("agent-components-list").textContent).toContain("安装已取消");
 });
 it("reuses local Agents without installation, offers manual instructions, and hides the component panel for older daemons", async () => {
-  const h = await page({ hash: "#/settings", settings: defaultSystemSettings(), agentComponents: [{ id: "codex", label: "Codex", package: "@openai/codex", version: "0.163.0", docs: "https://developers.openai.com/codex/cli/", installDirectory: "/home/test/.token-coupon/agents/codex/current", available: true, source: "local", executable: "/usr/local/bin/codex", canInstall: false }] });
+  const h = await page({ hash: "#/settings", settings: defaultSystemSettings(), agentComponents: [{ id: "codex", label: "Codex", package: "@openai/codex", version: "0.163.0", docs: "https://developers.openai.com/codex/cli/", installDirectory: "/home/test/.token-coupon/agents/codex/current", available: true, source: "local", executable: "/usr/local/bin/codex", canInstall: false, operation: { phase: "failed", message: "以前的安装失败提示" } }] });
   await expect.poll(() => h.element("agent-components-list").textContent).toContain("复用本机工具");
   expect(h.element("agent-components-list").textContent).toContain("/usr/local/bin/codex");
+  expect(h.element("agent-components-list").textContent).not.toContain("以前的安装失败提示");
   expect([...h.element("agent-components-list").querySelectorAll("button")].some(button => button.textContent === "按需安装")).toBe(false);
   h.element("agent-components-list").querySelector<HTMLButtonElement>("button")!.click(); await expect.poll(() => h.copied.length).toBe(1);
   expect(h.copied[0]).toBe("'/usr/local/bin/codex'"); expect(h.posts).toHaveLength(0);

@@ -1127,7 +1127,7 @@ async function refreshAgentComponents() {
       badge.textContent = busy ? "安装中" : item.available ? item.source === "managed" ? "组件已就绪" : "复用本机工具" : "尚未就绪";
       header.append(title, badge); row.append(header);
       const message = document.createElement("p"); message.className = "hint"; message.setAttribute("role", "status");
-      message.textContent = item.operation?.message || (item.available ? "将复用此工具。可复制启动命令，在终端完成登录；检测到程序不代表已登录或模型可用。" : item.reason || "使用时再安装。"); row.append(message);
+      message.textContent = busy ? item.operation.message : item.available ? "将复用此工具。可复制启动命令，在终端完成登录；检测到程序不代表已登录或模型可用。" : item.operation?.message || item.reason || "使用时再安装。"; row.append(message);
       const details = document.createElement("details"); details.dataset.component = item.id; details.open = expanded.has(item.id);
       const summary = document.createElement("summary"); summary.textContent = "路径与安装信息"; details.append(summary);
       for (const text of [item.executable ? `当前程序：${item.executable}` : "当前程序：未检测到", `按需安装：${item.package}@${item.version}`, `组件目录：${item.installDirectory}`, `官方说明：${item.docs}`]) { const line = document.createElement("p"); line.className = "hint"; line.textContent = text; details.append(line); }
