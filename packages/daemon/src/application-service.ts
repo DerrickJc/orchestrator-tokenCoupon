@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -26,6 +26,7 @@ import {
   validateRunnerInteractionReply,
   renderTaskPrompt,
   taskWithExecutionSelection,
+  atomicWrite,
 } from "@token-coupon/core";
 import type {
   ExecutionConfig, PlanReviewRecord, PlannerConfig, RunnerContext, RunnerEvent, RunnerInput, RunnerInteractionOwner, RunnerInteractionReply, RunnerInteractionRequest, RunnerInteractionResolution,
@@ -1077,8 +1078,7 @@ export class ApplicationService {
   private async saveJob(job: JobRecord): Promise<void> { await this.writeAtomic(join(this.jobsDirectory, `${job.jobId}.json`), JSON.stringify(job, null, 2) + "\n"); }
   private async writeAtomic(path: string, data: string): Promise<void> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
-    await writeFile(temporary, data, { mode: 0o600 }); await rename(temporary, path);
+    await atomicWrite(path, data);
   }
 }
 

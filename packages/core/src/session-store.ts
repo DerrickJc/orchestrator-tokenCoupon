@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { atomicWrite } from "./atomic-file.js";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PlanDefinition } from "./plan.js";
 import type { GitIsolationJournal, SessionControlKind, SessionControlRequest, SessionIsolation, SessionRecord, SessionSchedulerEvent, SessionSnapshot, SessionTaskState } from "./session-types.js";
@@ -322,17 +323,6 @@ function parseIsolationJournal(value: unknown, sessionId: string, workspace: str
     throw new Error("Git worktree journal 与仓库边界不匹配");
   }
   return { schemaVersion: raw.schemaVersion as GitIsolationJournal["schemaVersion"], sessionId, status: raw.status as GitIsolationJournal["status"], integrationHead: raw.integrationHead, attempts: parsed as unknown as GitIsolationJournal["attempts"], updatedAt: raw.updatedAt };
-}
-
-async function atomicWrite(path: string, contents: string): Promise<void> {
-  const temporary = join(dirname(path), `.snapshot-${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
-    await rename(temporary, path);
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
-  }
 }
 
 function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, sessionId: string): SessionSnapshot {

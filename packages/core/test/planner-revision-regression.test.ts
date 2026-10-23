@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approvePlannerDraft, checkPlan, DeepSeekPlanner, effectiveRequirements, loadPlannerConversation,
   MockPlanReviewer, PlannerStore, replyToPlanner, replacePlannerDraft, retryPlannerTurn, reviewPlannerDraft, runApprovedPlanner,
@@ -11,7 +11,7 @@ import type { PlannerConversationSnapshot, PlannerDraft, Runner } from "../src/i
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/planner-revision-failure.json", import.meta.url), "utf8"));
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 async function seed() {
   const root = await mkdtemp(join(tmpdir(), "planner-revision-regression-"));
@@ -45,6 +45,22 @@ function replay(responseIndex: number, alter?: (reply: any, messageId: string) =
 }
 
 describe("recorded phase3.5-new4 draft revision regression", () => {
+  it("recovers a draft written before a failed snapshot rename without overwriting that immutable version", async () => {
+    const options = await seed();
+    const save = PlannerStore.prototype.save; let failed = false;
+    vi.spyOn(PlannerStore.prototype, "save").mockImplementation(async function (this: PlannerStore, snapshot) {
+      if (!failed && snapshot.status === "draft_ready" && snapshot.draftRevision === 3) { failed = true; throw Object.assign(new Error("EPERM: rename conversation.json"), { code: "EPERM" }); }
+      return save.call(this, snapshot);
+    });
+    const first = await replyToPlanner({ ...options, message: fixture.request, planner: replay(3).planner });
+    expect(first.error).toContain("EPERM"); expect(first.snapshot.draftRevision).toBe(2);
+    const orphan = await readFile(join(options.workspace, ".token-coupon", "planners", options.planningId, "drafts", "3.json"), "utf8");
+    const retry = await retryPlannerTurn({ ...options, planner: replay(3).planner });
+    expect(retry.error).toBeUndefined(); expect(retry.draft!.draftRevision).toBe(4);
+    expect(retry.snapshot.turns.map(turn => turn.status)).toEqual(["failed", "succeeded"]);
+    expect(await readFile(join(options.workspace, ".token-coupon", "planners", options.planningId, "drafts", "3.json"), "utf8")).toBe(orphan);
+    expect((await options.store.load(options.planningId)).draftRevision).toBe(4);
+  });
   it("retries the archived failed turn using the same user message without losing failure history", async () => {
     const options = await seed();
     const recorded = fixture.failedTurn;

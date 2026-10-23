@@ -1,6 +1,7 @@
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { atomicWrite } from "@token-coupon/core";
 
 export type WebSource = "chatgpt" | "claude" | "other" | "any";
 export interface WebActor { grantId: string; clientId: string; source?: Exclude<WebSource, "any">; assertActive?: () => Promise<void>; }
@@ -47,8 +48,8 @@ export class WebHandoffCoordinator {
   }
   async save(slot: HandoffSlot): Promise<void> {
     slot.updatedAt = new Date().toISOString();
-    const path = join(this.directory, `${this.key(slot.workspaceId, slot.planningId, slot.role)}.json`), temp = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temp, JSON.stringify(slot, null, 2) + "\n", { mode: 0o600 }); await rename(temp, path);
+    const path = join(this.directory, `${this.key(slot.workspaceId, slot.planningId, slot.role)}.json`);
+    await atomicWrite(path, JSON.stringify(slot, null, 2) + "\n");
   }
   async slots(workspaceId: string, planningId?: string): Promise<HandoffSlot[]> {
     const slots: HandoffSlot[] = [];
@@ -72,7 +73,9 @@ export class WebHandoffCoordinator {
     const receipt = slot.claimHistory?.find(item => item.grantId === actor.grantId && item.requestKey === requestKey);
     if (receipt && (!slot.claim || slot.claim.requestKey !== requestKey || slot.generation !== receipt.generation || slot.claim.expiresAt <= Date.now())) throw new Error("handoff_superseded：原领取已归还、交接或过期，请用新的 requestKey 领取");
     if (slot.claim && slot.claim.expiresAt > Date.now()) {
-      if (slot.claim.grantId !== actor.grantId || slot.claim.requestKey !== requestKey) throw new Error("handoff_owned：操作已被领取，请归还或在本地交接");
+      if (slot.claim.grantId !== actor.grantId || slot.claim.requestKey !== requestKey) throw new Error(slot.claim.grantId === actor.grantId
+        ? "handoff_owned：当前网页连接已用另一 requestKey 领取。请复用原 requestKey 和领取凭证；如已丢失，请在本地控制台打开该计划的‘网页规划与审查交接’，点击‘交给 ChatGPT 继续规划’或对应网页按钮后重新领取。"
+        : "handoff_owned：操作由其他网页连接领取。请由原连接归还，或在本地控制台的‘网页规划与审查交接’中转交给目标网页；不要反复生成新 requestKey。");
     } else {
       slot.generation++;
       const now = Date.now();

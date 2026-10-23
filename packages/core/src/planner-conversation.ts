@@ -295,7 +295,7 @@ export async function replacePlannerDraft(options: { planningId: string; workspa
     const hash = canonicalHash(plan);
     if (previous?.planHash === hash) return { snapshot, draft: previous, draftChanged: false };
     const draft: PlannerDraft = {
-      schemaVersion: 1, planningId: options.planningId, draftRevision: (snapshot.draftRevision ?? 0) + 1,
+      schemaVersion: 1, planningId: options.planningId, draftRevision: await store.nextDraftRevision(options.planningId, (snapshot.draftRevision ?? 0) + 1),
       plan, message: "用户导入并编辑了计划。", source: "user", context: snapshot.context, planHash: hash, createdAt: new Date().toISOString(),
     };
     await store.writeDraft(draft);
@@ -822,7 +822,7 @@ async function executeTurn(store: PlannerStore, initial: PlannerConversationSnap
     const assistant = { messageId: randomUUID(), role: "assistant" as const, content: JSON.stringify(reply) };
     if (Buffer.byteLength(assistant.content, "utf8") > 64 * 1024) throw new PlannerOperationError("planner_reply_too_large", "Planner 最终回复超过 64 KiB");
     const newDraft = reply.kind === "draft" && (!currentDraft || currentDraft.planHash !== canonicalHash(reply.plan))
-      ? makeDraft(snapshot, reply, evidence)
+      ? makeDraft(snapshot, reply, evidence, await store.nextDraftRevision(snapshot.planningId, (snapshot.draftRevision ?? 0) + 1))
       : undefined;
     const returnedDraft = reply.kind === "draft" ? newDraft ?? currentDraft : undefined;
     await beforeCommit?.();
@@ -932,12 +932,11 @@ function mergeConfirmationRequirements(
   return { ...reply, requirementsUpdate: { ...reply.requirementsUpdate, messageDecisions, changes } };
 }
 
-function makeDraft(snapshot: PlannerConversationSnapshot, reply: PlannerReply, evidence: RepositoryEvidence[]): PlannerDraft {
+function makeDraft(snapshot: PlannerConversationSnapshot, reply: PlannerReply, evidence: RepositoryEvidence[], revision: number): PlannerDraft {
   if (reply.kind !== "draft" || !reply.plan) throw new Error("内部错误：draft 缺少计划");
-  const previousRevision = snapshot.draftRevision ?? 0;
   const hash = canonicalHash(reply.plan);
   return {
-    schemaVersion: 1, planningId: snapshot.planningId, draftRevision: previousRevision + 1,
+    schemaVersion: 1, planningId: snapshot.planningId, draftRevision: revision,
     plan: reply.plan, message: reply.message, source: "model", context: evidence, planHash: hash, createdAt: new Date().toISOString(),
   };
 }

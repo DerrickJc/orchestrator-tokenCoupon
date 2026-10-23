@@ -1,10 +1,10 @@
 import { randomUUID, randomBytes } from "node:crypto";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_REPOSITORY_OUTPUT_BUDGET, PlannerStore, RepositoryReader, createHistoryReader, externalPlannerProtocol, externalReviewProtocol,
   initializePlannerConversation, prepareExternalPlannerInput, prepareExternalReviewInput,
-  reviewPlannerDraft, submitExternalPlannerReply, verifyRepositoryEvidence, canonicalHash,
+  reviewPlannerDraft, submitExternalPlannerReply, verifyRepositoryEvidence, canonicalHash, atomicWrite,
 } from "@token-coupon/core";
 import type { ExecutionConfig, ExternalPlannerPreparation, PlanReviewInput, PlannerConfig, RepositoryEvidence, PlannerConversationSnapshot } from "@token-coupon/core";
 import { WebHandoffCoordinator } from "./web-handoff.js";
@@ -392,8 +392,8 @@ export class ExternalPlanningService {
     return op;
   }
   private async save(op: ExternalOperation): Promise<void> {
-    const target = join(this.directory, `${op.operationId}.json`), temporary = `${target}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(op, null, 2) + "\n", { mode: 0o600 }); await rename(temporary, target);
+    const target = join(this.directory, `${op.operationId}.json`);
+    await atomicWrite(target, JSON.stringify(op, null, 2) + "\n");
   }
   private async serial<T>(id: string, action: () => Promise<T>): Promise<T> {
     const before = this.queues.get(id) ?? Promise.resolve();

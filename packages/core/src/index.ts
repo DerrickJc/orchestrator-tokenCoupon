@@ -41,7 +41,7 @@ export type { WorktreeSetupCommand, WorktreeSetupProfile } from "./worktree-setu
 export { cleanupSessionWorktrees, continueSessionLanding, formatSession, resumeSession, retrySession, runPlan, validateMockTaskScenarios, validateVerificationTask } from "./task-orchestrator.js";
 export type { ContinueLandingOptions, PlanRunOptions, RetryOptions, SessionCleanupOptions, SessionOperationOptions, SessionOperationResult, TaskRunnerFactory, TaskRunnerFactoryOptions } from "./task-orchestrator.js";
 export { DEFAULT_REPOSITORY_OUTPUT_BUDGET, RepositoryReader, repositoryToolDefinitions, verifyRepositoryEvidence } from "./repository-reader.js";
-export { PlannerStore, PlannerLockError, canonicalHash, validateDraft } from "./planner-store.js";
+export { PlannerStore, PlannerLockError, canonicalHash, validateDraft, atomicWrite } from "./planner-store.js";
 export { ReviewStore, validateReviewRecord } from "./review-store.js";
 export { PlannerInvocationError } from "./planner-runtime.js";
 export type { PlannerEventObserver } from "./planner-runtime.js";
