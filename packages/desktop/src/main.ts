@@ -75,7 +75,7 @@ function registerIpc(): void {
   ipcMain.handle(DESKTOP_IPC.copyText, (event, text: unknown) => {
     assertTrustedSender(event);
     if (!isDesktopClipboardText(text)) throw new Error("desktop_clipboard_text_invalid：复制内容必须为文本且不超过 1 Mi 字符");
-    clipboard.writeText(text);
+    return clipboard.writeText(text);
   });
   ipcMain.handle(DESKTOP_IPC.attachment, event => { assertTrustedSender(event); return attachment; });
   ipcMain.handle(DESKTOP_IPC.connectionState, event => { assertTrustedSender(event); return reconnector.connectionState; });

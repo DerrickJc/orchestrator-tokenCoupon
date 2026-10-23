@@ -114,6 +114,28 @@ async function localClient(origin) {
   return client;
 }
 
+async function verifyClipboard(page) {
+  const text = `Token Coupon clipboard verification ${Date.now()}`;
+  await bounded(application.evaluate(async ({ clipboard }) => { globalThis.__tokenCouponClipboardBeforeTest = await clipboard.read(); }), "save clipboard formats");
+  try {
+    await page.evaluate(value => {
+      document.querySelector("#copy-fallback-text").value = value;
+      document.querySelector("#copy-fallback-dialog").showModal();
+    }, text);
+    await page.click("#copy-fallback-copy");
+    await page.waitForFunction(() => !document.querySelector("#copy-fallback-dialog").open);
+    assert.equal(await bounded(application.evaluate(async ({ clipboard }, value) => (await clipboard.readText()) === value, text), "verify native clipboard"), true);
+  } finally {
+    await bounded(application.evaluate(async ({ clipboard }, value) => {
+      if ((await clipboard.readText()) === value) {
+        if (globalThis.__tokenCouponClipboardBeforeTest.length) await clipboard.write(globalThis.__tokenCouponClipboardBeforeTest);
+        else clipboard.clear();
+      }
+      delete globalThis.__tokenCouponClipboardBeforeTest;
+    }, text), "restore clipboard formats");
+  }
+}
+
 async function verifyAppearance(page, origin) {
   console.log("GUI smoke：检查键盘导航、真实任务页深浅色和减少动画偏好…");
   await page.focus("#skip-main"); await page.keyboard.press("Enter");
@@ -350,6 +372,7 @@ try {
   assert(frame); assert.equal(await frame.evaluate(() => typeof window.tokenCouponDesktop), "undefined");
   await iframe.evaluate(element => element.remove());
   await verifyAgentComponents(page);
+  await verifyClipboard(page);
   const todo = await verifyAppearance(page, attachment.origin);
   await verifySecondInstance(attachment);
   attachment = await verifyLiveReconnect(page, attachment, todo);
@@ -371,7 +394,7 @@ try {
   await writeFile(join(outputDirectory, "desktop-measurements.json"), `${JSON.stringify(resourceMeasurements, null, 2)}\n`);
   const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
-    notificationPreferencePersistence: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
+    notificationPreferencePersistence: "passed", nativeClipboardCopy: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
     liveDaemonReconnect: "passed", draftRecoveryNoReplay: "passed", secondInstanceProfileGuard: "passed",
     optionalAgentConsentNoImplicitInstall: "passed",
     systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed", planningTodoNavigation: "passed",
