@@ -847,6 +847,21 @@ it("shows manual clipboard guidance without reporting an operation failure", asy
   expect(h.visible("page-error")).toBe(true);
 });
 
+it("distinguishes ingress receipt, HTTP rejection and interrupted connections in the diagnostics view", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  h.setRemote({ gatewayTracing: { enabled: true, lastRequestAt: Date.now() }, recentCalls: [
+    { traceId: "one", at: Date.now(), stage: "ingress", requestState: "received", httpMethod: "POST", route: "/mcp", authorization: "missing" },
+    { traceId: "one", at: Date.now(), stage: "ingress", requestState: "completed", httpMethod: "POST", route: "/mcp", httpStatus: 401, code: "oauth_authorization_required" },
+    { traceId: "two", at: Date.now(), stage: "ingress", requestState: "aborted", httpMethod: "POST", route: "/mcp", code: "gateway_connection_aborted" },
+  ] });
+  h.element("refresh").click();
+  await expect.poll(() => h.element("connection-recent-calls").textContent).toContain("入口已收到");
+  expect(h.element("connection-recent-calls").textContent).toContain("响应已完成");
+  expect(h.element("connection-recent-calls").textContent).toContain("HTTP 401");
+  expect(h.element("connection-recent-calls").textContent).toContain("连接中断");
+  expect(h.element("connection-tracing-status").textContent).toContain("尚未收到工具调用");
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();

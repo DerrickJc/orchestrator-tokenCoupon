@@ -899,11 +899,15 @@ function renderConnectionClients() {
   show($("#connection-history"), !!old.length);
   const check = remote.probeCheck;
   $("#connection-check-details").textContent = `${remote.lastProbeAt ? `最近公网自检：${new Date(remote.lastProbeAt).toLocaleString()}` : "尚无成功的公网自检"}${check ? ` · 检查 ${check.attempt}/${check.maxAttempts} · ${check.state}${check.lastError ? ` · ${check.lastError}` : ""}` : ""}${remote.diagnosticsUnavailable ? " · 调用诊断存储暂不可用，不能保证记录完整" : ""}`;
+  let tracing = $("#connection-tracing-status");
+  if (!tracing) { tracing = document.createElement("p"); tracing.id = "connection-tracing-status"; tracing.className = "hint"; $("#connection-check-details").after(tracing); }
+  tracing.textContent = remote.gatewayTracing?.enabled ? `入口追踪已启用 · ${remote.gatewayTracing.lastRequestAt ? `最近请求：${new Date(remote.gatewayTracing.lastRequestAt).toLocaleString()}` : "尚未收到外部请求"} · ${remote.gatewayTracing.lastToolAt ? `最近工具调用：${new Date(remote.gatewayTracing.lastToolAt).toLocaleString()}` : "尚未收到工具调用"}` : "当前后台尚未提供完整入口追踪，请更新后台后查看。";
   const calls = $("#connection-recent-calls"); calls.replaceChildren();
   if (!remote.recentCalls?.length) calls.innerHTML = '<p class="empty-state">当前入口尚无网页请求记录。若 GPT 已报错，请先核对网页保存的 URL；内部自检不显示为业务调用。</p>';
   for (const entry of remote.recentCalls || []) {
     const line = document.createElement("p"); line.className = "small connection-call";
-    line.textContent = `${new Date(entry.at).toLocaleString()} · ${entry.stage === "oauth" ? `OAuth ${entry.method === "refresh_token" ? "刷新令牌" : "换取令牌"}${entry.outcome === "success" ? "成功" : "失败"}` : entry.stage === "authentication" ? "认证失败，工具未执行" : entry.stage === "tool" ? `${entry.tool} ${entry.outcome === "success" ? "成功" : "失败"}` : `${entry.method || "请求"} 已到达网关`} · ${entry.code || `HTTP ${entry.httpStatus || "—"}`} ${entry.requestFields ? `· 已携带字段：${entry.requestFields.join("、") || "无"}` : ""} · 追踪 ID：${entry.traceId}`; calls.append(line);
+    const stage = entry.stage === "ingress" ? `${entry.httpMethod || "请求"} ${entry.route === "other" ? "其他路径" : entry.route || ""} · ${{ received: "入口已收到", completed: "响应已完成", aborted: "连接中断" }[entry.requestState] || "入口记录"}` : entry.stage === "oauth" ? `OAuth ${entry.method === "refresh_token" ? "刷新令牌" : "换取令牌"}${entry.outcome === "success" ? "成功" : "失败"}` : entry.stage === "authentication" ? "认证失败，工具未执行" : entry.stage === "tool" ? `${entry.tool} ${entry.outcome === "success" ? "成功" : "失败"}` : `${entry.method || "请求"} 已到达网关`;
+    line.textContent = `${new Date(entry.at).toLocaleString()} · ${stage} · ${entry.code || `HTTP ${entry.httpStatus || "—"}`}${entry.httpStatus && entry.code ? ` · HTTP ${entry.httpStatus}` : ""}${entry.authorization ? ` · 认证头：${{ missing: "未携带", bearer: "已携带 Bearer", other: "其他格式" }[entry.authorization]}` : ""}${entry.accept ? ` · Accept：${entry.accept} · Content-Type：${entry.contentType} · 协议：${entry.protocolVersion}` : ""}${entry.requestFields ? ` · 已携带字段：${entry.requestFields.join("、") || "无"}` : ""}${entry.cloudflareRay ? ` · Cloudflare Ray：${entry.cloudflareRay}` : ""} · 追踪 ID：${entry.traceId}`; calls.append(line);
   }
   show($("#connection-return-plan"), !!state.connectionReturn);
 }

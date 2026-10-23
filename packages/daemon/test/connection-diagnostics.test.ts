@@ -30,3 +30,13 @@ it("reports damaged or unavailable diagnostics without failing the business requ
   await expect(failed.record({ traceId: randomUUID(), at: Date.now(), endpoint: "https://demo.trycloudflare.com/mcp", stage: "authentication", outcome: "error", code: "oauth_token_invalid" })).resolves.toBeUndefined();
   expect(failed.storageUnavailable).toBe(true);
 });
+
+it("keeps only classified ingress metadata, never raw headers, routes or session values", async () => {
+  const path = await mkdtemp(join(tmpdir(), "tc-ingress-privacy-")); roots.push(path);
+  const diagnostics = new ConnectionDiagnostics(path);
+  await diagnostics.record({ traceId: randomUUID(), at: Date.now(), endpoint: "https://demo.trycloudflare.com/mcp", stage: "ingress", outcome: "received", requestState: "received", httpMethod: "POST", route: "/mcp", authorization: "bearer", accept: "json_and_sse", hasSessionId: true, protocolVersion: "2025-03-26", cloudflareRay: "0123456789abcdef-SJC" });
+  await diagnostics.record({ ...diagnostics.recent()[0]!, route: "/PRIVATE_PATH?token=SECRET", protocolVersion: "PRIVATE_VERSION", cloudflareRay: "PRIVATE_RAY", hasSessionId: "PRIVATE_SESSION", authorization: "Bearer SECRET" } as unknown as ConnectionObservation);
+  expect(diagnostics.recent()[0]).toMatchObject({ requestState: "received", route: "/mcp", authorization: "bearer", hasSessionId: true });
+  const saved = await readFile(join(path, "remote-mcp-diagnostics.json"), "utf8");
+  expect(saved).not.toMatch(/PRIVATE_|SECRET|Bearer/);
+});

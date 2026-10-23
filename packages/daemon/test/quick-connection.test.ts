@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,6 +94,36 @@ async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[
 }
 
 describe("Quick Tunnel connection", () => {
+  it("traces Host and route rejection, missing credentials and one authenticated tool call without logging secrets", async () => {
+    const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const wrongHost = await new Promise<{ status: number | undefined; trace: string | string[] | undefined }>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${h.port}/mcp`, { headers: { Host: "not-allowed.example" } }, response => {
+        response.resume(); response.once("end", () => resolve({ status: response.statusCode, trace: response.headers["x-token-coupon-trace"] }));
+      }); request.once("error", reject); request.end();
+    });
+    expect(wrongHost.status).toBe(421); const hostTrace = wrongHost.trace;
+    const missing = await h.proxyFetch(`${h.origin}/PRIVATE_ROUTE?secret=PRIVATE_QUERY`); expect(missing.status).toBe(404); await missing.body?.cancel();
+    const denied = await h.proxyFetch(`${h.origin}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", "Mcp-Session-Id": "PRIVATE_SESSION", "Mcp-Protocol-Version": "PRIVATE_VERSION", "X-Token-Coupon-Trace": "forged-trace" }, body: JSON.stringify({ method: "tools/call", params: { secret: "PRIVATE_BODY" } }) });
+    expect(denied.status).toBe(401); const deniedTrace = denied.headers.get("x-token-coupon-trace"); await denied.body?.cancel();
+    await expect.poll(() => h.remote.status().recentCalls?.find(item => item.traceId === hostTrace && item.requestState === "completed")).toMatchObject({ stage: "ingress", httpStatus: 421, code: "remote_host_invalid" });
+    expect(h.remote.status().recentCalls?.some(item => item.traceId === deniedTrace && item.stage === "authentication")).toBe(true);
+    expect(h.remote.status().recentCalls?.find(item => item.traceId === deniedTrace && item.requestState === "received")).toMatchObject({ route: "/mcp", httpMethod: "POST", authorization: "missing", protocolVersion: "other", hasSessionId: true });
+    const auth = await authorize(h, ["planning:read"]);
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, scopes: ["planning:read"] });
+    const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+    const exchange = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` }) });
+    const tokens = await exchange.json() as { access_token: string };
+    const client = new Client({ name: "ingress-trace-test", version: "1" }); cleanups.push(() => client.close());
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${h.origin}/mcp`), { fetch: h.proxyFetch, requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } } }));
+    expect((await client.callTool({ name: "workspace_query", arguments: {} })).isError).not.toBe(true);
+    await expect.poll(() => h.remote.status().recentCalls?.find(item => item.method === "tools/call" && item.requestState === "completed")).toBeDefined();
+    const tool = h.remote.status().recentCalls!.find(item => item.stage === "tool" && item.tool === "workspace_query")!;
+    const related = h.remote.status().recentCalls!.filter(item => item.traceId === tool.traceId);
+    expect(related).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "ingress", requestState: "received", authorization: "bearer" }), expect.objectContaining({ stage: "transport", method: "tools/call", httpStatus: 200 }), expect.objectContaining({ stage: "ingress", requestState: "completed", method: "tools/call", httpStatus: 200 })]));
+    expect(h.remote.status().gatewayTracing?.lastToolAt).toBeDefined();
+    const saved = await readFile(join(h.dataDirectory, "remote-mcp-diagnostics.json"), "utf8");
+    for (const secret of [tokens.access_token, auth.verifier, "PRIVATE_ROUTE", "PRIVATE_QUERY", "PRIVATE_SESSION", "PRIVATE_VERSION", "PRIVATE_BODY", "forged-trace"]) expect(saved).not.toContain(secret);
+  });
   it.each(["none", "client_secret_post", "omit"] as const)("keeps DCR authentication consistent through Claude callback, token exchange, refresh and MCP (%s)", async authMethod => {
     const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
     const auth = await authorize(h, ["planning:read"], { clientName: "Claude", redirectUri: "https://claude.ai/api/mcp/auth_callback", authMethod });

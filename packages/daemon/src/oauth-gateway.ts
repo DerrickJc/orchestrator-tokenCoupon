@@ -17,6 +17,7 @@ import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick
 import { PersistentQuickTunnelAdapter } from "./persistent-tunnel.js";
 import { createProbeMcpServer, probeRemoteMcp, ProbeError, retryableProbeFailure, type PublicProbe } from "./remote-probe.js";
 import { ConnectionDiagnostics, type ConnectionObservation } from "./connection-diagnostics.js";
+import { gatewayTrace, traceGatewayRequest } from "./gateway-tracing.js";
 import { assertQuickTunnelSupported, quickTunnelSupport } from "./connection-platform.js";
 import { createPrivateGateway, protectPrivateGateway, removePrivateGateway, type PrivateGatewayEndpoint } from "./private-gateway.js";
 
@@ -73,6 +74,7 @@ export interface RemoteConnectionStatus {
   clients?: Array<{ grantId: string; clientId: string; name: string; source: string; workspaceIds: string[]; mcpUrl: string; createdAt: number; expiresAt: number; status: "active" | "expired" | "revoked" | "address_changed"; oauthState: "awaiting_token" | "token_issued"; lastCall?: ConnectionObservation }>;
   recentCalls?: ConnectionObservation[];
   diagnosticsUnavailable?: boolean;
+  gatewayTracing?: { enabled: true; lastRequestAt?: number; lastToolAt?: number };
   authorizationRequests?: Array<{ requestId: string; clientId: string; clientName: string; createdAt: number; expiresAt: number; status: "pending" | "approved" | "rejected" | "expired" }>;
   authorizationStates?: Array<{ grantId: string; source: string; workspaceIds: string[]; status: "active" | "expired" | "revoked" }>;
 }
@@ -202,6 +204,9 @@ export class RemoteMcpConnection {
     base.authorizationRequests = authorizationHistory;
     base.authorizationStates = this.state.grants.slice(-100).map(grant => ({ grantId: grant.grantId, source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], status: grant.revokedAt ? "revoked" : grant.expiresAt <= now ? "expired" : "active" }));
     const calls = this.diagnostics.recent();
+    const currentCalls = calls.filter(item => item.endpoint === `${this.config?.publicOrigin}/mcp`);
+    const lastRequestAt = currentCalls.filter(item => item.stage === "ingress" && item.requestState === "received").at(-1)?.at, lastToolAt = currentCalls.filter(item => item.stage === "tool").at(-1)?.at;
+    base.gatewayTracing = { enabled: true, ...(lastRequestAt === undefined ? {} : { lastRequestAt }), ...(lastToolAt === undefined ? {} : { lastToolAt }) };
     base.clients = [...this.state.grants].sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(grant => {
       const lastCall = calls.filter(item => item.grantId === grant.grantId && item.endpoint === grant.resource && item.stage === "tool").at(-1);
       return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端", source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
@@ -567,8 +572,12 @@ export class RemoteMcpConnection {
     const app = express();
     const allowedHosts = new Set([new URL(origin).host, `127.0.0.1:${this.port}`, `localhost:${this.port}`]);
     app.use(((request: ExpressRequest, response: ExpressResponse, next: (error?: unknown) => void) => {
+      const auth = request.headers.authorization, candidate = typeof auth === "string" && /^Bearer\s+\S+$/i.test(auth) ? auth.replace(/^Bearer\s+/i, "") : "";
+      const challenge = request.headers["x-token-coupon-probe"];
+      const internal = !!candidate && (this.probeTokens.get(digest(candidate)) ?? 0) > Date.now() || request.method === "GET" && typeof challenge === "string" && (this.probeTokens.get(digest(challenge)) ?? 0) > Date.now();
+      const trace = traceGatewayRequest(request, response, `${origin}/mcp`, event => this.diagnostics.record(event), internal);
       const host = request.headers.host?.toLowerCase();
-      if (!host || !allowedHosts.has(host)) { response.status(421).json({ error: "remote_host_invalid" }); return; }
+      if (!host || !allowedHosts.has(host)) { response.status(421).json({ error: "remote_host_invalid", traceId: trace.traceId }); return; }
       response.setHeader("X-Content-Type-Options", "nosniff"); response.setHeader("Referrer-Policy", "no-referrer"); response.setHeader("Cache-Control", "no-store");
       next();
     }) as unknown as Handler);
@@ -584,7 +593,7 @@ export class RemoteMcpConnection {
     // Token diagnostics persist field names and machine codes, never credential values.
     app.use(((request: ExpressRequest, response: ExpressResponse, next: () => void) => {
       if (request.method !== "POST" || (request.url || "").split("?", 1)[0] !== "/token") { next(); return; }
-      const traceId = randomUUID(), startedAt = Date.now(), context: { code?: string } = {};
+      const traceId = gatewayTrace(request)?.traceId ?? randomUUID(), startedAt = Date.now(), context: { code?: string } = {};
       response.setHeader("X-Token-Coupon-Trace", traceId);
       const json = response.json.bind(response);
       response.json = (value: unknown) => {
@@ -606,7 +615,7 @@ export class RemoteMcpConnection {
     }) as unknown as Handler);
     app.use(mcpAuthRouter({ provider: this.provider, issuerUrl: new URL(origin), baseUrl: new URL(origin), resourceServerUrl: new URL(`${origin}/mcp`), scopesSupported: SUPPORTED_SCOPES, resourceName: "Token Coupon local project tools" }) as unknown as Handler);
     app.all("/mcp", async (request, response) => {
-      const traceId = randomUUID(), startedAt = Date.now(), endpoint = `${origin}/mcp`;
+      const trace = gatewayTrace(request), traceId = trace?.traceId ?? randomUUID(), startedAt = Date.now(), endpoint = `${origin}/mcp`;
       response.setHeader("X-Token-Coupon-Trace", traceId);
       const authorization = request.headers.authorization;
       const token = typeof authorization === "string" && /^Bearer\s+\S+$/i.test(authorization) ? authorization.replace(/^Bearer\s+/i, "") : "";
@@ -618,6 +627,7 @@ export class RemoteMcpConnection {
       if (!principal && !probe) {
         const known = token && token.length <= 256 ? this.state.grants.find(grant => grant.access.some(access => safeEqual(access.digest, digest(token)))) : undefined;
         const code = known?.revokedAt ? "oauth_grant_revoked" : known && known.resource !== endpoint ? "oauth_resource_changed" : known ? "oauth_token_expired" : "oauth_authorization_required";
+        if (trace) trace.code = code;
         if (!internalChallenge) await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "authentication", outcome: "error", code, httpStatus: 401,
           ...(known ? { grantId: known.grantId, clientId: known.clientId } : {}) });
         const metadata = `https://${new URL(origin).host}/.well-known/oauth-protected-resource/mcp`;
@@ -637,12 +647,14 @@ export class RemoteMcpConnection {
         const body = request.method === "POST" ? await parseBody(request, 256 * 1024) : undefined;
         const proposed = (body as { method?: unknown } | undefined)?.method;
         if (typeof proposed === "string" && ["initialize", "tools/list", "tools/call", "notifications/initialized", "ping"].includes(proposed)) method = proposed;
+        if (trace) trace.method = method;
         const server = probe ? createProbeMcpServer() : createMcpServer(this.service, principal!, { traceId, record: event => this.diagnostics.record({ ...event, at: Date.now(), endpoint, stage: "tool", ...identity }) });
         const transport = new (await import("@modelcontextprotocol/sdk/server/streamableHttp.js")).StreamableHTTPServerTransport({ enableJsonResponse: true });
         response.once("close", () => { void server.close().catch(() => undefined); });
         await server.connect(transport as import("@modelcontextprotocol/sdk/shared/transport.js").Transport);
         await transport.handleRequest(request, response, body);
       } catch {
+        if (trace) trace.code = "mcp_transport_failed";
         if (!probe) await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "transport", outcome: "error", code: "mcp_transport_failed", durationMs: Date.now() - startedAt, ...identity });
         if (!response.headersSent) response.status(500).json({ error: "mcp_transport_failed", traceId });
         else response.end();
