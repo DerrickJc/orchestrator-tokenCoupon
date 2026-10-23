@@ -1002,7 +1002,7 @@ async function copyResumePrompt() {
     "先调用 planning_query，使用上面的 workspaceId / planningId 一次核实授权并读取最新需求、草案、审查与 handoffs，无需重复 workspace_query 或 handoff_query。",
     "从返回的 handoffs 选择当前待处理操作，直接 handoff_claim 领取并获取协议；没有待处理操作时才 planning_prepare，继续规划或审查，再 external_submit。",
     "以本地最新版本为准；历史原文仅按需 conversation_read，不能用当前网页聊天覆盖已保存的需求。工具不可用时报告阻断。",
-    "草案生成或修订后接着审查一次；需要用户取舍的问题集中提问，避免无限修订。批准、执行与恢复 Session 由我在 4177 操作。",
+    "草案生成或修订后接着审查一次；需要用户取舍的问题集中提问，避免无限修订。批准、执行与恢复 Session 由我在 本地控制台 操作。",
     `本次继续目标：${state.planning.workflow?.detail || "继续当前计划并复审"}。当前草案 draft-${state.planning.draft?.draftRevision || "尚未生成"}；以 planning_query 返回的最新版本为准。`,
     "先完成已有规划／修订操作，再审查新版本；已有有效审查则停止重复审查，给出明确 A/B/C 下一步（含自定义）。"].join("\n");
   try { await copyText(prompt); showToast("继续提示已复制。在任一获准网页发送，恢复同一 Plan；没有启动执行。"); }
@@ -4884,7 +4884,7 @@ $("#copy-web-planning").addEventListener("click", async () => {
     "信息不足时按返回协议提交澄清，再在网页向我提问；信息足够后按协议生成草案并 external_submit。沿用项目约定或用户明确授权的默认方案，缺少影响实现的关键决策时先澄清，不自行扩大需求范围。",
     "根据真实工具回执确认提交结果；成功后报告 planningId 和草案／审查状态，失败时按 diagnostic 修正。文字回复或下载附件不能代替提交，也不能作为本机测试通过的证据。",
     "草案生成或修订后接着审查一次；需要用户取舍的问题集中提问，避免无限修订。审查报告也须通过 MCP 提交。",
-    "批准、执行和 Runner 工具审批由我在 4177 操作。",
+    "批准、执行和 Runner 工具审批由我在 本地控制台 操作。",
     "我的需求／项目内参考文件：",
     ...(state.referenceFile ? [`先通过 repository_query 读取项目内文件：${JSON.stringify(state.referenceFiles?.length ? state.referenceFiles : [state.referenceFile])}，再规划；本机预览不能代替本轮读取证据。`] : []),
   ].join("\n");

@@ -41,7 +41,7 @@ function outputContract(input: PlannerInput): string {
   ] }, ...requirementsUpdate, planningAssessment };
   return "\n完整 JSON 格式示例（替换为真实业务内容和 ID）：\n澄清：" + JSON.stringify(clarification) + "\n草案：" + JSON.stringify(draft) +
     "\n新生成和修订的任务必须使用 task.schemaVersion:2，并将目标、方案、步骤、交付物、验收标准、约束和其他说明分别放入独立字段。steps、deliverables、acceptanceCriteria 至少各有一项，constraints 可为空数组；不要输出 prompt，核心程序会从这些字段生成执行文本。旧 task.schemaVersion:1 仅用于读取历史计划。plan 使用 schemaVersion:1，不输出 decisionContext、decisionRefs、valueHash 或决策 revision；这些字段由应用根据通过校验的 planningAssessment 统一生成。R-decision-* 是应用同步的决策镜像；修改决策时准确填写其 sourceMessageId 和 quote，应用会同步对应需求；其他业务需求仍通过 requirementsUpdate.changes 更新。" +
-    "\n任务字段只描述当前任务的业务目标、实施、验收及实际操作权限。‘在 4177 批准后由本机 Runner 执行’属于宿主工作流，由宿主在派发前校验；不要把网页 MCP 连接、领取规划操作或再次核验计划批准写成每个 Runner 的执行前置步骤或等待条件。不得因此移除业务约束或命令工具本身的审批要求。" +
+    "\n任务字段只描述当前任务的业务目标、实施、验收及实际操作权限。‘在 本地控制台 批准后由本机 Runner 执行’属于宿主工作流，由宿主在派发前校验；不要把网页 MCP 连接、领取规划操作或再次核验计划批准写成每个 Runner 的执行前置步骤或等待条件。不得因此移除业务约束或命令工具本身的审批要求。" +
     "\n只选一种。questions 为 1 到 3 个问题。只要有必需决策 pending，questionBindings 必须覆盖全部 pending decisionId 各一次，可以把相关决策分组进 3 个以内的问题；不要遗漏没来得及提问的决策。示例 general 仅演示格式，真实 profile 根据业务选择并填全其决策清单。操作或噪声分类须使用实际 kind，changes 为空数组；不得照抄示例需求或示例 ID。";
 }
 

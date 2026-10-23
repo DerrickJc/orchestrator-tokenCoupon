@@ -43,7 +43,7 @@ export function planningWorkflow(view: {
   }
   return { stage, label, detail, ...(current ? { operationId: current.operationId, role: current.role } : pending ? { role: "plan" } : {}),
     options: stage === "awaiting_approval" || stage === "approved"
-      ? ["A. 查看草案与差异", "B. 继续补充或修订", "C. 前往 4177 批准／运行"]
+      ? ["A. 查看草案与差异", "B. 继续补充或修订", "C. 前往 本地控制台 批准／运行"]
       : ["A. 继续当前规划／审查", "B. 按具体建议修订草案", "C. 自定义补充"],
     approvalNotice: approved && !view.review?.current ? "当前审查已不再有效，已有批准暂不可用于执行；请重新审查／批准。" : view.draft && view.draft.draftRevision > 1 && !approved ? `当前为 draft-${view.draft.draftRevision}；旧版审查或批准不适用于本版，需要重新审查／批准。` : null };
 }

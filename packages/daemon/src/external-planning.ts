@@ -145,7 +145,7 @@ export class ExternalPlanningService {
       ...(includeContext ? { protocol: op.preparation ? externalPlannerProtocol(op.preparation.input) : externalReviewProtocol(op.reviewInput!),
         input: op.preparation?.input ?? op.reviewInput, evidence: op.evidence,
         sourceMessageId: op.preparation?.messageId, modelIdentity: "declared_not_observed",
-        instructions: "使用 repository_query 按需调研；响应中的 result 是读取数据，readBudget 显示累计预算。默认 256 KiB；若不足，先暂停并提示用户在 4177 确认扩容后再继续。external_submit 提交 JSON。失败时根据具体诊断修正，最多三次；人工批准和工具审批请在本地控制台处理。" } : {}) };
+        instructions: "使用 repository_query 按需调研；响应中的 result 是读取数据，readBudget 显示累计预算。默认 256 KiB；若不足，先暂停并提示用户在 本地控制台 确认扩容后再继续。external_submit 提交 JSON。失败时根据具体诊断修正，最多三次；人工批准和工具审批请在本地控制台处理。" } : {}) };
   }
 
   async list(workspaceId: string, planningId?: string): Promise<unknown[]> {
@@ -168,7 +168,7 @@ export class ExternalPlanningService {
       const reader = new RepositoryReader(workspace.path, undefined, op.evidence.reduce((sum, item) => sum + item.sizeBytes, 0), remaining);
       const result = await reader.invoke(name, args);
       const size = Buffer.byteLength(result, "utf8");
-      if (op.outputBytes + size > budget) throw new Error(`repository_output_limit：本轮只读输出已达 ${formatBudget(budget)}；可在 4177 确认扩容后继续`);
+      if (op.outputBytes + size > budget) throw new Error(`repository_output_limit：本轮只读输出已达 ${formatBudget(budget)}；可在 本地控制台 确认扩容后继续`);
       const evidence = new Map(op.evidence.map((item) => [item.path, item]));
       for (const item of reader.getEvidence()) evidence.set(item.path, item);
       await this.save({ ...op, evidence: [...evidence.values()], reads: [...op.reads, { name, args, result }], outputBytes: op.outputBytes + size, updatedAt: new Date().toISOString() });
@@ -202,7 +202,7 @@ export class ExternalPlanningService {
       const text = await createHistoryReader(preview, slot?.pending.map(item => item.messageId) ?? [])(messageIds);
       const bytes = Buffer.byteLength(text, "utf8");
       const budget = outputBudget(op);
-      if (op.outputBytes + bytes > budget) throw new Error(`history_output_limit：本轮只读输出已达 ${formatBudget(budget)}；可在 4177 确认扩容后继续`);
+      if (op.outputBytes + bytes > budget) throw new Error(`history_output_limit：本轮只读输出已达 ${formatBudget(budget)}；可在 本地控制台 确认扩容后继续`);
       await this.save({ ...op, outputBytes: op.outputBytes + bytes, historyCalls: (op.historyCalls ?? 0) + 1, updatedAt: new Date().toISOString() });
       return { result: JSON.parse(text) as unknown, readBudget: { limitBytes: budget, usedBytes: op.outputBytes + bytes, remainingBytes: Math.max(0, budget - op.outputBytes - bytes), maximumBytes: MAX_OUTPUT_BUDGET } };
     });

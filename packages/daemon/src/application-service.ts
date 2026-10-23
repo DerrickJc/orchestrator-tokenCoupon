@@ -388,7 +388,7 @@ export class ApplicationService {
       `\n只读证据（sha256=${record.evidenceHash}）：\n${evidence}`,
       "\n此前诊断对话：",
       ...record.messages.slice(-20).map((message) => `${message.role === "user" ? "用户" : "诊断助手"}：\n${message.content}`),
-      "\n请只回答当前用户的诊断问题。若要求涉及修复或重试，只能给建议并说明仍需在 4177 单独确认。",
+      "\n请只回答当前用户的诊断问题。若要求涉及修复或重试，只能给建议并说明仍需在 本地控制台 单独确认。",
     ].join("\n\n");
     const task: TaskDefinition = { schemaVersion: 1, id: `diag-${record.diagnosticId}`, title: "只读分析失败 Attempt", prompt, execution: { runnerId: record.runnerId, mode: "managed", ...(record.modelId ? { modelId: record.modelId } : {}) } };
     const runner = createDefaultRunnerRegistry().resolve(task, undefined, settings).runner;
@@ -771,7 +771,7 @@ export class ApplicationService {
       "先调用 planning_query 读取原计划的有效需求、具体任务和决策依据；如已有 Session，再 session_query(includeResult=true) 核实执行情况。沿用原有效业务需求，结合本次说明修订；历史原文只按需追溯，不把操作或噪声导入新需求。",
       "新计划须重新补齐当前版本的关键决策，缺技术依据时集中澄清或请求明确授权。原审查、批准与 succeeded 状态不继承。已完成成果仅作可核对的证据，不视为已进入新执行基线；失败 worktree 的文件不自动导入。",
       `本次修订说明：${message.trim() || "请分析原执行的阻塞事项并给出恢复方案，修订需要变更的任务；涉及技术选型取舍时先给明确选项。"}`,
-      "仅规划、修订和审查；新草案仍须用户在 4177 批准后才能执行。",
+      "仅规划、修订和审查；新草案仍须用户在 本地控制台 批准后才能执行。",
     ].join("\n\n");
     return this.external.prepare(workspaceId, requestKey, { role: "plan", message: request, coordinated: true, target: settings.initialized ? await this.webTarget("revision", config) ?? "any" : "any", executionDefaults: loaded.snapshot.executionDefaults, sourcePlanning });
   }
