@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PlanDefinition } from "./plan.js";
 import type { GitIsolationJournal, SessionControlKind, SessionControlRequest, SessionIsolation, SessionRecord, SessionSchedulerEvent, SessionSnapshot, SessionTaskState } from "./session-types.js";
 import { parsePlan } from "./validate-plan.js";
@@ -317,7 +317,8 @@ function parseIsolationJournal(value: unknown, sessionId: string, workspace: str
     ids.add(String(item.attemptId));
     return item;
   });
-  if (isolation.repositoryRoot !== workspace && !isolation.repositoryRoot.startsWith(workspace + "/") && !workspace.startsWith(isolation.repositoryRoot + "/")) {
+  const within = (root: string, path: string) => { const value = relative(root, path); return !isAbsolute(value) && value !== ".." && !value.startsWith(`..${sep}`); };
+  if (!within(workspace, isolation.repositoryRoot) && !within(isolation.repositoryRoot, workspace)) {
     throw new Error("Git worktree journal 与仓库边界不匹配");
   }
   return { schemaVersion: raw.schemaVersion as GitIsolationJournal["schemaVersion"], sessionId, status: raw.status as GitIsolationJournal["status"], integrationHead: raw.integrationHead, attempts: parsed as unknown as GitIsolationJournal["attempts"], updatedAt: raw.updatedAt };
@@ -443,7 +444,7 @@ function parseSnapshot(value: unknown, plan: PlanDefinition, workspace: string, 
       if (Object.keys(item).some((key) => !expected.includes(key)) || expected.some((key) => !(key in item)) ||
           !["initializing", "ready", "blocked"].includes(String(item.status)) ||
           item.repositoryRoot !== workspace ||
-          typeof item.gitCommonDir !== "string" || !item.gitCommonDir.startsWith("/") ||
+          typeof item.gitCommonDir !== "string" || !isAbsolute(item.gitCommonDir) ||
           typeof item.baseCommit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(item.baseCommit) ||
           (item.sourceBranch !== null && (typeof item.sourceBranch !== "string" || !item.sourceBranch)) ||
           item.integrationBranch !== `token-coupon/session/${sessionId}` ||
