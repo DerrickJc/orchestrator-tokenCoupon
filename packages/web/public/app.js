@@ -117,6 +117,8 @@ function askConfirm(title, description, confirmLabel = "确认", destructive = f
 }
 function settleConfirmAction(value) { const resolve = state.confirmActionResolve; state.confirmActionResolve = null; if ($("#confirm-action-dialog").open) $("#confirm-action-dialog").close(); resolve?.(value); }
 function showCopyFallback(title, value) {
+  $("#copy-fallback-description").textContent = "无法直接访问系统剪贴板。请复制下方文本。";
+  $("#copy-fallback-description").className = "hint";
   $("#copy-fallback-title").textContent = title; $("#copy-fallback-text").value = value; $("#copy-fallback-dialog").showModal();
   $("#copy-fallback-text").focus(); $("#copy-fallback-text").select();
 }
@@ -4970,7 +4972,7 @@ $("#task-results-dialog").addEventListener("cancel", () => { state.taskResultVie
 if (!globalThis.tokenCouponTaskResults) $("#task-results-more").addEventListener("click", () => { const view = state.taskResultView; if (view && view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); });
 $("#copy-fallback-close").addEventListener("click", () => $("#copy-fallback-dialog").close());
 $("#copy-fallback-select").addEventListener("click", () => { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); });
-$("#copy-fallback-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#copy-fallback-text").value); $("#copy-fallback-dialog").close(); showToast("文本已复制。"); } catch { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); showToast("浏览器仍未授予剪贴板权限，请按 Ctrl+C 复制选中文本。", true); } });
+$("#copy-fallback-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#copy-fallback-text").value); $("#copy-fallback-dialog").close(); showToast("文本已复制。"); } catch { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); $("#copy-fallback-description").textContent = "浏览器仍未授予剪贴板权限，请按 Ctrl+C 复制选中文本。"; $("#copy-fallback-description").className = "notice notice-warn"; } });
 $("#parallel").addEventListener("change", () => { if ($("#parallel").value !== "1") $("#isolation").value = "git-worktree"; });
 $("#isolation").addEventListener("change", () => { if ($("#isolation").value === "shared") $("#parallel").value = "1"; show($("#verification-wrap"), $("#isolation").value === "git-worktree"); });
 async function changeRemote(action, message, onboarding = false) {
@@ -5025,7 +5027,7 @@ $("#remote-copy").addEventListener("click", async () => {
   const url = state.remoteStatus?.mcpUrl;
   if (!url) return;
   try { await navigator.clipboard.writeText(url); $("#remote-copy-feedback").textContent = "已复制当前已验证地址。粘贴到 ChatGPT／Claude 的 MCP 连接设置，再发起 OAuth。"; $("#reuse-copy-feedback").textContent = "已复制当前 MCP 地址。"; showToast("当前 MCP 地址已复制。"); }
-  catch { $("#remote-mcp-url").select(); $("#remote-copy-feedback").textContent = "无法访问剪贴板，地址已选中，请按 Ctrl+C 复制。"; $("#reuse-copy-feedback").textContent = "地址已选中，请按 Ctrl+C 复制。"; showToast("请复制已选中的地址。", true); }
+  catch { $("#remote-mcp-url").select(); $("#remote-copy-feedback").textContent = "无法访问剪贴板，地址已选中，请按 Ctrl+C 复制。"; $("#reuse-copy-feedback").textContent = "地址已选中，请按 Ctrl+C 复制。"; showActionFeedback("请手动复制", "地址已选中，请按 Ctrl+C 复制。", "warning"); }
 });
 $("#remote-stop").addEventListener("click", async () => {
   if (!await askConfirm("停止公网连接", "停止后将撤销现有网页授权。再次建立快捷连接时地址可能变化，需要在网页更新并重新授权。已有计划和执行任务会保留。", "停止连接", true)) return;

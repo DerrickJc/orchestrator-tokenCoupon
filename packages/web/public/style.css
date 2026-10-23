@@ -142,7 +142,7 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 /* Action feedback is persistent and distinguishes unsubmitted forms from task failures. */
 .action-feedback,.selection-feedback { padding:13px 17px; margin:12px 0; border:1px solid #dbe4d3; border-radius:10px; background:#f2f7ed; font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
 .action-feedback p { margin:5px 0; }
-.action-feedback[data-kind="validation"] { color:#775b27; background:#fff9eb; border-color:#eadbb8; }
+.action-feedback[data-kind="validation"],.action-feedback[data-kind="warning"] { color:#775b27; background:#fff9eb; border-color:#eadbb8; }
 .field-guidance { font-size:12px; color:#766947; line-height:1.7; padding:8px 10px; background:#faf6eb; border-radius:7px; }
 .selection-feedback[aria-busy="true"] { border-left:4px solid #637f50; }
 .job-bar { position:sticky; top:8px; left:auto; bottom:auto; transform:none; z-index:15; margin:12px 0 18px; border-radius:11px; min-width:0; font-size:14px; flex-wrap:wrap; background:#334d37; padding:16px 20px; }
@@ -590,7 +590,7 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
   .task-icon.succeeded,.git-readiness.git-ready,.job-bar[data-state=succeeded],.authorization-arrived,.authorization-arrival { background:#263d28; color:#c5e7ad; }
   .notice-warn,.badge-warning,.step-pill,.remote-trust-note,.remote-consent,.resolution-open,.git-readiness,
   .dependency-node[data-status=running],.dag-preview-item[data-status=running],.task-icon.running,.field-guidance,
-  .action-feedback[data-kind=validation],.remote-approval-card .field-guidance,.elicitation-destination,
+  .action-feedback[data-kind=validation],.action-feedback[data-kind=warning],.remote-approval-card .field-guidance,.elicitation-destination,
   .button-session-pause,.task-row.desktop-notification-focus { background:var(--amber-bg); color:var(--amber); border-color:#79623a; }
   .badge-error,.page-error,.reply-error,.activity-error,.task-icon.failed,.task-icon.cancelled,
   .dag-preview-item[data-status=failed],.dag-preview-item[data-status=cancelled],.dag-preview-item[data-status=interrupted],

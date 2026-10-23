@@ -821,6 +821,32 @@ it("passes recent conversation and pending webpage replies to the React message 
   ]);
 });
 
+it("shows manual clipboard guidance without reporting an operation failure", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  h.w.navigator.clipboard.writeText = async () => { throw new Error("clipboard denied"); };
+  h.element("remote-copy").click();
+  await expect.poll(() => h.element("action-feedback").dataset.kind).toBe("warning");
+  expect(h.visible("page-error")).toBe(false);
+  expect(h.element("action-feedback-title").textContent).toBe("请手动复制");
+  expect(h.element("action-feedback-text").textContent).toContain("Ctrl+C");
+  const url = h.element("remote-mcp-url") as HTMLInputElement;
+  expect(url.selectionEnd! - url.selectionStart!).toBe(url.value.length);
+  h.w.eval('showCopyFallback("复制提示", "示例文本")');
+  h.element("copy-fallback-copy").click();
+  await expect.poll(() => h.element("copy-fallback-description").classList.contains("notice-warn")).toBe(true);
+  expect(h.element("copy-fallback-description").textContent).toContain("Ctrl+C");
+  expect(h.visible("page-error")).toBe(false);
+  expect((h.element("copy-fallback-dialog") as HTMLDialogElement).open).toBe(true);
+  const text = h.element("copy-fallback-text") as HTMLTextAreaElement;
+  expect(text.selectionEnd - text.selectionStart).toBe(text.value.length);
+  h.element("copy-fallback-close").click();
+  h.w.eval('showCopyFallback("再次复制", "新的文本")');
+  expect(h.element("copy-fallback-description").className).toBe("hint");
+  h.element("copy-fallback-close").click();
+  h.w.eval('showToast("构建失败", true, "execution")');
+  expect(h.visible("page-error")).toBe(true);
+});
+
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
   h.setGrants([{ grantId: "grant", workspaceIds: ["project"], source: "chatgpt" }]); h.element("refresh").click();
