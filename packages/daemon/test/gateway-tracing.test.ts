@@ -36,3 +36,17 @@ it("keeps the HTTP response working when diagnostic storage rejects or throws", 
   const response = await fetch(`${origin}/mcp`);
   expect(response.status).toBe(200); expect(await response.text()).toBe("still working");
 });
+
+it("labels an established event stream closing separately from a failed tool request", async () => {
+  const entries: ConnectionObservation[] = [];
+  const origin = await listen((request, response) => {
+    traceGatewayRequest(request, response, "https://demo.trycloudflare.com/mcp", async entry => { entries.push(entry); });
+    response.writeHead(200, { "Content-Type": "text/event-stream" }); response.flushHeaders();
+  });
+  await new Promise<void>((resolve, reject) => {
+    const request = httpRequest(`${origin}/mcp`, response => { response.destroy(); resolve(); });
+    request.once("error", reject); request.end();
+  });
+  await expect.poll(() => entries.find(entry => entry.requestState === "stream_closed")).toMatchObject({ code: "mcp_stream_closed", outcome: "received", httpStatus: 200 });
+  expect(entries.some(entry => entry.outcome === "error")).toBe(false);
+});

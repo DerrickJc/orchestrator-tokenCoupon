@@ -34,9 +34,10 @@ export function traceGatewayRequest(request: IncomingMessage, response: ServerRe
   const complete = (aborted: boolean) => {
     if (finished) return; finished = true;
     if (internal || quiet && !aborted && response.statusCode < 400) return;
-    const code = aborted ? "gateway_connection_aborted" : trace.code ?? statusCodes[response.statusCode] ?? (response.statusCode >= 400 ? "gateway_http_error" : undefined);
-    emit({ requestState: aborted ? "aborted" : "completed", outcome: aborted || response.statusCode >= 400 ? "error" : "received", durationMs: Date.now() - startedAt,
-      ...(!aborted ? { httpStatus: response.statusCode } : {}), ...(trace.method ? { method: trace.method } : {}), ...(code ? { code } : {}) });
+    const streamClosed = aborted && request.method === "GET" && response.headersSent && response.statusCode < 400 && String(response.getHeader("content-type") ?? "").includes("text/event-stream");
+    const code = streamClosed ? "mcp_stream_closed" : aborted ? "gateway_connection_aborted" : trace.code ?? statusCodes[response.statusCode] ?? (response.statusCode >= 400 ? "gateway_http_error" : undefined);
+    emit({ requestState: streamClosed ? "stream_closed" : aborted ? "aborted" : "completed", outcome: !streamClosed && aborted || response.statusCode >= 400 ? "error" : "received", durationMs: Date.now() - startedAt,
+      ...(!aborted || streamClosed ? { httpStatus: response.statusCode } : {}), ...(trace.method ? { method: trace.method } : {}), ...(code ? { code } : {}) });
   };
   response.once("finish", () => complete(false));
   response.once("close", () => complete(!response.writableFinished));

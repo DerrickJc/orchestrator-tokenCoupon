@@ -9,7 +9,7 @@ export interface ConnectionObservation {
   code?: string; tool?: string; method?: string; httpStatus?: number; durationMs?: number;
   grantId?: string; clientId?: string;
   requestFields?: string[];
-  requestState?: "received" | "completed" | "aborted";
+  requestState?: "received" | "completed" | "aborted" | "stream_closed";
   httpMethod?: string;
   route?: string;
   authorization?: "missing" | "bearer" | "other";
@@ -56,7 +56,7 @@ export class ConnectionDiagnostics {
     for (const key of ["httpStatus", "durationMs"] as const) if (Number.isFinite(value[key]) && value[key]! >= 0) result[key] = value[key]!;
     if (Array.isArray(value.requestFields)) result.requestFields = [...new Set(value.requestFields.filter(field => ["client_id", "code", "code_verifier", "redirect_uri", "resource", "refresh_token"].includes(field)))];
     const enums = {
-      requestState: ["received", "completed", "aborted"], httpMethod: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER"],
+      requestState: ["received", "completed", "aborted", "stream_closed"], httpMethod: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER"],
       route: ["/mcp", "/token", "/register", "/authorize", "/oauth/approval/:requestId", "/oauth/approval.js", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource", "other"],
       authorization: ["missing", "bearer", "other"], accept: ["missing", "json", "sse", "json_and_sse", "other"], contentType: ["missing", "json", "form", "other"],
       protocolVersion: ["missing", "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "other"],
