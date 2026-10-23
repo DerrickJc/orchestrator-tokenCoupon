@@ -268,7 +268,11 @@ it("loads the full task model menu, isolates Runner choices and ignores a late c
   expect(model.value).toBe(""); await expect.poll(() => [...choice.options].map(option => option.value)).toContain("deepseek-flash");
   choice.value = "deepseek-flash"; choice.dispatchEvent(new h.w.Event("change")); expect(model.value).toBe("deepseek-flash");
   runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change")); expect(model.value).toBe("custom-codex");
-  delayClaude = true; runner.value = "claude-code"; runner.dispatchEvent(new h.w.Event("change")); await expect.poll(() => !!delayed).toBe(true);
+  delayClaude = true; runner.value = "claude-code"; runner.dispatchEvent(new h.w.Event("change"));
+  await expect.poll(() => choice.disabled).toBe(false);
+  row.querySelector<HTMLButtonElement>("button")!.click();
+  await expect.poll(() => !!delayed).toBe(true);
+  expect(choice.disabled).toBe(true);
   runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change"));
   delayed!(Response.json({ models: [{ id: "stale-claude" }], customAllowed: true }));
   await expect.poll(() => [...choice.options].map(option => option.value)).toContain("gpt-6-luna");

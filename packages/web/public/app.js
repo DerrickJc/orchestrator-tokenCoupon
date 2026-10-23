@@ -1304,7 +1304,7 @@ async function init() {
     $("#use-current-directory").disabled = !environment?.currentDirectory;
     $("#connection-dot").classList.add("online"); $("#connection-label").textContent = "Daemon 已连接";
     [state.workspaces, state.providers, state.runners] = await Promise.all([api("/api/v1/workspaces"), api("/api/v1/providers"), api("/api/v1/runners")]);
-    renderProviders(); renderRunners(); renderWorkspaces();
+    renderProviders(); renderRunners(); renderWorkspaces(); void preloadModelCatalogs();
     await refreshRemoteConnection();
     const firstUse = state.systemSettings && !state.systemSettings.initialized && !state.workspaces.length && !location.hash;
     state.initialSetup = !!firstUse;
@@ -1435,7 +1435,7 @@ function renderModelPicker(prefix, catalog, current, defaultLabel) {
     (catalog.customAllowed && remembersCustomChoice ? "__custom__" : "");
   if (["planner", "runner", "reviewer"].includes(prefix) && globalThis.tokenCouponModelChoiceSelectors) {
     select.onchange = null;
-    globalThis.tokenCouponModelChoiceSelectors.render(prefix, { choices, selectedModelId }, modelId => {
+    globalThis.tokenCouponModelChoiceSelectors.render(prefix, { choices, selectedModelId, loading: !!state.modelCatalogLoading?.[prefix] }, modelId => {
       state.modelChoiceSelections[prefix] = modelId;
       applyModelChoice(prefix);
       if (prefix === "runner") localStorage.setItem("tc-model-" + $("#runner-id").value, $("#runner-model").value.trim());
@@ -1445,7 +1445,8 @@ function renderModelPicker(prefix, catalog, current, defaultLabel) {
     select.value = selectedModelId;
   }
   input.value = catalog.customAllowed || catalog.models?.some(model => model.id === current) ? current : "";
-  show(input, selectedModelId === "__custom__"); input.disabled = !catalog.customAllowed;
+  show(input, selectedModelId === "__custom__"); input.dataset.customAllowed = String(!!catalog.customAllowed); input.disabled = !catalog.customAllowed || !!state.modelCatalogLoading?.[prefix];
+  select.disabled = !!state.modelCatalogLoading?.[prefix];
 }
 function applyModelChoice(prefix) {
   const select = $(`#${prefix}-model-choice`), input = $(`#${prefix}-model`), custom = select.value === "__custom__";
@@ -1453,7 +1454,39 @@ function applyModelChoice(prefix) {
   input.value = custom ? "" : select.value;
   show(input, custom); if (custom) input.focus();
 }
+const modelCatalogCache = new Map();
+function cachedModelCatalog(identity, url, refresh = false) {
+  const key = `${state.daemonEpoch}:${identity}`, previous = modelCatalogCache.get(key);
+  if (!refresh && previous && previous.expiresAt > Date.now()) return previous.promise;
+  const entry = { expiresAt: Infinity, promise: null };
+  const controller = new AbortController(); let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("读取模型目录超时，请刷新后重试。")); }, 25000); });
+  entry.promise = Promise.race([api(url, { signal: controller.signal }), timeout]).then(catalog => {
+    entry.expiresAt = Date.now() + (catalog.error ? 5000 : 120000);
+    return catalog;
+  }).catch(error => { if (modelCatalogCache.get(key) === entry) modelCatalogCache.delete(key); throw error; }).finally(() => clearTimeout(timer));
+  modelCatalogCache.set(key, entry);
+  return entry.promise;
+}
+function runnerModelCatalog(runnerId, workspaceId = "", refresh = false) {
+  const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
+  return cachedModelCatalog(`runner:${runnerId}:${workspaceId}`, `/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`, refresh);
+}
+function plannerModelCatalog(refresh = false) {
+  return cachedModelCatalog("provider:deepseek-api", `/api/v1/providers/deepseek-api/models${refresh ? "?refresh=1" : ""}`, refresh);
+}
+function preloadModelCatalogs(workspaceId = "") {
+  for (const runner of state.runners.filter(item => item.available && item.id !== "mock")) void runnerModelCatalog(runner.id, workspaceId).catch(() => {});
+  if (state.providers.some(item => item.id === "deepseek-api" && item.available)) void plannerModelCatalog().catch(() => {});
+}
+function setModelPickerLoading(kind, loading) {
+  state.modelCatalogLoading ??= {}; state.modelCatalogLoading[kind] = loading;
+  const select = $(`#${kind}-model-choice`), input = $(`#${kind}-model`);
+  if (select) { select.disabled = loading; select.setAttribute("aria-busy", String(loading)); }
+  if (input) input.disabled = loading || input.dataset.customAllowed === "false";
+}
 function setModelCatalogStatus(kind, message, loading = false) {
+  setModelPickerLoading(kind, loading);
   const bridge = globalThis.tokenCouponModelCatalogStatus;
   if (bridge) bridge.render(kind, { message, loading });
   else {
@@ -1470,7 +1503,7 @@ async function loadRunnerModels(refresh = false) {
   setModelCatalogStatus("runner", "正在读取本机工具的模型目录…", true);
   const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
   try {
-    const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`);
+    const catalog = await runnerModelCatalog(runnerId, workspaceId, refresh);
     if (sequence !== state.runnerModelRequest || runnerId !== $("#runner-id").value || workspaceId !== (state.workspace?.workspaceId || "")) return;
     renderModelPicker("runner", catalog, $("#runner-model").value.trim(), "沿用 Runner 默认模型");
     setModelCatalogStatus("runner", catalog.error || (runnerId === "mock" ? "离线模拟无需选择模型。" : `${catalog.models.length} 个候选模型，来自本机工具目录；实际调用仍取决于账户和接口。`));
@@ -1485,7 +1518,7 @@ async function loadPlannerModels(refresh = false) {
     const params = new URLSearchParams({ ...(workspaceId ? { workspaceId } : {}), ...(refresh ? { refresh: "1" } : {}) });
     try {
       setModelCatalogStatus("planner", "正在读取本机工具的规划模型目录…", true);
-      const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?${params}`);
+      const catalog = await runnerModelCatalog(runnerId, workspaceId, refresh);
       if (sequence !== state.plannerModelRequest || provider !== $("#planner-provider").value) return;
       const selected = $("#planner-model").value.trim();
       renderModelPicker("planner", { ...catalog, models: [{ id: "runner-default", label: "沿用 Runner 默认模型", isDefault: true }, ...(catalog.models || [])], customAllowed: true }, selected || "runner-default", "沿用 Runner 默认模型");
@@ -1496,7 +1529,7 @@ async function loadPlannerModels(refresh = false) {
   if (provider !== "deepseek-api") { setModelCatalogStatus("planner", $("#planner-model-hint")?.textContent || "", false); return; }
   try {
     setModelCatalogStatus("planner", "正在读取规划模型目录…", true);
-    const catalog = await api(`/api/v1/providers/deepseek-api/models${refresh ? "?refresh=1" : ""}`);
+    const catalog = await plannerModelCatalog(refresh);
     if (sequence !== state.plannerModelRequest || $("#planner-provider").value !== "deepseek-api") return;
     renderModelPicker("planner", catalog, $("#planner-model").value.trim(), "使用已配置模型");
     setModelCatalogStatus("planner", catalog.error || "候选项来自当前 Planner 接口，可选或自定义模型 ID。");
@@ -1609,7 +1642,7 @@ function selectWorkspace(workspaceId) { return navigate(`/workspaces/${encodeURI
 async function loadWorkspace(workspaceId, sequence = state.navigationSequence) {
   state.workspace = state.workspaces.find((workspace) => workspace.workspaceId === workspaceId); state.planning = null; renderWorkspaces();
   state.referenceFile = null; state.referenceFiles = []; renderReference();
-  $("#new-task").disabled = !state.workspace; $("#start-planning").disabled = !state.workspace; $("#copy-web-planning").disabled = !state.workspace; void loadRunnerModels();
+  $("#new-task").disabled = !state.workspace; $("#start-planning").disabled = !state.workspace; $("#copy-web-planning").disabled = !state.workspace; void loadRunnerModels(); void preloadModelCatalogs(state.workspace?.workspaceId || "");
   const plannings = await api(`/api/v1/workspaces/${workspaceId}/plannings`);
   if (state.workspace?.workspaceId !== workspaceId || sequence !== state.navigationSequence) return;
   state.plannings = plannings;
@@ -2276,37 +2309,37 @@ function renderReviewerControls(plan) {
 
 async function runReviewModelCatalog(mode) {
   const sequence = state.reviewerModelRequest = (state.reviewerModelRequest || 0) + 1;
-  const existing = $("#reviewer-model")?.value.trim() || "";
-  if (mode === "planning") {
-    const config = state.planning?.config;
-    if (config && isLocalPlanner(config.provider)) { void runReviewModelCatalog(config.provider); return; }
-    if (config?.provider === "deepseek") {
-      try {
-        const catalog = await api("/api/v1/providers/deepseek-api/models");
-        if (sequence === state.reviewerModelRequest && $("#reviewer-mode")?.value === mode) renderModelPicker("reviewer", catalog, existing || config.model, "使用规划模型");
-      } catch { /* Keep the custom model entry available. */ }
-    }
-    return;
-  }
-  if (mode === "codex-agent" || mode === "claude-agent") {
-    const runnerId = mode === "codex-agent" ? "codex" : "claude-code";
-    const params = new URLSearchParams({ ...(state.workspace?.workspaceId ? { workspaceId: state.workspace.workspaceId } : {}) });
-    try {
-      const catalog = await api(`/api/v1/runners/${runnerId}/models?${params}`);
-      if (sequence !== state.reviewerModelRequest || $("#reviewer-mode")?.value !== mode) return;
+  let existing = $("#reviewer-model")?.value.trim() || "";
+  const workspaceId = state.workspace?.workspaceId || "";
+  const config = state.planning?.config;
+  const effective = mode === "planning" ? config?.provider === "deepseek" ? "deepseek-api" : config?.provider : mode;
+  if (state.reviewerModelOwner !== undefined && state.reviewerModelOwner !== effective) existing = "";
+  state.reviewerModelOwner = effective;
+  const local = effective === "codex-agent" || effective === "claude-agent";
+  const loading = local || effective === "deepseek-api";
+  setModelPickerLoading("reviewer", loading);
+  let hint = $("#reviewer-model-loading-hint");
+  if (!hint) { hint = document.createElement("small"); hint.id = "reviewer-model-loading-hint"; hint.className = "hint"; hint.setAttribute("role", "status"); $("#reviewer-model-wrap").append(hint); }
+  hint.textContent = loading ? "正在加载模型…" : "";
+  const current = () => sequence === state.reviewerModelRequest && $("#reviewer-mode")?.value === mode && workspaceId === (state.workspace?.workspaceId || "");
+  try {
+    if (local) {
+      const catalog = await runnerModelCatalog(effective === "codex-agent" ? "codex" : "claude-code", workspaceId);
+      if (!current()) return;
       renderModelPicker("reviewer", { ...catalog, models: [{ id: "runner-default", label: "沿用 Runner 默认模型", isDefault: true }, ...(catalog.models || [])], customAllowed: true }, existing || "runner-default", "沿用 Runner 默认模型");
-    } catch { if (sequence === state.reviewerModelRequest) renderModelPicker("reviewer", { models: [{ id: "runner-default", label: "沿用 Runner 默认模型" }], customAllowed: true }, existing || "runner-default", "沿用 Runner 默认模型"); }
-    return;
-  }
-  if (mode === "deepseek-api") {
-    try {
-      const catalog = await api("/api/v1/providers/deepseek-api/models");
-      if (sequence === state.reviewerModelRequest && $("#reviewer-mode")?.value === mode) renderModelPicker("reviewer", catalog, existing || state.providers.find(item => item.id === mode)?.model || "", "使用已配置模型");
-    } catch { /* Keep the custom model entry available. */ }
-    return;
-  }
-  if (mode.startsWith("web-")) renderModelPicker("reviewer", { models: [], customAllowed: true }, existing, "网页中选择模型");
-  else renderModelPicker("reviewer", { models: [], customAllowed: false }, "", "沿用规划模型");
+    } else if (effective === "deepseek-api") {
+      const catalog = await plannerModelCatalog();
+      if (!current()) return;
+      renderModelPicker("reviewer", catalog, existing || config?.model || "", "使用已配置模型");
+    } else if (mode.startsWith("web-")) renderModelPicker("reviewer", { models: [], customAllowed: true }, existing, "网页中选择模型");
+    else renderModelPicker("reviewer", { models: [], customAllowed: false }, "", "沿用规划模型");
+    if (current()) hint.textContent = "";
+  } catch {
+    if (current()) {
+      renderModelPicker("reviewer", { models: [], customAllowed: true }, existing || (local ? "runner-default" : ""), "沿用默认模型");
+      hint.textContent = "目录暂不可读，可使用默认模型或自定义模型 ID。";
+    }
+  } finally { if (current()) setModelPickerLoading("reviewer", false); }
 }
 
 function isLocalPlanner(provider) { return provider === "codex-agent" || provider === "claude-agent"; }
@@ -2497,12 +2530,14 @@ function createNativeAgentSelectionControls(initial, onChange = () => {}, isCurr
   };
   const load = async (force = false) => {
     const sequence = ++generation, runnerId = runner.value, workspaceId = state.workspace?.workspaceId;
+    choice.disabled = true; model.disabled = true; refresh.disabled = true; root.dataset.modelLoading = "true"; choice.setAttribute("aria-busy", "true");
     fill({ models: [], customAllowed: runnerId !== "mock" }); hint.textContent = "正在读取所选 Runner 的完整模型目录…";
     try {
-      const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(workspaceId)}${force ? "&refresh=true" : ""}`);
+      const catalog = await runnerModelCatalog(runnerId, workspaceId || "", force);
       if (sequence !== generation || !root.isConnected || runner.value !== runnerId || !isCurrent()) return;
       fill(catalog); preview(); hint.textContent += catalog.error ? ` · ${catalog.error}；仍可使用默认或自定义模型。` : ` · ${catalog.models?.length || 0} 个目录候选，实际可用性以调用结果为准。`;
     } catch (error) { if (sequence === generation && root.isConnected && isCurrent()) { preview(); hint.textContent += ` · 目录暂不可读：${error.message}；可使用默认或自定义模型。`; } }
+    finally { if (sequence === generation) { choice.disabled = false; model.disabled = false; refresh.disabled = false; root.dataset.modelLoading = "false"; choice.setAttribute("aria-busy", "false"); } }
   };
   runner.addEventListener("change", () => { values.set(currentRunner, model.value.trim()); currentRunner = runner.value; model.value = values.get(currentRunner) || ""; preview(); onChange(value()); void load(); });
   choice.addEventListener("change", () => { if (choice.value !== "__custom__") model.value = choice.value; show(model, choice.value === "__custom__"); if (choice.value === "__custom__") model.focus(); preview(); onChange(value()); });
@@ -2511,7 +2546,7 @@ function createNativeAgentSelectionControls(initial, onChange = () => {}, isCurr
 }
 function createReactAgentSelectionControls(initial, onChange = () => {}, isCurrent = () => true, runners = state.runners) {
   const root = document.createElement("div"); root.dataset.agentSelectionMount = "true";
-  let runnerId = initial.runnerId, modelId = initial.modelId || "", modelChoice = modelId || "", choices = [], hint = "";
+  let runnerId = initial.runnerId, modelId = initial.modelId || "", modelChoice = modelId || "", choices = [], hint = "", loading = false;
   const values = new Map([[runnerId, modelId]]); let generation = 0, customAllowed = runnerId !== "mock";
   const currentRunner = () => (runners || []).map(item => ({ id: item.id, label: `${labels[item.id] || item.id}${item.available ? "" : " · 未就绪"}`, disabled: !item.available && item.id !== initial.runnerId }));
   const runnerOptions = () => {
@@ -2522,9 +2557,9 @@ function createReactAgentSelectionControls(initial, onChange = () => {}, isCurre
   const value = () => ({ runnerId, ...(modelId.trim() ? { modelId: modelId.trim() } : {}) });
   const preview = () => `配置预览：${labels[runnerId] || runnerId} / ${modelId.trim() || "Runner 默认模型"}`;
   const selectedChoice = () => modelChoice === "__custom__" ? "__custom__" : choices.some(item => item.id === modelId) ? modelId : modelChoice;
-  const render = () => globalThis.tokenCouponAgentSelectionControls?.render(root, {
+  const render = () => { root.dataset.modelLoading = String(loading); globalThis.tokenCouponAgentSelectionControls?.render(root, {
     runners: runnerOptions(), selectedRunnerId: runnerId, modelChoices: choices,
-    selectedModelChoice: selectedChoice(), modelId, showCustomModel: selectedChoice() === "__custom__", hint,
+    selectedModelChoice: selectedChoice(), modelId, showCustomModel: selectedChoice() === "__custom__", hint, loading,
   }, {
     onRunnerChange: nextRunner => {
       if (!isCurrent() || nextRunner === runnerId) return;
@@ -2542,7 +2577,7 @@ function createReactAgentSelectionControls(initial, onChange = () => {}, isCurre
       modelId = nextModel; values.set(runnerId, modelId.trim()); hint = preview(); render(); onChange(value());
     },
     onRefresh: () => void load(true),
-  });
+  }); };
   const fill = catalog => {
     customAllowed = catalog.customAllowed !== false;
     choices = [{ id: "", label: "沿用所选 Runner 的默认模型" }, ...(catalog.models || []).map(item => ({ id: item.id, label: `${item.label || item.id}${item.label && item.label !== item.id ? ` · ${item.id}` : ""}` }))];
@@ -2551,14 +2586,16 @@ function createReactAgentSelectionControls(initial, onChange = () => {}, isCurre
   };
   const load = async (force = false) => {
     const sequence = ++generation, requestedRunner = runnerId, workspaceId = state.workspace?.workspaceId || "";
+    loading = true;
     fill({ models: [], customAllowed: requestedRunner !== "mock" }); hint = "正在读取所选 Runner 的完整模型目录…"; render();
     try {
-      const catalog = await api(`/api/v1/runners/${encodeURIComponent(requestedRunner)}/models?workspaceId=${encodeURIComponent(workspaceId)}${force ? "&refresh=true" : ""}`);
+      const catalog = await runnerModelCatalog(requestedRunner, workspaceId, force);
       if (sequence !== generation || !root.isConnected || runnerId !== requestedRunner || !isCurrent()) return;
       fill(catalog); hint = `${preview()}${catalog.error ? ` · ${catalog.error}；仍可使用默认或自定义模型。` : ` · ${catalog.models?.length || 0} 个目录候选，实际可用性以调用结果为准。`}`; render();
     } catch (error) {
       if (sequence === generation && root.isConnected && isCurrent()) { hint = `${preview()} · 目录暂不可读：${error.message}；可使用默认或自定义模型。`; render(); }
     }
+    finally { if (sequence === generation) { loading = false; if (root.isConnected && isCurrent()) render(); } }
   };
   fill({ models: [], customAllowed }); hint = preview(); render();
   return { root, load, value };
@@ -3180,7 +3217,7 @@ function renderRuntimeModelControls() {
   const models = state.runtimeModelChoices || [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
   const bridge = globalThis.tokenCouponRuntimeModelControls;
   if (bridge) {
-    bridge.render({ tasks, selectedTaskId: state.runtimeModelTaskId || "", models, selectedModelId: state.runtimeModelChoice || "", customModelId: state.runtimeModelCustomValue || "" }, {
+    bridge.render({ tasks, selectedTaskId: state.runtimeModelTaskId || "", models, selectedModelId: state.runtimeModelChoice || "", customModelId: state.runtimeModelCustomValue || "", loading: !!state.runtimeModelLoading }, {
       onTaskChange: selectRuntimeModelTask,
       onModelChange: value => { state.runtimeModelChoice = value; renderRuntimeModelControls(); },
       onCustomModelChange: value => { state.runtimeModelCustomValue = value; renderRuntimeModelControls(); },
@@ -3191,6 +3228,7 @@ function renderRuntimeModelControls() {
   task.replaceChildren(...tasks.map(item => new Option(item.label, item.id)));
   task.value = tasks.some(item => item.id === (state.runtimeModelTaskId || previous)) ? state.runtimeModelTaskId || previous : tasks[0]?.id || "";
   const choice = $("#runtime-model-choice"); choice.replaceChildren(...models.map(item => new Option(item.label, item.id)));
+  choice.disabled = !!state.runtimeModelLoading; choice.setAttribute("aria-busy", String(!!state.runtimeModelLoading));
   choice.value = state.runtimeModelChoice || "";
   $("#runtime-model-custom").value = state.runtimeModelCustomValue || "";
   show($("#runtime-model-custom").parentElement, choice.value === "__custom__");
@@ -3210,16 +3248,17 @@ async function loadRuntimeModelChoices() {
   const entry = plan.draft?.plan.tasks.find(item => item.task.id === taskId), runnerId = plan.session?.tasks.find(item => item.taskId === taskId)?.execution?.runnerId || entry?.task.execution.runnerId;
   if (!runnerId) return;
   const identity = `${workspaceId}:${plan.planningId}:${taskId}`, request = state.runtimeModelRequest = (state.runtimeModelRequest || 0) + 1;
+  state.runtimeModelLoading = true;
   state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, { id: "__custom__", label: "自定义模型…" }];
   state.runtimeModelChoice = ""; state.runtimeModelCustomValue = ""; renderRuntimeModelControls();
   try {
-    const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const catalog = await runnerModelCatalog(runnerId, workspaceId);
     if (request !== state.runtimeModelRequest || `${state.workspace?.workspaceId}:${state.planning?.planningId}:${state.runtimeModelTaskId || $("#runtime-model-task").value}` !== identity) return;
     state.runtimeModelChoices = [{ id: "", label: "沿用 Session 启动模型" }, ...(catalog.models || []).map(model => ({ id: model.id, label: model.label || model.id })), { id: "__custom__", label: "自定义模型…" }];
     const saved = plan.session?.models?.overrides?.[taskId]?.modelId;
     if (saved) { if (!state.runtimeModelChoices.some(item => item.id === saved)) state.runtimeModelChoices.splice(state.runtimeModelChoices.length - 1, 0, { id: saved, label: saved }); state.runtimeModelChoice = saved; }
   } catch { $("#runtime-model-status").textContent = "候选模型暂不可读，可输入 Runner 支持的自定义模型 ID。"; }
-  renderRuntimeModelControls();
+  if (request === state.runtimeModelRequest) { state.runtimeModelLoading = false; renderRuntimeModelControls(); }
 }
 async function changeRuntimeModel(stopAndRetry) {
   const plan = state.planning, workspaceId = state.workspace?.workspaceId, taskId = $("#runtime-model-task").value;
@@ -3782,15 +3821,17 @@ async function loadAttemptDiagnosticModels(context, savedModel = "") {
   context.diagnosisModels = [];
   context.diagnosisModelId = "";
   const request = context.modelRequest = (context.modelRequest || 0) + 1;
+  context.diagnosisModelsLoading = true;
   renderAttemptDiagnosticControls(context);
   try {
-    const catalog = await api(`/api/v1/runners/${encodeURIComponent(runnerId)}/models?workspaceId=${encodeURIComponent(context.workspaceId)}`);
+    const catalog = await runnerModelCatalog(runnerId, context.workspaceId);
     if (!diagnosticContextIsCurrent(context) || request !== context.modelRequest) return;
     context.diagnosisModels = (catalog.models || []).map(model => ({ id: model.id, label: model.label || model.id }));
   } catch { if (diagnosticContextIsCurrent(context)) setAttemptDiagnosisStatus(context, "候选模型暂不可读，可使用默认模型或填写模型 ID。"); }
   if (!diagnosticContextIsCurrent(context) || request !== context.modelRequest) return;
   if (savedModel && !context.diagnosisModels.some(model => model.id === savedModel)) context.diagnosisModels.push({ id: savedModel, label: savedModel });
   context.diagnosisModelId = savedModel;
+  context.diagnosisModelsLoading = false;
   renderAttemptDiagnosticControls(context);
 }
 async function loadAttemptDiagnosticHistory(context) {
@@ -3841,7 +3882,7 @@ function renderAttemptDiagnosticHistory(context) {
   }
   root.scrollTop = context.scrollAfterSend || atBottom ? root.scrollHeight : previousScroll; context.scrollAfterSend = false;
   renderAttemptDiagnosisDialog(context);
-  if (!globalThis.tokenCouponAttemptDiagnosisControls) for (const id of ["attempt-diagnosis-runner", "attempt-diagnosis-model", "diagnosis-custom-model", "attempt-diagnosis-history-select"]) $("#" + id).disabled = !!context.running || !!context.pendingSubmission;
+  if (!globalThis.tokenCouponAttemptDiagnosisControls) for (const id of ["attempt-diagnosis-runner", "attempt-diagnosis-model", "diagnosis-custom-model", "attempt-diagnosis-history-select"]) $("#" + id).disabled = !!context.running || !!context.pendingSubmission || !!context.diagnosisModelsLoading && ["attempt-diagnosis-model", "diagnosis-custom-model"].includes(id);
 }
 function renderAttemptDiagnosticControls(context) {
   if (!diagnosticContextIsCurrent(context)) return;
@@ -3854,6 +3895,7 @@ function renderAttemptDiagnosticControls(context) {
     modelId: context.diagnosisModelId || "",
     models: context.diagnosisModels || [],
     customModelId: context.diagnosisCustomModelId || "",
+    loading: !!context.diagnosisModelsLoading,
     disabled,
   };
   if (globalThis.tokenCouponAttemptDiagnosisControls) {
@@ -3872,11 +3914,11 @@ function renderAttemptDiagnosticControls(context) {
   history.replaceChildren(...diagnostics.map(item => new Option(item.label, item.id))); history.value = model.selectedDiagnosticId; show(history, diagnostics.length > 1); history.disabled = disabled;
   const runner = $("#attempt-diagnosis-runner"), select = $("#attempt-diagnosis-model");
   runner.value = model.runnerId;
-  select.replaceChildren(new Option("默认模型", ""), ...model.models.map(item => new Option(item.label, item.id)), new Option("自定义模型…", "__custom__"));
+  select.replaceChildren(new Option(model.loading ? "正在加载模型…" : "默认模型", ""), ...model.models.map(item => new Option(item.label, item.id)), new Option("自定义模型…", "__custom__"));
   select.value = model.modelId;
   $("#diagnosis-custom-model").value = model.customModelId;
   show($("#diagnosis-custom-wrap"), model.modelId === "__custom__");
-  for (const control of [runner, select, $("#diagnosis-custom-model")]) control.disabled = disabled;
+  for (const control of [runner, select, $("#diagnosis-custom-model")]) control.disabled = disabled || control !== runner && model.loading;
 }
 async function openAttemptDiagnosis() {
   ensureAttemptDiagnosticUI();

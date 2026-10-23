@@ -23,8 +23,8 @@ export function AttemptDiagnosisModelSelectors({ model, callbacks }: ModelProps)
     <label>助手<select id="attempt-diagnosis-runner" value={model.runnerId} disabled={model.disabled} onChange={event => callbacks.onRunnerChange(event.currentTarget.value)}>
       <option value="codex">Codex</option><option value="claude-code">Claude Code</option>
     </select></label>
-    <label>模型<select id="attempt-diagnosis-model" value={model.modelId} disabled={model.disabled} onChange={event => callbacks.onModelChange(event.currentTarget.value)}>
-      <option value="">默认模型</option>
+    <label>模型<select id="attempt-diagnosis-model" value={model.modelId} disabled={model.disabled || model.loading} aria-busy={!!model.loading} onChange={event => callbacks.onModelChange(event.currentTarget.value)}>
+      <option value="">{model.loading ? "正在加载模型…" : "默认模型"}</option>
       {model.models.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
       <option value="__custom__">自定义模型…</option>
     </select></label>

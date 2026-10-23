@@ -8,7 +8,7 @@ export function ModelChoiceSelector({ prefix, model, onChange }: {
 }) {
   const [selectedModelId, setSelectedModelId] = useState(model.selectedModelId);
   useEffect(() => setSelectedModelId(model.selectedModelId), [model.selectedModelId]);
-  return <select id={`${prefix}-model-choice`} value={selectedModelId} onChange={event => {
+  return <select id={`${prefix}-model-choice`} value={selectedModelId} disabled={model.loading} aria-busy={!!model.loading} onChange={event => {
     const value = event.currentTarget.value;
     setSelectedModelId(value);
     onChange(value);

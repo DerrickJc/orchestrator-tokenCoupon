@@ -111,6 +111,42 @@ it("does not replace a newly selected Runner with a late model response", async 
   expect((h.element("runner-model") as HTMLInputElement).value).toBe("claude-code-fast");
 });
 
+it("disables a pending model selector, shares concurrent reads and enables it when the catalog arrives", async () => {
+  const h = await page({ lateCodex: true });
+  const choice = h.element("runner-model-choice") as HTMLSelectElement;
+  expect(choice.disabled).toBe(true);
+  expect(choice.getAttribute("aria-busy")).toBe("true");
+  expect(h.element("runner-model-hint").textContent).toContain("正在读取");
+  h.w.eval('void loadRunnerModels(); void loadRunnerModels();');
+  const catalogReads = () => h.requests.filter(raw => raw.includes("/runners/codex/models?") && new URL(raw, h.w.location.origin).searchParams.get("workspaceId") === "workspace").length;
+  expect(catalogReads()).toBe(1);
+  h.completeLate();
+  await expect.poll(() => choice.disabled).toBe(false);
+  expect([...choice.options].some(item => item.value === "late-codex")).toBe(true);
+  h.w.eval('void loadRunnerModels();');
+  await expect.poll(() => choice.disabled).toBe(false);
+  expect(catalogReads()).toBe(1);
+  expect(h.requests.some(raw => raw.startsWith("/api/v1/runners/claude-code/models?"))).toBe(true);
+});
+
+it("releases a timed-out catalog and permits a fresh model read", async () => {
+  const h = await page();
+  const originalFetch = h.w.fetch, originalTimeout = h.w.setTimeout;
+  let signal: AbortSignal | undefined;
+  h.w.fetch = (async (raw: string, init?: RequestInit) => {
+    if (raw.includes("/runners/codex/models")) { signal = init?.signal as AbortSignal; return new Promise<Response>(() => {}); }
+    return originalFetch(raw, init);
+  }) as any;
+  h.w.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => originalTimeout(handler, delay === 25000 ? 0 : delay, ...args)) as any;
+  await h.w.eval("loadRunnerModels(true)");
+  expect(signal?.aborted).toBe(true);
+  expect((h.element("runner-model-choice") as HTMLSelectElement).disabled).toBe(false);
+  expect(h.element("runner-model-hint").textContent).toContain("超时");
+  h.w.fetch = originalFetch; h.w.setTimeout = originalTimeout;
+  await h.w.eval("loadRunnerModels(true)");
+  expect(h.element("runner-model-hint").textContent).toContain("候选模型");
+});
+
 it("uses the React model selector for the reviewer model catalog", async () => {
   const h = await page({ reactModelSelectors: true });
   h.choose("reviewer-mode", "deepseek-api");

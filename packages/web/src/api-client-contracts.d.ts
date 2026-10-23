@@ -382,7 +382,7 @@ export type RunnerSelectorBridge = {
   render(model: RunnerSelectorModel, onChange: (runnerId: string) => void): void;
 };
 export type ModelChoiceOption = { id: string; label: string };
-export type ModelChoiceSelectorModel = { choices: ModelChoiceOption[]; selectedModelId: string };
+export type ModelChoiceSelectorModel = { choices: ModelChoiceOption[]; selectedModelId: string; loading?: boolean };
 export type ModelChoiceSelectorsBridge = {
   render(prefix: "planner" | "runner" | "reviewer", model: ModelChoiceSelectorModel, onChange: (modelId: string) => void): void;
 };
@@ -422,6 +422,7 @@ export type RunAgentModeBridge = {
 export type AgentSelectionRunnerOption = { id: string; label: string; disabled: boolean };
 export type AgentSelectionChoice = { id: string; label: string };
 export type AgentSelectionControlsModel = {
+  loading?: boolean;
   runners: AgentSelectionRunnerOption[];
   selectedRunnerId: string;
   modelChoices: AgentSelectionChoice[];
@@ -442,6 +443,7 @@ export type AgentSelectionControlsBridge = {
 };
 export type RuntimeModelOption = { id: string; label: string };
 export type RuntimeModelControlsModel = {
+  loading?: boolean;
   tasks: RuntimeModelOption[];
   selectedTaskId: string;
   models: RuntimeModelOption[];
@@ -529,6 +531,7 @@ export type AttemptDiagnosisComposerBridge = {
   unmountWithin(container: HTMLElement): void;
 };
 export type AttemptDiagnosisControlsModel = {
+  loading?: boolean;
   diagnostics: { id: string; label: string }[];
   selectedDiagnosticId: string;
   runnerId: string;
