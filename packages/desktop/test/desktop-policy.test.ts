@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { describeAttachmentFailure, isAllowedDaemonOrigin, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl } from "../src/desktop-policy.js";
+import { describeAttachmentFailure, isAllowedDaemonOrigin, isDesktopClipboardText, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl } from "../src/desktop-policy.js";
 
 describe("desktop security policy", () => {
+  it("allows bounded plain clipboard text without granting clipboard reads", () => {
+    expect(isDesktopClipboardText("中文提示\nhttps://example.test/mcp")).toBe(true);
+    expect(isDesktopClipboardText("a".repeat(1_048_576))).toBe(true);
+    for (const value of ["a".repeat(1_048_577), null, {}, 1]) expect(isDesktopClipboardText(value)).toBe(false);
+  });
   it("accepts only loopback HTTP origins with an explicit local port", () => {
     expect(isAllowedDaemonOrigin("http://127.0.0.1:4177")).toBe(true);
     for (const value of ["https://127.0.0.1:4177", "http://localhost:4177", "http://127.0.0.1", "http://127.0.0.1:80", "http://127.0.0.1.evil:4177", "http://user@127.0.0.1:4177"]) {

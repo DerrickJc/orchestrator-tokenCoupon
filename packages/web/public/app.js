@@ -138,6 +138,18 @@ function setConnectionTab(tab) {
 function esc(value) { return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]); }
 function shortId(value) { return value ? `${value.slice(0, 8)}…` : ""; }
 function show(el, visible = true) { el.classList.toggle("hidden", !visible); }
+async function copyText(text) {
+  if (window.tokenCouponDesktop?.copyText) {
+    try { await window.tokenCouponDesktop.copyText(text); return; } catch { /* Try browser copying if the desktop bridge is temporarily unavailable. */ }
+  }
+  try { await navigator.clipboard.writeText(text); return; } catch { /* Older browsers may still allow a user-triggered copy command. */ }
+  const previous = document.activeElement, field = document.createElement("textarea");
+  field.value = text; field.setAttribute("aria-hidden", "true"); field.style.cssText = "position:fixed;left:-10000px;top:0"; document.body.append(field);
+  try {
+    field.focus(); field.select();
+    if (!document.execCommand?.("copy")) throw new Error("clipboard_unavailable");
+  } finally { field.remove(); previous?.focus?.({ preventScroll: true }); }
+}
 function commandPaletteEntries() {
   const entries = [
     { label: "连接中心", hint: "连接与网页授权", run: () => navigate("/connect") },
@@ -993,7 +1005,7 @@ async function copyResumePrompt() {
     "草案生成或修订后接着审查一次；需要用户取舍的问题集中提问，避免无限修订。批准、执行与恢复 Session 由我在 4177 操作。",
     `本次继续目标：${state.planning.workflow?.detail || "继续当前计划并复审"}。当前草案 draft-${state.planning.draft?.draftRevision || "尚未生成"}；以 planning_query 返回的最新版本为准。`,
     "先完成已有规划／修订操作，再审查新版本；已有有效审查则停止重复审查，给出明确 A/B/C 下一步（含自定义）。"].join("\n");
-  try { await navigator.clipboard.writeText(prompt); showToast("继续提示已复制。在任一获准网页发送，恢复同一 Plan；没有启动执行。"); }
+  try { await copyText(prompt); showToast("继续提示已复制。在任一获准网页发送，恢复同一 Plan；没有启动执行。"); }
   catch { showCopyFallback("复制已有计划的继续提示", prompt); }
 }
 
@@ -1141,7 +1153,7 @@ async function refreshAgentComponents() {
       const actions = document.createElement("div"); actions.className = "button-row";
       if (item.available && item.executable) {
         const launch = document.createElement("button"); launch.type = "button"; launch.className = "button button-quiet"; launch.textContent = "复制启动命令";
-        launch.addEventListener("click", async () => { const windows = state.environment?.platform === "win32", quoted = "'" + item.executable.replaceAll("'", windows ? "''" : "'\\''") + "'", text = (windows ? "& " : "") + quoted; try { await navigator.clipboard.writeText(text); showToast("启动命令已复制。在终端运行并按工具提示登录。"); } catch { showCopyFallback("启动 Agent", text); } }); actions.append(launch);
+        launch.addEventListener("click", async () => { const windows = state.environment?.platform === "win32", quoted = "'" + item.executable.replaceAll("'", windows ? "''" : "'\\''") + "'", text = (windows ? "& " : "") + quoted; try { await copyText(text); showToast("启动命令已复制。在终端运行并按工具提示登录。"); } catch { showCopyFallback("启动 Agent", text); } }); actions.append(launch);
       }
       if (!item.available && !busy) {
         const install = document.createElement("button"); install.type = "button"; install.className = "button button-primary"; install.textContent = "按需安装"; install.disabled = !item.canInstall;
@@ -1152,7 +1164,7 @@ async function refreshAgentComponents() {
         cancel.addEventListener("click", async () => { cancel.disabled = true; try { await api(`/api/v1/agent-components/${item.id}/cancel`, { method: "POST", body: JSON.stringify({ operationId: item.operation.operationId }) }); await refreshAgentComponents(); } catch (error) { $("#agent-components-status").textContent = `取消未完成：${error.message}`; cancel.disabled = false; } }); actions.append(cancel);
       }
       const instructions = document.createElement("button"); instructions.type = "button"; instructions.className = "button button-quiet"; instructions.textContent = "复制手动安装说明";
-      instructions.addEventListener("click", async () => { const text = `${item.label} 官方安装与登录说明：${item.docs}\n安装完成后回到系统设置点击“重新检测”，会优先复用本机工具。`; try { await navigator.clipboard.writeText(text); showToast("手动安装说明已复制。"); } catch { showCopyFallback("手动安装说明", text); } }); if (!item.available) actions.append(instructions);
+      instructions.addEventListener("click", async () => { const text = `${item.label} 官方安装与登录说明：${item.docs}\n安装完成后回到系统设置点击“重新检测”，会优先复用本机工具。`; try { await copyText(text); showToast("手动安装说明已复制。"); } catch { showCopyFallback("手动安装说明", text); } }); if (!item.available) actions.append(instructions);
       row.append(actions); root.append(row);
     }
     $("#agent-components-status").textContent = "检测完成。规划、审查和执行使用相同的工具发现规则；不会自动安装或升级工具。";
@@ -2318,7 +2330,7 @@ function renderHandoffs() {
 }
 async function copyHandoffPrompt(prompt) {
   if (!prompt) return;
-  try { await navigator.clipboard.writeText(prompt); showToast("接手提示已复制。到目标网页发送一次即可。请保持本地服务运行。"); }
+  try { await copyText(prompt); showToast("接手提示已复制。到目标网页发送一次即可。请保持本地服务运行。"); }
   catch { showCopyFallback("复制接手提示，到目标网页发送", prompt); }
 }
 function externalOperationState(operation) {
@@ -3451,7 +3463,7 @@ function renderTaskResults(view) {
   const model = { summary: view.summary, files: view.files, total: view.total, hasMore: view.hasMore, loadingMore: view.loading, preview: view.preview, error: view.error };
   const callbacks = {
     onPreview: path => void previewTaskResult(view, path),
-    onCopyPath: async file => { try { await navigator.clipboard.writeText(file.absolutePath); showToast("文件路径已复制。"); } catch { showCopyFallback("复制生成文件路径", file.absolutePath); } },
+    onCopyPath: async file => { try { await copyText(file.absolutePath); showToast("文件路径已复制。"); } catch { showCopyFallback("复制生成文件路径", file.absolutePath); } },
     onLoadMore: () => { if (view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); },
   };
   if (globalThis.tokenCouponTaskResults) { globalThis.tokenCouponTaskResults.render(mount, model, callbacks); return; }
@@ -3481,7 +3493,7 @@ function renderTaskResultFiles(view) {
     const row = document.createElement("article"), path = document.createElement("code"), preview = document.createElement("button"), copy = document.createElement("button"); row.className = "task-result-file";
     path.textContent = file.absolutePath; path.title = file.path;
     preview.type = "button"; preview.className = "text-button"; preview.textContent = `预览 ${file.path}`; preview.addEventListener("click", () => void previewTaskResult(view, file.path));
-    copy.type = "button"; copy.className = "text-button"; copy.textContent = "复制路径"; copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(file.absolutePath); showToast("文件路径已复制。"); } catch { showCopyFallback("复制生成文件路径", file.absolutePath); } });
+    copy.type = "button"; copy.className = "text-button"; copy.textContent = "复制路径"; copy.addEventListener("click", async () => { try { await copyText(file.absolutePath); showToast("文件路径已复制。"); } catch { showCopyFallback("复制生成文件路径", file.absolutePath); } });
     row.append(path, preview, copy); (index < 3 ? root : extra).append(row);
   }
   if (view.files.length > 3) root.append(extra);
@@ -3941,7 +3953,7 @@ function renderAttemptDiagnosticExport(context) {
 async function copyExportedDiagnosticPrompt() {
   const result = state.attemptDiagnosticContext?.exported;
   if (!result) return;
-  try { await navigator.clipboard.writeText(result.prompt); if (state.attemptDiagnosticContext) { state.attemptDiagnosticContext.exportState.copyLabel = "已复制 · 再次复制"; renderAttemptDiagnosticExport(state.attemptDiagnosticContext); } }
+  try { await copyText(result.prompt); if (state.attemptDiagnosticContext) { state.attemptDiagnosticContext.exportState.copyLabel = "已复制 · 再次复制"; renderAttemptDiagnosticExport(state.attemptDiagnosticContext); } }
   catch { showCopyFallback("复制网页分析提示", result.prompt); }
 }
 function reportedModelLabel(model, source) {
@@ -4823,7 +4835,7 @@ $("#copy-web-planning").addEventListener("click", async () => {
     "我的需求／项目内参考文件：",
     ...(state.referenceFile ? [`先通过 repository_query 读取项目内文件：${JSON.stringify(state.referenceFiles?.length ? state.referenceFiles : [state.referenceFile])}，再规划；本机预览不能代替本轮读取证据。`] : []),
   ].join("\n");
-  try { await navigator.clipboard.writeText(prompt); showToast("网页规划提示已复制。到对应网页粘贴，再补充需求或相对文件路径；尚未创建规划。"); }
+  try { await copyText(prompt); showToast("网页规划提示已复制。到对应网页粘贴，再补充需求或相对文件路径；尚未创建规划。"); }
   catch { showCopyFallback("复制网页规划提示", prompt); }
 });
 $("#start-planning").addEventListener("click", async () => {
@@ -4976,7 +4988,7 @@ $("#task-results-dialog").addEventListener("cancel", () => { state.taskResultVie
 if (!globalThis.tokenCouponTaskResults) $("#task-results-more").addEventListener("click", () => { const view = state.taskResultView; if (view && view.nextOffset !== null) void loadTaskResultPage(view, view.nextOffset); });
 $("#copy-fallback-close").addEventListener("click", () => $("#copy-fallback-dialog").close());
 $("#copy-fallback-select").addEventListener("click", () => { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); });
-$("#copy-fallback-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#copy-fallback-text").value); $("#copy-fallback-dialog").close(); showToast("文本已复制。"); } catch { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); $("#copy-fallback-description").textContent = "浏览器仍未授予剪贴板权限，请按 Ctrl+C 复制选中文本。"; $("#copy-fallback-description").className = "notice notice-warn"; } });
+$("#copy-fallback-copy").addEventListener("click", async () => { try { await copyText($("#copy-fallback-text").value); $("#copy-fallback-dialog").close(); showToast("文本已复制。"); } catch { $("#copy-fallback-text").focus(); $("#copy-fallback-text").select(); $("#copy-fallback-description").textContent = "浏览器仍未授予剪贴板权限，请按 Ctrl+C 复制选中文本。"; $("#copy-fallback-description").className = "notice notice-warn"; } });
 $("#parallel").addEventListener("change", () => { if ($("#parallel").value !== "1") $("#isolation").value = "git-worktree"; });
 $("#isolation").addEventListener("change", () => { if ($("#isolation").value === "shared") $("#parallel").value = "1"; show($("#verification-wrap"), $("#isolation").value === "git-worktree"); });
 async function changeRemote(action, message, onboarding = false) {
@@ -5030,7 +5042,7 @@ $("#remote-test").addEventListener("click", () => changeRemote(() => api("/api/v
 $("#remote-copy").addEventListener("click", async () => {
   const url = state.remoteStatus?.mcpUrl;
   if (!url) return;
-  try { await navigator.clipboard.writeText(url); $("#remote-copy-feedback").textContent = "已复制当前已验证地址。粘贴到 ChatGPT／Claude 的 MCP 连接设置，再发起 OAuth。"; $("#reuse-copy-feedback").textContent = "已复制当前 MCP 地址。"; showToast("当前 MCP 地址已复制。"); }
+  try { await copyText(url); $("#remote-copy-feedback").textContent = "已复制当前已验证地址。粘贴到 ChatGPT／Claude 的 MCP 连接设置，再发起 OAuth。"; $("#reuse-copy-feedback").textContent = "已复制当前 MCP 地址。"; showToast("当前 MCP 地址已复制。"); }
   catch { $("#remote-mcp-url").select(); $("#remote-copy-feedback").textContent = "无法访问剪贴板，地址已选中，请按 Ctrl+C 复制。"; $("#reuse-copy-feedback").textContent = "地址已选中，请按 Ctrl+C 复制。"; showActionFeedback("请手动复制", "地址已选中，请按 Ctrl+C 复制。", "warning"); }
 });
 $("#remote-stop").addEventListener("click", async () => {

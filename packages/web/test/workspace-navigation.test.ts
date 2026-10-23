@@ -821,6 +821,26 @@ it("passes recent conversation and pending webpage replies to the React message 
   ]);
 });
 
+it("uses native desktop copying even when the browser refuses clipboard access", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  const copied: string[] = [];
+  Object.assign(h.w, { tokenCouponDesktop: { copyText: async (text: string) => { copied.push(text); } } });
+  h.w.navigator.clipboard.writeText = async () => { throw new Error("browser denied"); };
+  await h.w.eval('copyText("本机直接复制")');
+  expect(copied).toEqual(["本机直接复制"]);
+  expect(h.visible("page-error")).toBe(false);
+});
+
+it("uses browser copy-command fallback before asking for manual copying", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  h.w.navigator.clipboard.writeText = async () => { throw new Error("browser denied"); };
+  let selected = "";
+  Object.assign(h.w.document, { execCommand: (command: string) => { selected = (h.w.document.activeElement as HTMLTextAreaElement).value; return command === "copy"; } });
+  await h.w.eval('copyText("浏览器兼容复制")');
+  expect(selected).toBe("浏览器兼容复制");
+  expect(h.w.document.querySelector('[aria-hidden="true"][style]')).toBeNull();
+});
+
 it("shows manual clipboard guidance without reporting an operation failure", async () => {
   const h = await page({ ready: true, hash: "#/connect" });
   h.w.navigator.clipboard.writeText = async () => { throw new Error("clipboard denied"); };

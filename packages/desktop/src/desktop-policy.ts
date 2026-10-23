@@ -19,10 +19,15 @@ export const DESKTOP_IPC = Object.freeze({
   recoveryState: "token-coupon:recovery-state",
   acknowledgeRecovery: "token-coupon:acknowledge-recovery",
   chooseFolder: "token-coupon:choose-folder",
+  copyText: "token-coupon:copy-text",
   notification: "token-coupon:notification",
   notificationsEnabled: "token-coupon:notifications-enabled",
   navigateToTask: "token-coupon:navigate-to-task",
 });
+
+export function isDesktopClipboardText(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 1_048_576;
+}
 
 export function isAllowedDaemonOrigin(value: string): boolean {
   try {

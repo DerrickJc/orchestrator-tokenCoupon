@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, session, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, session, Tray } from "electron";
 import { API_PROTOCOL, EPOCH_HEADER, PROTOCOL_HEADER } from "@token-coupon/client";
 import { discoverOwnedDaemon } from "@token-coupon/client/node";
 import type { ChildProcess } from "node:child_process";
@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeAttachmentFailure, DESKTOP_IPC, isAllowedDaemonOrigin, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl, type DesktopAttachment } from "./desktop-policy.js";
+import { describeAttachmentFailure, DESKTOP_IPC, isAllowedDaemonOrigin, isDesktopClipboardText, isDesktopNotificationInput, isTrustedIpcContext, isTrustedRendererUrl, type DesktopAttachment } from "./desktop-policy.js";
 import { resolveDevelopmentDaemonRuntime, resolvePackagedDaemonRuntime } from "./daemon-runtime.js";
 import { startManagedDaemon } from "./managed-daemon.js";
 import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
@@ -72,6 +72,11 @@ function assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(DESKTOP_IPC.copyText, (event, text: unknown) => {
+    assertTrustedSender(event);
+    if (!isDesktopClipboardText(text)) throw new Error("desktop_clipboard_text_invalid：复制内容必须为文本且不超过 1 Mi 字符");
+    clipboard.writeText(text);
+  });
   ipcMain.handle(DESKTOP_IPC.attachment, event => { assertTrustedSender(event); return attachment; });
   ipcMain.handle(DESKTOP_IPC.connectionState, event => { assertTrustedSender(event); return reconnector.connectionState; });
   ipcMain.handle(DESKTOP_IPC.reconnect, async (event, snapshot: unknown) => {

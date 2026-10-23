@@ -1,5 +1,6 @@
 interface Window {
   tokenCouponDesktop?: {
+    copyText?(text: string): Promise<void>;
     reconnect?(snapshot: string): Promise<void>;
     getConnectionState?(): Promise<{ phase: "connected" | "disconnected" | "reconnecting"; error?: string }>;
     getRecoveryState?(): Promise<{ id: string; snapshot: string } | undefined>;
