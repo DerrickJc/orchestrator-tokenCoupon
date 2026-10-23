@@ -5,6 +5,7 @@ import type { SessionStore as SessionStoreClass } from "./session-store.js";
 import { assertSafeGitPath, parseNulPaths, runGit } from "./git-repository.js";
 import { runWorktreeSetup, worktreeSetupHash } from "./worktree-setup.js";
 import type { WorktreeSetupProfile } from "./worktree-setup.js";
+import { worktreeDirectorySegments } from "./worktree-path.js";
 
 type GitIsolation = Extract<NonNullable<SessionRecord["snapshot"]["isolation"]>, { mode: "git-worktree" }>;
 
@@ -557,11 +558,9 @@ export class WorktreeIsolation {
 
 async function ensureSafeDirectoryPath(workspace: string, target: string): Promise<void> {
   const root = resolve(workspace);
-  const absolute = resolve(target);
-  const relative = absolute.slice(root.length + 1);
-  if (!absolute.startsWith(root + "/") || relative.split("/").some((part) => part === ".." || part === "")) throw new Error("worktree_path_outside_workspace：隔离路径越出 workspace");
+  const parts = worktreeDirectorySegments(root, target);
   let cursor = root;
-  for (const part of relative.split("/")) {
+  for (const part of parts) {
     cursor = join(cursor, part);
     try {
       const info = await lstat(cursor);
