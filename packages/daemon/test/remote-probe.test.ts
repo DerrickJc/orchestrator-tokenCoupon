@@ -88,6 +88,25 @@ it("does not retry a wrong issuer or an unprotected public MCP endpoint", async 
   }
 });
 
+it("rejects malformed or unbound OAuth challenges even when they contain the expected metadata address", async () => {
+  const metadata = `${origin}/.well-known/oauth-protected-resource/mcp`;
+  for (const challenge of [
+    `Bearer resource_metadata=\\"${metadata}\\"`,
+    `Basic realm="${metadata}"`,
+    `Bearer resource_metadata="https://other.test/?next=${metadata}"`,
+  ]) {
+    const healthy = healthyFetch();
+    const fetcher: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/mcp" && !request.headers.has("authorization")) {
+        return new Response(null, { status: 401, headers: { "WWW-Authenticate": challenge } });
+      }
+      return healthy(input, init);
+    };
+    await expect(probeRemoteMcp(origin, token, signal(), fetcher)).rejects.toThrow("remote_probe_auth");
+  }
+});
+
 it.each([503, 530])("retries a transient challenge HTTP %s without mistaking it for missing OAuth protection", async status => {
   const healthy = healthyFetch();
   const error = await probeRemoteMcp(origin, token, signal(), async (input, init) => {
