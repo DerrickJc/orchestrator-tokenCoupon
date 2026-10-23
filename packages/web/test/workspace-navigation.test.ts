@@ -925,6 +925,25 @@ it("explains cold-start validation and scheduled recovery without claiming readi
   expect(h.visible("page-error")).toBe(true);
 });
 
+it("keeps Git run blockers visible and translates untracked-file preview codes", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  h.setGitStatus({ state: "dirty", message: "仓库还有未提交变更，请预览后确认提交。", changes: [{ path: "src/new.mjs", code: "??", runtime: false, staged: false }] });
+  h.element("git-refresh").click();
+  await expect.poll(() => h.element("run-configuration-error").textContent).toContain("未提交变更");
+  expect(h.element("run-configuration-error").classList.contains("is-git-blocked")).toBe(true);
+  expect(h.element("run-configuration-error").classList.contains("hint")).toBe(false);
+  expect((h.element("run-button") as HTMLButtonElement).disabled).toBe(true);
+  const original = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => raw.endsWith("/git/preview") ? Response.json({ mode: "selected", paths: ["src/new.mjs"], fingerprint: "a".repeat(64), head: "b".repeat(40), suggestedMessage: "feat: add module", previews: [{ path: "src/new.mjs", code: "??", text: "export const value = 1;" }] }) : original(raw, init)) as any;
+  const checkbox = h.element("git-file-list").querySelector<HTMLInputElement>('input[data-file-path]')!;
+  checkbox.checked = true; checkbox.dispatchEvent(new h.w.Event("change"));
+  h.element("git-preview-selected").click();
+  await expect.poll(() => h.element("git-preview-dialog").hasAttribute("open")).toBe(true);
+  expect(h.element("git-preview-content").querySelector("summary")?.textContent).toBe("新文件 · 尚未跟踪src/new.mjs");
+  expect(h.element("git-preview-content").textContent).not.toContain("??");
+  expect(h.posts.some(item => item.path.endsWith("/git/commit") || item.path.endsWith("/run"))).toBe(false);
+});
+
 it("continues staged runtime cleanup through preview and explicit local commit without starting execution", async () => {
   const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
   h.setGitStatus({ state: "dirty", message: "运行记录已取消跟踪，待提交", changes: [{ path: ".token-coupon/conversation.json", code: "D ", runtime: true, staged: true }] });

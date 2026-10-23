@@ -1891,6 +1891,13 @@ function renderGitFileTree(changes, root) {
   renderNode(tree, root);
   updateGitFolderChecks(root);
 }
+function gitChangeLabel(code) {
+  if (code === "??") return "新文件 · 尚未跟踪";
+  if (code === "!!") return "已忽略";
+  if (code?.includes("U") || ["AA", "DD"].includes(code)) return "合并冲突";
+  const labels = [["R", "重命名"], ["C", "复制"], ["D", "删除"], ["A", "新增"], ["M", "修改"], ["T", "文件类型变更"]];
+  return labels.filter(([flag]) => code?.includes(flag)).map(([, label]) => label).join("、") || "文件变更";
+}
 function updateGitFolderChecks(root) {
   const files = [...root.querySelectorAll("input[data-file-path]")], selected = files.filter(input => input.checked).length, all = root.querySelector("input[data-all-files]");
   if (all) { all.checked = files.length > 0 && selected === files.length; all.indeterminate = selected > 0 && selected < files.length; }
@@ -1918,7 +1925,10 @@ async function previewGitFromUI(mode) {
     const box = $("#git-preview-content"); box.replaceChildren();
     for (const item of preview.previews) {
       const details = document.createElement("details"), summary = document.createElement("summary"), pre = document.createElement("pre"); details.className = "foldout";
-      summary.textContent = `${item.code} ${item.path}${item.truncated ? " · 预览已截断，请手工核对完整文件" : ""}`; pre.textContent = item.text; details.append(summary, pre); box.append(details);
+      const status = document.createElement("span"), path = document.createElement("span");
+      status.className = "git-preview-status"; status.textContent = gitChangeLabel(item.code);
+      path.textContent = `${item.path}${item.truncated ? " · 预览已截断，请手工核对完整文件" : ""}`;
+      summary.append(status, path); pre.textContent = item.text; details.append(summary, pre); box.append(details);
     }
     $("#git-commit-message").value = preview.suggestedMessage;
     $("#git-preview-error").textContent = "";
@@ -2098,6 +2108,7 @@ function renderRunConfiguration() {
   else if (config.isolation === "git-worktree" && !candidates.some(item => item.taskId === config.verificationTaskId)) error = "请选择依赖图合法的最终验证任务。";
   const gitReady = renderGitReadiness(config.isolation === "git-worktree");
   $("#run-configuration-error").textContent = error || (!gitReady ? `暂不能运行：${state.gitReadiness?.workspaceId === state.workspace?.workspaceId ? state.gitReadiness.message : "正在检查 Git 准备状态。"}` : state.activeJob || state.runInFlight ? "正在处理当前操作，请等待完成。" : "");
+  $("#run-configuration-error").classList.toggle("is-git-blocked", !gitReady);
   $("#run-button").disabled = !!error || !gitReady || !!state.activeJob || !!state.runInFlight;
   try { localStorage.setItem(key, JSON.stringify(config)); } catch { /* Run preferences remain in memory. */ }
   state.runConfigDirty = !!config.edited && !config.needsReconfirm;
