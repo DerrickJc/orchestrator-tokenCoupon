@@ -261,7 +261,8 @@ export async function createLocalServer(service: ApplicationService, options: { 
       const source = stringField(body.source, "source", 20);
       if (source !== "chatgpt" && source !== "claude" && source !== "other") throw new Error("oauth_source_invalid");
       if (body.alias !== undefined && (typeof body.alias !== "string" || body.alias.length > 80)) throw new Error("oauth_alias_invalid：MCP 名称最多 80 字符");
-      await options.remoteMcp.updateGrant(parts[2]!, { workspaceIds: stringArray(body.workspaceIds, "workspaceIds"), source, ...(typeof body.alias === "string" ? { alias: body.alias } : {}) });
+      if (body.usage !== undefined && body.usage !== "web" && body.usage !== "diagnostic") throw new Error("oauth_usage_invalid");
+      await options.remoteMcp.updateGrant(parts[2]!, { ...(body.usage === "web" || body.usage === "diagnostic" ? { usage: body.usage } : {}), workspaceIds: stringArray(body.workspaceIds, "workspaceIds"), source, ...(typeof body.alias === "string" ? { alias: body.alias } : {}) });
       sendJson(response, 200, { updated: true }); return;
     }
     if (request.method === "POST" && parts[0] === "remote-connection" && parts[1] === "grants" && parts.length === 4 && parts[3] === "revoke") {

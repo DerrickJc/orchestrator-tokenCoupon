@@ -7,7 +7,7 @@ export interface ConnectionObservation {
   stage: "ingress" | "authentication" | "transport" | "tool" | "oauth";
   outcome: "success" | "error" | "received";
   code?: string; tool?: string; method?: string; httpStatus?: number; durationMs?: number;
-  grantId?: string; clientId?: string;
+  grantId?: string; clientId?: string; authorizationKey?: string;
   requestFields?: string[];
   requestState?: "received" | "completed" | "aborted" | "stream_closed";
   httpMethod?: string;
@@ -53,6 +53,7 @@ export class ConnectionDiagnostics {
     const result: ConnectionObservation = { traceId: value.traceId, at: value.at, endpoint: url.href, stage: value.stage, outcome: value.outcome };
     for (const key of ["code", "tool", "method"] as const) if (value[key] && /^[a-zA-Z0-9_/.:-]{1,80}$/.test(value[key]!)) result[key] = value[key];
     for (const key of ["grantId", "clientId"] as const) if (value[key] && /^[a-f0-9-]{36}$/i.test(value[key]!)) result[key] = value[key];
+    if (typeof value.authorizationKey === "string" && /^[a-f0-9]{32}$/.test(value.authorizationKey)) result.authorizationKey = value.authorizationKey;
     for (const key of ["httpStatus", "durationMs"] as const) if (Number.isFinite(value[key]) && value[key]! >= 0) result[key] = value[key]!;
     if (Array.isArray(value.requestFields)) result.requestFields = [...new Set(value.requestFields.filter(field => ["client_id", "code", "code_verifier", "redirect_uri", "resource", "refresh_token"].includes(field)))];
     const enums = {

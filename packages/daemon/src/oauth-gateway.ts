@@ -1,3 +1,4 @@
+import type { RemoteClientStatusDto } from "@token-coupon/client";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -44,7 +45,7 @@ interface AuthorizationRequest {
 type WebSource = "chatgpt" | "claude" | "other";
 interface StoredGrant {
   grantId: string; clientId: string; workspaceId: string; workspaceIds?: string[]; source?: WebSource; alias?: string; redirectHost: string; scopes: RemoteMcpScope[]; resource: string;
-  createdAt: number; expiresAt: number; revokedAt?: number;
+  createdAt: number; expiresAt: number; revokedAt?: number; usage?: "web" | "diagnostic"; authorizationRevision?: number;
   access: Array<{ digest: string; expiresAt: number }>;
   refreshDigest?: string; previousRefreshDigests: string[];
 }
@@ -71,7 +72,7 @@ export interface RemoteConnectionStatus {
   addressChanged: boolean;
   previousMcpUrl?: string;
   probeCheck?: { state: "checking" | "retrying" | "succeeded" | "failed"; attempt: number; maxAttempts: number; background: boolean; startedAt: number; retryAt?: number; lastError?: string };
-  clients?: Array<{ grantId: string; clientId: string; name: string; source: string; workspaceIds: string[]; mcpUrl: string; createdAt: number; expiresAt: number; status: "active" | "expired" | "revoked" | "address_changed"; oauthState: "awaiting_token" | "token_issued"; lastCall?: ConnectionObservation }>;
+  clients?: RemoteClientStatusDto[];
   recentCalls?: ConnectionObservation[];
   diagnosticsUnavailable?: boolean;
   gatewayTracing?: { enabled: true; lastRequestAt?: number; lastToolAt?: number };
@@ -208,11 +209,13 @@ export class RemoteMcpConnection {
     const lastRequestAt = currentCalls.filter(item => item.stage === "ingress" && item.requestState === "received").at(-1)?.at, lastToolAt = currentCalls.filter(item => item.stage === "tool").at(-1)?.at;
     base.gatewayTracing = { enabled: true, ...(lastRequestAt === undefined ? {} : { lastRequestAt }), ...(lastToolAt === undefined ? {} : { lastToolAt }) };
     base.clients = [...this.state.grants].sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(grant => {
-      const lastCall = calls.filter(item => item.grantId === grant.grantId && item.endpoint === grant.resource && item.stage === "tool").at(-1);
-      return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端", source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
-        status: grant.revokedAt ? "revoked" as const : grant.expiresAt <= now ? "expired" as const : grant.resource !== `${this.config?.publicOrigin}/mcp` ? "address_changed" as const : "active" as const, ...(lastCall ? { lastCall } : {}) };
+      const applicable = calls.filter(item => item.grantId === grant.grantId && item.clientId === grant.clientId && item.endpoint === grant.resource && item.stage === "tool" && item.authorizationKey === authorizationKey(grant));
+      const lastCall = applicable.at(-1), lastSuccess = applicable.filter(item => item.outcome === "success").at(-1);
+      const clientName = this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端";
+      return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || clientName, clientName, ...(grant.alias ? { alias: grant.alias } : {}), nameSource: grant.alias ? "local_alias" as const : "client_declared" as const, usage: grant.usage ?? "web", toolVerified: Boolean(lastSuccess), source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
+        status: grant.revokedAt ? "revoked" as const : grant.expiresAt <= now ? "expired" as const : grant.resource !== `${this.config?.publicOrigin}/mcp` ? "address_changed" as const : "active" as const, ...(lastCall ? { lastCall } : {}), ...(lastSuccess ? { lastSuccess } : {}) };
     });
-    base.remoteClientVerified = base.clients.some(item => item.status === "active" && item.lastCall?.outcome === "success");
+    base.remoteClientVerified = base.clients.some(item => item.status === "active" && item.usage === "web" && item.toolVerified);
     base.recentCalls = calls.filter(item => item.endpoint === `${this.config?.publicOrigin}/mcp`).slice(-20).reverse();
     base.diagnosticsUnavailable = this.diagnostics.storageUnavailable;
     if (this.probeCheck) base.probeCheck = { ...this.probeCheck };
@@ -446,10 +449,10 @@ export class RemoteMcpConnection {
     return this.state.requests.filter((request) => !request.decision && request.expiresAt > Date.now()).sort((a, b) => b.createdAt - a.createdAt).map((request) => ({ requestId: request.requestId, clientName: request.clientName, clientId: request.clientId, redirectHost: new URL(request.redirectUri).origin, requestedScopes: request.requestedScopes, createdAt: request.createdAt, expiresAt: request.expiresAt, ...(this.config?.mode === "quick_tunnel" && this.config.workspaceId ? { workspaceId: this.config.workspaceId, workspaceIds: this.config.workspaceIds ?? [this.config.workspaceId] } : {}) }));
   }
 
-  grants(): Array<{ workspaceIds: string[]; source?: WebSource; alias?: string; grantId: string; clientName: string; clientId: string; redirectHost: string; workspaceId: string; workspaceLabel: string; scopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; oauthState: "awaiting_token" | "token_issued" }> {
+  grants(): Array<{ workspaceIds: string[]; source?: WebSource; alias?: string; grantId: string; clientName: string; clientId: string; redirectHost: string; workspaceId: string; workspaceLabel: string; scopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; oauthState: "awaiting_token" | "token_issued"; usage: "web" | "diagnostic" }> {
     const labels = new Map(this.service.listWorkspaces().map((workspace) => [workspace.workspaceId, workspace.label]));
     return this.state.grants.filter((grant) => !grant.revokedAt && grant.expiresAt > Date.now() && grant.resource === `${this.config?.publicOrigin}/mcp`).sort((a, b) => b.createdAt - a.createdAt).map((grant) => ({
-      grantId: grant.grantId, clientName: this.state.clients.find((client) => client.client_id === grant.clientId)?.client_name || "未命名网页客户端",
+      usage: grant.usage ?? "web", grantId: grant.grantId, clientName: this.state.clients.find((client) => client.client_id === grant.clientId)?.client_name || "未命名网页客户端",
       clientId: grant.clientId, redirectHost: grant.redirectHost, workspaceId: grant.workspaceId, workspaceIds: grant.workspaceIds ?? [grant.workspaceId], ...(grant.source ? { source: grant.source } : {}), ...(grant.alias ? { alias: grant.alias } : {}),
       workspaceLabel: labels.get(grant.workspaceId) || "项目已移除", scopes: grant.scopes, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" : "awaiting_token",
     }));
@@ -468,7 +471,8 @@ export class RemoteMcpConnection {
   }
 
   /** Only called by the authenticated local console, never by a remote tool. */
-  async updateGrant(grantId: string, input: { workspaceIds: string[]; source: WebSource; alias?: string }): Promise<void> {
+  async updateGrant(grantId: string, input: { workspaceIds: string[]; source: WebSource; alias?: string; usage?: "web" | "diagnostic" }): Promise<void> {
+    if (input.usage !== undefined && !["web", "diagnostic"].includes(input.usage)) throw new Error("oauth_usage_invalid：连接用途必须是网页或独立诊断");
     if (!["chatgpt", "claude", "other"].includes(input.source) || !input.workspaceIds.length) throw new Error("oauth_grant_update_invalid");
     for (const id of input.workspaceIds) {
       await this.service.getWorkspace(id);
@@ -478,7 +482,10 @@ export class RemoteMcpConnection {
       if (!grant) throw new Error("oauth_grant_not_found");
       if (!this.config?.enabled || grant.resource !== `${this.config.publicOrigin}/mcp`) throw new Error("oauth_resource_invalid：此授权不属于当前连接，请在网页重新授权");
       await this.includeAuthorizedWorkspaces(input.workspaceIds);
+      const previousKey = authorizationKey(grant);
       grant.workspaceIds = [...new Set(input.workspaceIds)]; grant.workspaceId = grant.workspaceIds[0]!; grant.source = input.source;
+      if (input.usage !== undefined) grant.usage = input.usage;
+      if (previousKey !== authorizationKey(grant)) grant.authorizationRevision = (grant.authorizationRevision ?? 1) + 1;
       if (input.alias !== undefined) { if (input.alias.trim()) grant.alias = input.alias.trim().slice(0, 80); else delete grant.alias; }
     });
     await this.service.publish({ type: "remote_authorization.updated", payload: { grantId } });
@@ -555,14 +562,16 @@ export class RemoteMcpConnection {
     const extra = info.extra ?? {};
     if (typeof extra.grantId !== "string" || typeof extra.workspaceId !== "string") return undefined;
     const grant = this.state.grants.find((item) => item.grantId === extra.grantId)!;
-    const originalSource = grant.source;
+    const originalSource = grant.source, originalAuthorizationKey = authorizationKey(grant);
     return { grantId: extra.grantId, clientId: info.clientId, workspaceId: extra.workspaceId, workspaceIds: grant.workspaceIds ?? [grant.workspaceId],
       ...(grant.source ? { source: grant.source } : {}),
+      connection: { mcpUrl: grant.resource, authorizationKey: originalAuthorizationKey, usage: grant.usage ?? "web", ...(grant.alias ? { alias: grant.alias } : {}), clientName: this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "未命名网页客户端" },
       assertActive: async (workspaceId?: string) => {
         await this.verifyAccessToken(token);
         const current = this.state.grants.find((item) => item.grantId === extra.grantId)!;
         if (workspaceId && !(current.workspaceIds ?? [current.workspaceId]).includes(workspaceId)) throw new Error("mcp_workspace_forbidden：项目授权已移除");
         if (current.source !== originalSource) throw new Error("mcp_source_changed：来源已变更，请重新连接并领取");
+        if (authorizationKey(current) !== originalAuthorizationKey) throw new Error("mcp_authorization_changed：授权范围已变更，请重试读取最新授权");
       },
       scopes: info.scopes as RemoteMcpScope[], expiresAt: (info.expiresAt ?? 0) * 1000 };
   }
@@ -634,7 +643,7 @@ export class RemoteMcpConnection {
         response.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store", "WWW-Authenticate": `Bearer resource_metadata=\"${metadata}\"` });
         response.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "OAuth authorization required", data: { traceId, code: "oauth_authorization_required" } } })); return;
       }
-      const identity = principal ? { grantId: principal.grantId, clientId: principal.clientId } : {};
+      const identity = principal ? { grantId: principal.grantId, clientId: principal.clientId, ...(principal.connection ? { authorizationKey: principal.connection.authorizationKey } : {}) } : {};
       if (!probe && this.config?.mode === "quick_tunnel" && (!this.lastProbeAt || ["error", "disconnected", "stopped"].includes(this.phase))) {
         await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "transport", outcome: "error", code: "remote_not_ready", httpStatus: 503, ...identity });
         response.status(503).json({ error: "remote_not_ready", traceId }); return;
@@ -907,4 +916,10 @@ async function abortableDelay(milliseconds: number, signal: AbortSignal): Promis
     const timer = setTimeout(() => { signal.removeEventListener("abort", aborted); resolve(); }, milliseconds);
     signal.addEventListener("abort", aborted, { once: true });
   });
+}
+
+/** Bound to the current local grant, never to request headers or client claims. */
+function authorizationKey(grant: StoredGrant): string {
+  return createHash("sha256").update(JSON.stringify([grant.grantId, grant.clientId, grant.resource,
+    [...new Set(grant.workspaceIds ?? [grant.workspaceId])].sort(), [...grant.scopes].sort(), grant.source ?? "", grant.usage ?? "web", grant.authorizationRevision ?? 1])).digest("hex").slice(0, 32);
 }

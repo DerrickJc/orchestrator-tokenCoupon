@@ -198,7 +198,26 @@ export interface ExternalBudgetExtendCommandDto { confirmed: true; }
 export type NativePickerCommandDto = { kind: "directory"; workspaceId?: never } | { kind: "files"; workspaceId: string };
 export interface NativePickerResultDto { cancelled: boolean; paths: string[]; }
 export type RemoteScopeDto = "repository:read" | "planning:read" | "planning:write" | "session:read" | "session:control";
+/** Redacted per-grant evidence; client names and local aliases are not authenticated webpage identities. */
+export interface ConnectionCallDto {
+  traceId: string; at: number; endpoint: string; stage: string; outcome: string;
+  tool?: string; code?: string; clientId?: string; grantId?: string; authorizationKey?: string;
+}
+export interface McpConnectionReceiptDto {
+  mcpUrl: string; buildId: string; clientFingerprint: string; traceId: string;
+  alias?: string; aliasSource?: "local_user"; clientName: string; clientNameSource: "client_declared";
+  usage: "web" | "diagnostic";
+}
+export interface RemoteClientStatusDto {
+  grantId: string; clientId: string; name: string; clientName: string; alias?: string;
+  nameSource: "local_alias" | "client_declared"; usage: "web" | "diagnostic";
+  source: string; workspaceIds: string[]; mcpUrl: string; createdAt: number; expiresAt: number;
+  status: "active" | "expired" | "revoked" | "address_changed";
+  oauthState: "awaiting_token" | "token_issued";
+  toolVerified: boolean; lastCall?: ConnectionCallDto; lastSuccess?: ConnectionCallDto;
+}
 export interface RemoteConnectionStatusDto {
+  clients?: RemoteClientStatusDto[];
   gatewayTracing?: { enabled: true; lastRequestAt?: number; lastToolAt?: number };
   quickTunnel?: { available: boolean; reason?: string };
   configured: boolean; enabled: boolean; publicOrigin?: string; mcpUrl?: string; gateway: "stopped" | "running" | "error";
@@ -212,7 +231,7 @@ export type QuickConnectionCommandDto =
   | { consent: true; workspaceId: string; workspaceIds?: string[]; scopes?: RemoteScopeDto[]; port?: number; connectionOnly?: never };
 export interface ConfigureConnectionCommandDto { publicOrigin: string; port?: number; }
 export interface RenameGrantCommandDto { alias: string; }
-export interface UpdateGrantCommandDto { workspaceIds: string[]; source: "chatgpt" | "claude" | "other"; alias?: string; }
+export interface UpdateGrantCommandDto { workspaceIds: string[]; source: "chatgpt" | "claude" | "other"; alias?: string; usage?: "web" | "diagnostic"; }
 export interface DecideApprovalCommandDto {
   decision: "allow" | "deny"; workspaceId?: string; workspaceIds?: string[]; source?: "chatgpt" | "claude" | "other";
   scopes?: RemoteScopeDto[];

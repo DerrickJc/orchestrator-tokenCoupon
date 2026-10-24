@@ -32,7 +32,7 @@ async function freePort(): Promise<number> {
 
 async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: TunnelAdapter; componentExecutable?: string; healthIntervalMs?: number; probeImpl?: PublicProbe; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-quick-"));
-  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
   const path = join(root, "project"); await mkdir(path);
   const dataDirectory = join(root, "state");
   const service = new ApplicationService({ dataDirectory }); await service.initialize();
@@ -95,6 +95,61 @@ async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[
 }
 
 describe("Quick Tunnel connection", () => {
+  it("binds read-only verification to each grant and current authorization, excluding locally marked SDK diagnostics", async () => {
+    const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const otherPath = join(h.root, "other-project"); await mkdir(otherPath);
+    const other = await h.service.addWorkspace(otherPath, "另一个项目");
+    const connect = async (label: string, workspaceId: string, diagnostic: boolean) => {
+      const auth = await authorize(h, ["planning:read"], { clientName: "ChatGPT" });
+      await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId, source: "chatgpt", scopes: ["planning:read"], alias: label });
+      const grant = h.remote.grants().find(item => item.clientId === auth.client.client_id)!;
+      if (diagnostic) await h.remote.updateGrant(grant.grantId, { workspaceIds: [workspaceId], source: "chatgpt", usage: "diagnostic" });
+      const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+      const response = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` }) });
+      const token = (await response.json() as { access_token: string }).access_token;
+      const client = new Client({ name: "claimed-webpage-name-is-not-trusted", version: "1" }); cleanups.push(() => client.close());
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${h.origin}/mcp`), { fetch: h.proxyFetch, requestInit: { headers: { Authorization: `Bearer ${token}`, "X-Token-Coupon-Usage": "web" } } }));
+      return { client, grant, token };
+    };
+    const sdk = await connect("SDK 自检", h.workspace.workspaceId, true);
+    expect(h.remote.status().remoteClientVerified).toBe(false); // OAuth + tools/list is insufficient.
+    const sdkReply = await sdk.client.callTool({ name: "workspace_query", arguments: {} });
+    const sdkData = sdkReply.structuredContent?.data as { workspaces: Array<{ workspaceId: string }>; connection: Record<string, unknown> };
+    expect(sdkData.workspaces.map(item => item.workspaceId)).toEqual([h.workspace.workspaceId]);
+    expect(sdkData.connection).toMatchObject({ mcpUrl: `${h.origin}/mcp`, alias: "SDK 自检", aliasSource: "local_user", clientNameSource: "client_declared", usage: "diagnostic", traceId: sdkReply._meta?.["token-coupon/traceId"] });
+    expect(sdkData.connection.clientFingerprint).toMatch(/^[a-f0-9]{12}$/);
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+    expect(h.remote.status().clients?.find(item => item.grantId === sdk.grant.grantId)).toMatchObject({ toolVerified: true, usage: "diagnostic" });
+    const web = await connect("demo41", other.workspaceId, false);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.toolVerified).toBe(false);
+    const reply = await web.client.callTool({ name: "workspace_query", arguments: {} });
+    const data = reply.structuredContent?.data as { workspaces: Array<{ workspaceId: string }>; connection: Record<string, unknown> };
+    expect(data.workspaces.map(item => item.workspaceId)).toEqual([other.workspaceId]);
+    expect(data.connection).toMatchObject({ alias: "demo41", usage: "web" });
+    expect(data.connection.clientFingerprint).not.toBe(sdkData.connection.clientFingerprint);
+    expect(h.remote.status().remoteClientVerified).toBe(true);
+    const traceId = data.connection.traceId;
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.lastSuccess?.traceId).toBe(traceId);
+    await h.remote.renameGrant(web.grant.grantId, "demo42"); // Renaming does not change authorization.
+    expect(h.remote.status().remoteClientVerified).toBe(true);
+    await h.remote.updateGrant(web.grant.grantId, { workspaceIds: [h.workspace.workspaceId], source: "chatgpt" });
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+    await h.remote.updateGrant(web.grant.grantId, { workspaceIds: [other.workspaceId], source: "chatgpt" });
+    expect(h.remote.status().remoteClientVerified).toBe(false); // Switching back must not revive old evidence.
+    const fresh = await web.client.callTool({ name: "workspace_query", arguments: {} });
+    expect((fresh.structuredContent?.data as { connection: { alias: string } }).connection.alias).toBe("demo42");
+    expect(h.remote.status().remoteClientVerified).toBe(true);
+    const failed = await web.client.callTool({ name: "planning_query", arguments: { workspaceId: h.workspace.workspaceId } });
+    expect(failed.isError).toBe(true);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)).toMatchObject({ toolVerified: true, lastCall: { outcome: "error", code: "mcp_workspace_forbidden" } });
+    const serialized = JSON.stringify([sdkReply, reply, h.remote.status()]);
+    for (const secret of [sdk.token, web.token, h.workspace.path, other.path, "claimToken"]) expect(serialized).not.toContain(secret);
+    expect(await h.service.listPlannings(h.workspace.workspaceId)).toEqual([]);
+    expect(await h.service.listPlannings(other.workspaceId)).toEqual([]);
+    await h.remote.revokeGrant(web.grant.grantId);
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+  });
+
   it("traces Host and route rejection, missing credentials and one authenticated tool call without logging secrets", async () => {
     const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
     const wrongHost = await new Promise<{ status: number | undefined; trace: string | string[] | undefined }>((resolve, reject) => {
@@ -563,7 +618,7 @@ describe("Quick Tunnel connection", () => {
 
 describe("component integrity and tunnel parser", () => {
   it("cleans incomplete downloads on cancellation and refuses oversized downloads", async () => {
-    const root = await mkdtemp(join(tmpdir(), "token-coupon-cancel-install-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const root = await mkdtemp(join(tmpdir(), "token-coupon-cancel-install-")); cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const content = Buffer.from("download");
     const asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
     const controller = new AbortController();
@@ -574,7 +629,7 @@ describe("component integrity and tunnel parser", () => {
   });
 
   it.skipIf(process.platform === "win32")("stops a process that fails to provide a URL and distinguishes unexpected exit", async () => {
-    const root = await mkdtemp(join(tmpdir(), "token-coupon-timeout-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const root = await mkdtemp(join(tmpdir(), "token-coupon-timeout-")); cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const script = join(root, "silent-component"); await writeFile(script, "#!/bin/sh\nexec sleep 300\n", { mode: 0o700 });
     await expect(new QuickTunnelAdapter(50).start(script, 4178, root, new AbortController().signal, () => undefined)).rejects.toThrow("tunnel_url_timeout");
     const exitScript = join(root, "exit-component"); await writeFile(exitScript, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
@@ -582,7 +637,7 @@ describe("component integrity and tunnel parser", () => {
   });
   it("rejects a tampered download before it can be installed", async () => {
     const root = await mkdtemp(join(tmpdir(), "token-coupon-component-"));
-    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const content = Buffer.from("official binary test bytes");
     const asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
     const fetcher: typeof fetch = async () => new Response(content);
@@ -598,7 +653,7 @@ describe("component integrity and tunnel parser", () => {
   it.skipIf(process.platform === "win32")("recognizes only complete Quick Tunnel origins across process output chunks", async () => {
     expect(discoverQuickOrigin("URL https://sample.trycloudflare.com | ready")).toBe("https://sample.trycloudflare.com");
     expect(discoverQuickOrigin("https://sample.trycloudflare.com.evil.test")).toBeUndefined();
-    const root = await mkdtemp(join(tmpdir(), "token-coupon-tunnel-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const root = await mkdtemp(join(tmpdir(), "token-coupon-tunnel-")); cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const script = join(root, "fake-cloudflared");
     await writeFile(script, "#!/bin/sh\nprintf 'https://chunked.trycloud' >&2\nprintf 'flare.com\\n' >&2\nexec sleep 300\n", { mode: 0o700 });
     const adapter = new QuickTunnelAdapter();

@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
+import { DAEMON_BUILD_INFO } from "./build-info.js";
 import { remoteToolRegistration } from "./mcp-tool-auth.js";
 import { ApplicationService, sanitizeOutput } from "./application-service.js";
 import type { ClaimProof, WebActor, WebSource } from "./web-handoff.js";
@@ -26,6 +27,7 @@ export interface RemoteMcpPrincipal {
   assertActive?: (workspaceId?: string) => Promise<void>;
   scopes: RemoteMcpScope[];
   expiresAt: number;
+  connection?: { mcpUrl: string; authorizationKey: string; usage: "web" | "diagnostic"; alias?: string; clientName: string };
 }
 
 export interface ToolObservation { traceId: string; tool: string; outcome: "success" | "error"; durationMs: number; code?: string; }
@@ -46,7 +48,13 @@ export function createMcpServer(service: ApplicationService, principal?: RemoteM
       catch { /* Audit failure must never replay or change a business operation. */ }
     };
     try {
-      await principal?.assertActive?.(); const value = await action();
+      await principal?.assertActive?.(); let value = await action();
+      if (tool === "workspace_query" && principal?.connection) {
+        const { mcpUrl, alias, clientName, usage } = principal.connection;
+        value = { ...(value as object), connection: { mcpUrl, buildId: DAEMON_BUILD_INFO.buildId,
+          clientFingerprint: createHash("sha256").update(principal.clientId).digest("hex").slice(0, 12),
+          ...(alias ? { alias, aliasSource: "local_user" } : {}), clientName, clientNameSource: "client_declared", usage, traceId } };
+      }
       const job = (value as { job?: JobRecord } | null)?.job;
       await observe(job && ["failed", "cancelled", "interrupted"].includes(job.status) ? "error" : "success", job?.error);
       return { ...result(value), _meta: { "token-coupon/traceId": traceId } };
@@ -85,7 +93,7 @@ export function createMcpServer(service: ApplicationService, principal?: RemoteM
 
   // The bound workspace ID is a locator, not an additional repository capability.
   // Every remote grant may discover only its own project, even when it has no read scope.
-  registerTool("workspace_query", { description: "用户要求通过 Token Coupon 规划/审查本地项目或验证连接时，先调用此工具确认授权与项目标识。只读列出此连接获准访问的已登记项目；不返回本机绝对路径，也不能注册任意路径或切换其他客户端项目。", inputSchema: z.object({}).strict(), annotations: readOnly }, () => guard("workspace_query", async () => {
+  registerTool("workspace_query", { description: "用户要求通过 Token Coupon 规划/审查本地项目或验证连接时，先调用此工具确认授权与项目标识。只读列出此连接获准访问的已登记项目，远程回执 connection 提供本服务地址、构建版本、客户端短标识及 traceId；别名由本机用户填写，客户端名称为声明值，均不证明网页身份。仅验证连接时调用一次并停止，不创建规划。不返回本机绝对路径，也不能注册任意路径或切换其他客户端项目。", inputSchema: z.object({}).strict(), annotations: readOnly }, () => guard("workspace_query", async () => {
     if (principal && principal.expiresAt <= Date.now()) throw new Error("mcp_access_expired：网页授权已过期，请在本机控制台重新授权");
     return { workspaces: service.listWorkspaces().filter((item) => !principal || (principal.workspaceIds ?? [principal.workspaceId]).includes(item.workspaceId)).map((item) => principal ? ({ workspaceId: item.workspaceId, label: item.label }) : item), nextAction: "使用获准项目的 workspaceId" };
   }));
