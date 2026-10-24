@@ -127,6 +127,7 @@ describe("Quick Tunnel connection", () => {
     expect(data.workspaces.map(item => item.workspaceId)).toEqual([other.workspaceId]);
     expect(data.connection).toMatchObject({ alias: "demo41", usage: "web" });
     expect(data.connection.clientFingerprint).not.toBe(sdkData.connection.clientFingerprint);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.clientFingerprint).toBe(data.connection.clientFingerprint);
     expect(h.remote.status().remoteClientVerified).toBe(true);
     const traceId = data.connection.traceId;
     expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.lastSuccess?.traceId).toBe(traceId);
@@ -142,8 +143,13 @@ describe("Quick Tunnel connection", () => {
     const failed = await web.client.callTool({ name: "planning_query", arguments: { workspaceId: h.workspace.workspaceId } });
     expect(failed.isError).toBe(true);
     expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)).toMatchObject({ toolVerified: true, lastCall: { outcome: "error", code: "mcp_workspace_forbidden" } });
+    const invalid = await web.client.callTool({ name: "workspace_query", arguments: { privateExtra: "DO_NOT_LOG_THIS_VALUE" } });
+    expect(invalid.isError).toBe(true);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.lastCall).toMatchObject({ outcome: "error", code: "mcp_tool_input_rejected", tool: "workspace_query" });
+    const unknown = await web.client.callTool({ name: "DO_NOT_LOG_THIS_UNKNOWN_NAME", arguments: {} });
+    expect(unknown.isError).toBe(true);
     const serialized = JSON.stringify([sdkReply, reply, h.remote.status()]);
-    for (const secret of [sdk.token, web.token, h.workspace.path, other.path, "claimToken"]) expect(serialized).not.toContain(secret);
+    for (const secret of [sdk.token, web.token, h.workspace.path, other.path, "claimToken", "DO_NOT_LOG_THIS_VALUE", "DO_NOT_LOG_THIS_UNKNOWN_NAME"]) expect(serialized).not.toContain(secret);
     expect(await h.service.listPlannings(h.workspace.workspaceId)).toEqual([]);
     expect(await h.service.listPlannings(other.workspaceId)).toEqual([]);
     await h.remote.revokeGrant(web.grant.grantId);

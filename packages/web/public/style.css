@@ -632,3 +632,10 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
   .dag-node .dag-detail-button text { fill:#c9e3f8; }
   .dag-incoming { color:#8bbced; } .dag-outgoing { color:#edb77f; }
 }
+
+/* Keep connector choice and its action together without stretching long names. */
+.connection-identity-controls { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; }
+.connection-identity-controls label { flex:1 1 320px; min-width:0; display:grid; gap:6px; }
+.connection-identity-controls select { width:100%; min-width:0; text-overflow:ellipsis; }
+.connection-identity-controls .button { flex:0 0 auto; }
+#connection-identity p { margin:10px 0 0; overflow-wrap:anywhere; }

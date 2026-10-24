@@ -70,6 +70,48 @@ function grantMcpName(grant) {
   const generic = /^(chatgpt|claude|claude\.ai|未命名网页客户端|网页客户端)(?:[\s_-]*(?:mcp|web|client|connector))?$/i.test(client);
   return alias || (generic ? "" : client);
 }
+// A selection here identifies a local OAuth grant. It cannot select an app in a webpage.
+function promptClients() {
+  return (state.remoteStatus?.clients || []).filter(client => client.status === "active" && client.usage !== "diagnostic");
+}
+function selectedPromptClient() {
+  return promptClients().find(client => client.grantId === state.promptGrantId);
+}
+function verifiedPromptClients(workspaceId = state.workspace?.workspaceId) {
+  return promptClients().filter(client => client.toolVerified && (!workspaceId || client.workspaceIds?.includes(workspaceId)));
+}
+function webpageSelectionHeader(workspaceId, target) {
+  const client = selectedPromptClient();
+  if (client && workspaceId && !client.workspaceIds?.includes(workspaceId)) throw new Error("所选网页连接未授权本项目，请在连接中心选择匹配的连接，或先编辑该连接的工作区授权。");
+  if (client && target && target !== "any" && client.source !== target) throw new Error("所选网页连接来源与本次交接不一致，请在连接中心选择对应的 ChatGPT／Claude 连接；已准备的操作会保留。任何名称备注都不会替代网页中的实际选择。");
+  const address = client?.mcpUrl || state.remoteStatus?.mcpUrl;
+  const alias = client?.alias;
+  return [(client?.source || target) === "claude" ? "发送前：在 Claude 当前聊天启用并选择下面的 MCP 连接，再发送。" : "发送前：ChatGPT 请在网页输入 @，从列表实际选择本连接再发送；Claude 请在当前聊天启用对应 MCP。仅粘贴名称不会切换工具。",
+    alias ? `网页连接名称（用户填写，请与网页设置核对）：${JSON.stringify(alias)}` : "网页连接名称尚未填写，请核对当前聊天实际选中的连接；不要沿用旧聊天的工具。",
+    ...(address ? [`MCP 地址：${address}`] : []),
+    ...(client ? [`客户端短标识：${client.clientFingerprint || shortId(client.clientId)}；本机备注不代表网页认证身份。`] : []),
+    "若工具回执的地址或连接与上述信息不符，请停止并说明，不自动重建连接或新建 Planning。"].join("\n");
+}
+function renderConnectionIdentity() {
+  const select = $("#connection-prompt-client"); if (!select) return;
+  const clients = promptClients();
+  // A disappeared selection must not silently switch to another client's grant.
+  if (state.promptGrantId && !clients.some(client => client.grantId === state.promptGrantId)) state.promptGrantId = "";
+  if (state.promptGrantId === undefined && clients.length === 1) state.promptGrantId = clients[0].grantId;
+  const signature = JSON.stringify([clients.map(client => [client.grantId, client.alias, client.clientName, client.workspaceIds, client.source]), state.workspaces.map(item => [item.workspaceId, item.label])]);
+  if (select.dataset.signature !== signature) {
+    select.replaceChildren(new Option("请选择网页连接；名称未知可先核对地址", ""));
+    for (const client of clients) {
+      const projects = (client.workspaceIds || []).map(id => state.workspaces.find(item => item.workspaceId === id)?.label || id).join("、");
+      select.append(new Option(`${client.alias || "名称待填写"} · ${{ chatgpt: "ChatGPT", claude: "Claude" }[client.source] || "网页"} · ${client.clientFingerprint || shortId(client.clientId)} · ${projects}`, client.grantId));
+    }
+    select.dataset.signature = signature;
+  }
+  select.value = state.promptGrantId || "";
+  const client = selectedPromptClient(), summary = $("#connection-identity-status");
+  const recentFailure = client?.lastCall?.outcome === "error" ? `最近调用失败：${client.lastCall.code || "待诊断"}，请展开调用详情核对追踪 ID。` : "";
+  summary.textContent = state.remoteUnavailable || state.authorizationsFresh === false ? "连接信息暂不可用，显示的上次记录不能证明当前可用。" : !client ? "请选择要核对的网页连接；同一地址下的各客户端授权与验证独立。名称可在授权记录中填写。" : `${client.alias ? `用户填写名称：${client.alias}` : "网页名称未知，可在授权记录中填写"} · ${state.remoteStatus?.transport === "ready" ? "公网入口可用" : "公网入口尚未就绪"} · ${client.oauthState === "awaiting_token" ? "本机已批准，等待网页完成 OAuth" : "OAuth 已完成"} · ${client.toolVerified ? `本客户端调用成功：${new Date(client.lastSuccess?.at).toLocaleString()}` : "尚未收到此连接在当前授权范围内的成功工具调用，请核对网页所选连接及地址"}。${recentFailure}`;
+}
 function renderGrantOAuthState(card, grant) {
   const hint = card.querySelector(".grant-oauth-state"); if (!hint) return;
   hint.textContent = grant.oauthState === "awaiting_token" ? "网页待完成连接" : "网页授权有效";
@@ -79,11 +121,11 @@ function renderAuthorizationOverview() {
   const grants = state.grants || [], remote = state.remoteStatus || {}, ready = grants.filter(grant => grant.oauthState !== "awaiting_token");
   const root = $("#remote-authorization-status");
   $("#remote-grant-count").textContent = `${ready.length} 个已授权 · ${grants.length - ready.length} 个待完成`;
-  const related = (remote.recentCalls || []).filter(item => ["oauth", "authentication"].includes(item.stage) && grants.some(grant => item.grantId === grant.grantId || item.clientId && item.clientId === grant.clientId)).at(-1);
+  const related = (remote.recentCalls || []).filter(item => ["oauth", "authentication"].includes(item.stage) && grants.some(grant => item.grantId === grant.grantId || item.clientId && item.clientId === grant.clientId)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
   const failed = related?.outcome === "error";
   const unknown = state.remoteUnavailable || state.authorizationsFresh === false;
   const sources = [...new Set(ready.map(grant => ({ chatgpt: "ChatGPT", claude: "Claude", other: "其他网页" })[grant.source] || grant.clientName || "网页"))].join("、");
-  root.textContent = unknown ? "连接状态暂不可用，请刷新状态后确认。" : failed ? `${ready.length ? "已有网页授权可用；" : ""}最近一次网页授权失败（${related.code || "令牌交换未完成"}）。请在原网页重新连接，详情见连接诊断。` : ready.length ? remote.remoteClientVerified ? `网页已连通 · 已确认实际工具调用成功；授权来源：${sources}。` : `${sources} 授权成功 · 等待首次工具调用验证。` : grants.length ? "本机权限已保存，等待网页完成连接。请回到发起授权的网页；若连接报错，展开连接诊断查看原因。" : "尚无网页授权，请在 ChatGPT／Claude 发起连接。";
+  root.textContent = unknown ? "连接状态暂不可用，请刷新状态后确认。" : failed ? `${ready.length ? "已有网页授权可用；" : ""}最近一次网页授权失败（${related.code || "令牌交换未完成"}）。请在原网页重新连接，详情见连接诊断。` : ready.length ? verifiedPromptClients(null).length ? `网页已连通 · ${verifiedPromptClients(null).length} 个客户端已有成功调用，其余需分别验证；授权来源：${sources}。` : `${sources} 授权成功 · 等待首次工具调用验证。` : grants.length ? "本机权限已保存，等待网页完成连接。请回到发起授权的网页；若连接报错，展开连接诊断查看原因。" : "尚无网页授权，请在 ChatGPT／Claude 发起连接。";
   root.className = `notice ${unknown || failed || !ready.length ? "notice-warn" : "notice-success"}`;
   let names = $("#remote-mcp-names");
   if (!names) { names = document.createElement("p"); names.id = "remote-mcp-names"; names.className = "hint"; root.after(names); }
@@ -475,7 +517,7 @@ function renderRemoteGrants(grants) {
   for (const card of grantRoot.querySelectorAll("[data-grant-id]")) if (!grants.some(grant => grant.grantId === card.dataset.grantId)) card.remove();
   for (const grant of grants) {
     const workspaceIds = grant.workspaceIds || [grant.workspaceId];
-    const signature = JSON.stringify([grant.alias, grant.source, grant.clientName, workspaceIds, grant.scopes, grant.expiresAt, state.workspaces, state.authorizationWorkspace?.workspaceId]);
+    const signature = JSON.stringify([grant.alias, grant.source, grant.usage, grant.clientName, workspaceIds, grant.scopes, grant.expiresAt, state.workspaces, state.authorizationWorkspace?.workspaceId]);
     const previous = [...grantRoot.children].find(card => card.dataset.grantId === grant.grantId);
     if (previous) renderGrantOAuthState(previous, grant);
     if (previous?.dataset.signature === signature) continue;
@@ -490,11 +532,11 @@ function renderRemoteGrants(grants) {
     const card = document.createElement("article"); card.className = "remote-approval-card remote-grant-card"; card.dataset.grantId = grant.grantId; card.dataset.signature = signature;
     const heading = document.createElement("div"); heading.className = "remote-approval-heading";
     const name = grantMcpName(grant);
-    const title = document.createElement("b"); title.className = "grant-mcp-title"; title.textContent = `MCP：${name || "待设置名称"} · ${workspaceIds.length} 个项目`;
+    const title = document.createElement("b"); title.className = "grant-mcp-title"; title.textContent = `MCP：${name || "待设置名称"}${name ? grant.alias ? "（用户填写）" : "（客户端声明）" : ""} · ${workspaceIds.length} 个项目`;
     const rename = document.createElement("button"); rename.type = "button"; rename.className = "text-button grant-rename"; rename.textContent = name ? "修改名称" : "设置 MCP 名称";
     const status = document.createElement("span"); status.className = "grant-state badge badge-success"; status.setAttribute("role", "status"); heading.append(title, rename, status); card.append(heading);
     const nameForm = document.createElement("form"); nameForm.className = "grant-name-form hidden";
-    const nameLabel = document.createElement("label"); nameLabel.textContent = "MCP 名称";
+    const nameLabel = document.createElement("label"); nameLabel.textContent = "网页连接名称／本机别名（用户填写）";
     const nameInput = document.createElement("input"); nameInput.className = "grant-name-input"; nameInput.maxLength = 80; nameInput.value = grant.alias || ""; nameInput.placeholder = "填写网页端的连接名称，例如 demo1"; nameLabel.append(nameInput);
     const nameNote = document.createElement("p"); nameNote.className = "hint"; nameNote.textContent = "此名称在本机保存，用于对应网页中的连接；不会修改网页名称或访问权限。";
     const nameFeedback = document.createElement("p"); nameFeedback.className = "grant-name-feedback hint"; nameFeedback.setAttribute("role", "status");
@@ -519,6 +561,8 @@ function renderRemoteGrants(grants) {
     const sourceLabel = document.createElement("label"); sourceLabel.textContent = "网页来源"; sourceLabel.append(source);
     const aliasLabel = document.createElement("label"); aliasLabel.textContent = "MCP 名称（本机备注）"; aliasLabel.append(alias);
     const identity = document.createElement("details"); identity.className = "foldout"; identity.innerHTML = "<summary>连接名称与网页来源</summary>"; identity.append(sourceLabel, aliasLabel);
+    const usage = document.createElement("select"); usage.className = "grant-usage-select"; usage.append(new Option("网页连接", "web"), new Option("独立 SDK／诊断（不计作网页验证）", "diagnostic")); usage.value = grant.usage || "web";
+    const usageLabel = document.createElement("label"); usageLabel.textContent = "验证用途（由本机指定）"; usageLabel.append(usage); identity.append(usageLabel);
     const projects = projectCheckboxes(workspaceIds); editor.append(projects, identity); card.append(editor);
     const feedback = document.createElement("p"); feedback.className = "grant-editor-feedback hint"; feedback.setAttribute("role", "status"); card.append(feedback);
     const edit = document.createElement("button"); edit.type = "button"; edit.className = "button button-quiet grant-edit"; edit.textContent = "编辑授权";
@@ -533,9 +577,9 @@ function renderRemoteGrants(grants) {
       show(summary, !editing); show(editor, editing); show(edit, !editing); show(save, editing); show(cancel, editing); show(danger, !editing); if (add) show(add, !editing);
       rename.disabled = editing;
       status.textContent = saving ? "保存中…" : editing ? "编辑中 · 未保存" : "已保存"; status.className = `grant-state badge ${editing ? "badge-warning" : "badge-success"}`;
-      const selected = selectedProjects(projects), dirty = JSON.stringify([...selected].sort()) !== JSON.stringify([...workspaceIds].sort()) || source.value !== (grant.source || "") || (alias.value.trim() !== (grant.alias || ""));
+      const selected = selectedProjects(projects), dirty = JSON.stringify([...selected].sort()) !== JSON.stringify([...workspaceIds].sort()) || source.value !== (grant.source || "") || (alias.value.trim() !== (grant.alias || "")) || usage.value !== (grant.usage || "web");
       save.disabled = saving || confirming || !!card.dataset.stale || !dirty || !selected.length || !source.value; cancel.disabled = saving || confirming;
-      projects.disabled = saving || confirming; source.disabled = saving || confirming; alias.disabled = saving || confirming;
+      projects.disabled = saving || confirming; source.disabled = saving || confirming; alias.disabled = saving || confirming; usage.disabled = saving || confirming;
       card.setAttribute("aria-busy", String(saving));
       if (!card.dataset.stale) feedback.textContent = !editing ? "" : !selected.length ? "请至少选择一个可访问的工作区。" : !source.value ? "请选择网页来源。" : dirty ? "修改尚未保存，保存后才会更新网页访问范围。" : "可修改工作区或连接信息；取消编辑将保留原授权。";
     };
@@ -554,15 +598,15 @@ function renderRemoteGrants(grants) {
       } catch (error) { nameFeedback.textContent = `名称保存未完成：${error.message}`; }
       finally { nameSave.disabled = !!card.dataset.stale; nameCancel.disabled = false; }
     });
-    projects.addEventListener("change", updateEditor); source.addEventListener("change", updateEditor); alias.addEventListener("input", updateEditor);
+    projects.addEventListener("change", updateEditor); source.addEventListener("change", updateEditor); alias.addEventListener("input", updateEditor); usage.addEventListener("change", updateEditor);
     cancel.addEventListener("click", () => {
       for (const checkbox of projects.querySelectorAll("input")) checkbox.checked = workspaceIds.includes(checkbox.value);
-      source.value = grant.source || ""; alias.value = grant.alias || ""; identity.open = false; card.dataset.mode = "saved";
+      source.value = grant.source || ""; alias.value = grant.alias || ""; usage.value = grant.usage || "web"; identity.open = false; card.dataset.mode = "saved";
       if (card.dataset.stale) { card.remove(); state.grantSignature = ""; renderRemoteGrants(state.grants || []); } else updateEditor();
     });
     save.addEventListener("click", async () => {
       if (save.disabled || confirming) return;
-      const payload = { workspaceIds: selectedProjects(projects), source: source.value, alias: alias.value.trim() };
+      const payload = { workspaceIds: selectedProjects(projects), source: source.value, alias: alias.value.trim(), usage: usage.value };
       confirming = true; updateEditor();
       try {
         if (!await askConfirm("确认网页项目权限", "此连接将只能访问当前勾选的项目；取消勾选的项目会立即停止授权。", "保存权限")) return;
@@ -859,13 +903,13 @@ function renderConnectionSummary() {
   const lost = [...new Set(inactive.map(item => `${item.source} ${item.status === "expired" ? "授权已过期" : "授权已撤销"}`))].join("；");
   const pending = !state.remoteUnavailable && state.authorizationsFresh !== false ? state.pendingRemoteApprovals?.filter(item => new Date(item.expiresAt).getTime() > Date.now()) || [] : [];
   const authorization = pending.length ? `收到 ${pending.length} 个网页授权请求，等待本机确认` : state.authorizationsFresh === false ? "网页授权状态暂不可用（上次记录仅供参考）" : [sources.join("；"), lost].filter(Boolean).join("；") || "网页待授权";
-  const toolState = remote?.transport === "ready" && state.authorizationsFresh !== false ? remote.remoteClientVerified ? " · 网页工具：已观测成功调用" : pendingWebTokenExchange(remote) ? " · 网页连接：等待完成令牌交换" : grants.length ? " · 网页工具：待实际调用验证" : "" : "";
+  const toolState = remote?.transport === "ready" && state.authorizationsFresh !== false ? verifiedPromptClients().length ? " · 网页工具：已观测成功调用" : pendingWebTokenExchange(remote) ? " · 网页连接：等待完成令牌交换" : grants.length ? " · 网页工具：待实际调用验证" : "" : "";
   root.textContent = `${state.remoteUnavailable ? "连接状态暂不可用（上次状态仅供参考）" : remote?.transport === "ready" ? "公网入口可用" : remote?.busy ? "公网入口验证中" : "公网入口未就绪"} · ${authorization}${toolState} · ${state.workspace ? `工作区：${state.workspace.label}` : "未选择工作区，请手工选择"}`;
   root.classList.toggle("notice-warn", !!state.remoteUnavailable);
   const active = (state.grants || []).filter(grant => new Date(grant.expiresAt).getTime() > Date.now());
   const authorizationUnknown = !state.remoteUnavailable && remote?.transport === "ready" && state.authorizationsFresh === false;
   const needsAuthorization = !state.remoteUnavailable && !authorizationUnknown && remote?.transport === "ready" && !active.length;
-  const needsVerification = !state.remoteUnavailable && !authorizationUnknown && remote?.transport === "ready" && active.length && !remote.remoteClientVerified;
+  const needsVerification = !state.remoteUnavailable && !authorizationUnknown && remote?.transport === "ready" && active.length && !verifiedPromptClients().length;
   show($("#connection-action-needed"), state.route?.page !== "connect" && (state.route?.page !== "settings" || !!pending.length) && !!(pending.length || authorizationUnknown || needsAuthorization || needsVerification));
   const waitingForToken = active.length > 0 && active.every(grant => grant.oauthState === "awaiting_token");
   const verificationOnly = !!needsVerification && !pending.length && !waitingForToken;
@@ -880,34 +924,40 @@ function renderConnectionSummary() {
   $("#connection-copy-current").disabled = !remote?.mcpUrl;
 }
 function renderConnectionClients() {
+  renderConnectionIdentity();
   const remote = state.remoteStatus || {}, root = $("#connection-current-clients"), history = $("#connection-history-clients");
-  const clients = remote.clients || (state.grants || []).map(grant => ({ ...grant, name: grant.alias || grant.clientName || grant.source, status: "active", mcpUrl: remote.mcpUrl }));
+  const clients = [...(remote.clients || (state.grants || []).map(grant => ({ ...grant, name: grant.alias || grant.clientName || grant.source, status: "active", mcpUrl: remote.mcpUrl })))].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const expanded = new Set([...root.querySelectorAll("details[open][data-connection-fold]"), ...history.querySelectorAll("details[open][data-connection-fold]")].map(item => item.dataset.connectionFold));
   root.replaceChildren(); history.replaceChildren();
   const active = clients.filter(client => client.status === "active"), old = clients.filter(client => client.status !== "active");
   $("#connection-client-count").textContent = state.remoteUnavailable || state.authorizationsFresh === false ? "授权状态暂不可用" : `${active.length} 个有效 · ${old.length} 个历史`;
   const historyDetails = $("#connection-history"); if (historyDetails) historyDetails.querySelector("summary").textContent = `历史连接与失效授权 · ${old.length} 条`;
   const approvalHistory = $("#remote-approval-history"); if (approvalHistory) approvalHistory.querySelector("summary").textContent = `最近的授权请求 · ${(remote.authorizationRequests || []).filter(item => item.status !== "pending").length} 条`;
-  if (!active.length) root.innerHTML = '<p class="empty-state">当前没有有效的网页授权。复用公网入口不会恢复授权；请到对应网页更新地址并重新连接。</p>';
+  if (!active.length) root.innerHTML = '<p class="empty-state">当前没有有效的网页授权。请核对地址和授权状态；本机保存权限、停止隧道与网页移除连接是不同操作。</p>';
   const renderClient = (client, target) => {
     const card = document.createElement("article"); card.className = "connection-client";
     const names = (client.workspaceIds || [client.workspaceId]).map(id => state.workspaces.find(workspace => workspace.workspaceId === id)?.label || "已移除项目").join("、");
     const labels = { active: "授权有效", expired: "授权已过期", revoked: "授权已撤销", address_changed: "地址不匹配" };
     const call = client.lastCall;
-    card.innerHTML = `<div class="section-title"><strong>${esc(client.name || client.source || "网页客户端")}</strong><span class="badge ${client.status === "active" ? "badge-success" : "badge-warning"}">${esc(client.status === "active" && client.oauthState === "awaiting_token" ? "本机已批准 · 网页待连接" : labels[client.status])}</span></div><p>${esc(client.source || "来源待确认")} · 项目：${esc(names)}</p><p class="small">授权创建：${client.createdAt ? esc(new Date(client.createdAt).toLocaleString()) : "时间未知"} · 客户端 ${esc(shortId(client.clientId))} · 授权 ${esc(shortId(client.grantId))}</p><p class="small connection-endpoint">${esc(client.mcpUrl || "地址尚未记录")}</p><p>${call ? `${call.outcome === "success" ? "最近工具调用成功" : "最近工具调用失败"}：${esc(call.tool)} · ${esc(new Date(call.at).toLocaleString())}${call.code ? ` · ${esc(call.code)}` : ""}` : "尚无该授权客户端的实际工具调用记录"}</p>`;
+    const identity = client.alias ? `${client.alias}（用户填写）` : `${client.clientName || client.name || "网页名称未知"}（客户端声明）`;
+    const failure = call?.outcome === "error" ? `最近调用未完成：${call.code === "mcp_tool_input_rejected" ? "参数或工具名称校验失败" : call.code?.includes("forbidden") ? "本次访问超出授权范围" : "工具执行失败"}（${call.code || "原因待诊断"}）；详情含追踪 ID。` : "";
+    const verification = client.usage === "diagnostic" ? "独立 SDK／诊断调用，不计作网页验证" : client.toolVerified ? `本客户端调用已验证 · ${new Date(client.lastSuccess?.at).toLocaleString()}` : "尚未收到此连接的成功工具调用；请先核对网页选中的连接名称及地址";
+    card.innerHTML = `<div class="section-title"><strong>${esc(identity)}</strong><span class="badge ${client.status === "active" ? "badge-success" : "badge-warning"}">${esc(client.status === "active" && client.oauthState === "awaiting_token" ? "本机已批准 · 网页待连接" : labels[client.status])}</span></div><p>${esc(client.source || "来源待确认")} · 项目：${esc(names)}</p><p class="small connection-endpoint">${esc(client.mcpUrl || "地址尚未记录")}</p><p class="connection-verification">${esc(verification)}</p>${failure ? `<p class="notice notice-warn">${esc(failure)}</p>` : ""}<details class="foldout" data-connection-fold="${esc(client.grantId || client.clientId || "unknown")}"><summary>客户端、时间与最近调用</summary><p class="small">授权创建：${client.createdAt ? esc(new Date(client.createdAt).toLocaleString()) : "时间未知"} · 到期：${client.expiresAt ? esc(new Date(client.expiresAt).toLocaleString()) : "未知"} · 回执短标识 ${esc(client.clientFingerprint || "旧后台未提供")} · 客户端 ${esc(client.clientId || "未知")} · 授权 ${esc(shortId(client.grantId))}</p><p>${call ? `${call.outcome === "success" ? "最近工具调用成功" : "最近工具调用失败"}：${esc(call.tool)} · ${esc(new Date(call.at).toLocaleString())}${call.code ? ` · ${esc(call.code)}` : ""} · 追踪 ID：${esc(call.traceId)}` : "当前授权范围暂无工具调用记录"}</p></details>`;
     target.append(card);
   };
   active.slice(0, 5).forEach(client => renderClient(client, root));
   if (active.length > 5) {
-    const older = document.createElement("details"); older.className = "foldout older-connection-records";
+    const older = document.createElement("details"); older.className = "foldout older-connection-records"; older.dataset.connectionFold = "older-active";
     const summary = document.createElement("summary"); summary.textContent = `较早的有效授权 · ${active.length - 5} 条`;
     const content = document.createElement("div"); content.className = "connection-client-grid"; active.slice(5).forEach(client => renderClient(client, content)); older.append(summary, content); root.append(older);
   }
   old.slice(0, 5).forEach(client => renderClient(client, history));
   if (old.length > 5) {
-    const older = document.createElement("details"); older.className = "foldout older-connection-records";
+    const older = document.createElement("details"); older.className = "foldout older-connection-records"; older.dataset.connectionFold = "older-history";
     const summary = document.createElement("summary"); summary.textContent = `更早的失效授权 · ${old.length - 5} 条`;
     const content = document.createElement("div"); content.className = "connection-client-grid"; old.slice(5).forEach(client => renderClient(client, content)); older.append(summary, content); history.append(older);
   }
+  for (const fold of [...root.querySelectorAll("details[data-connection-fold]"), ...history.querySelectorAll("details[data-connection-fold]")]) fold.open = expanded.has(fold.dataset.connectionFold);
   show($("#connection-history"), !!old.length);
   const check = remote.probeCheck;
   $("#connection-check-details").textContent = `${remote.lastProbeAt ? `最近公网自检：${new Date(remote.lastProbeAt).toLocaleString()}` : "尚无成功的公网自检"}${check ? ` · 检查 ${check.attempt}/${check.maxAttempts} · ${check.state}${check.lastError ? ` · ${check.lastError}` : ""}` : ""}${remote.diagnosticsUnavailable ? " · 调用诊断存储暂不可用，不能保证记录完整" : ""}`;
@@ -915,7 +965,7 @@ function renderConnectionClients() {
   if (!tracing) { tracing = document.createElement("p"); tracing.id = "connection-tracing-status"; tracing.className = "hint"; $("#connection-check-details").after(tracing); }
   tracing.textContent = remote.gatewayTracing?.enabled ? `入口追踪已启用 · ${remote.gatewayTracing.lastRequestAt ? `最近请求：${new Date(remote.gatewayTracing.lastRequestAt).toLocaleString()}` : "尚未收到外部请求"} · ${remote.gatewayTracing.lastToolAt ? `最近工具调用：${new Date(remote.gatewayTracing.lastToolAt).toLocaleString()}` : "尚未收到工具调用"}` : "当前后台尚未提供完整入口追踪，请更新后台后查看。";
   const calls = $("#connection-recent-calls"); calls.replaceChildren();
-  if (!remote.recentCalls?.length) calls.innerHTML = '<p class="empty-state">当前入口尚无网页请求记录。若 GPT 已报错，请先核对网页保存的 URL；内部自检不显示为业务调用。</p>';
+  if (!remote.recentCalls?.length) calls.innerHTML = '<p class="empty-state">尚未收到当前入口的请求。若网页报错，请核对所选连接名称及地址；未观察到请求不能证明用户没有发送或授权被拒绝，无需先重建隧道。</p>';
   for (const entry of remote.recentCalls || []) {
     const line = document.createElement("p"); line.className = "small connection-call";
     const stage = entry.stage === "ingress" ? `${entry.httpMethod || "请求"} ${entry.route === "other" ? "其他路径" : entry.route || ""} · ${{ received: "入口已收到", completed: "响应已完成", aborted: "连接中断", stream_closed: "事件流已关闭" }[entry.requestState] || "入口记录"}` : entry.stage === "oauth" ? `OAuth ${entry.method === "refresh_token" ? "刷新令牌" : "换取令牌"}${entry.outcome === "success" ? "成功" : "失败"}` : entry.stage === "authentication" ? "认证失败，工具未执行" : entry.stage === "tool" ? `${entry.tool} ${entry.outcome === "success" ? "成功" : "失败"}` : `${entry.method || "请求"} 已到达网关`;
@@ -997,7 +1047,8 @@ function renderReference() {
 }
 async function copyResumePrompt() {
   if (!state.planning || !await confirmPlanChanges()) return;
-  const prompt = ["通过 Token Coupon MCP 继续已有计划，不新建 Planning，也不在网页执行代码。",
+  let header; try { header = webpageSelectionHeader(state.workspace?.workspaceId); } catch (error) { showToast(error.message, true); return; }
+  const prompt = [header, "通过 Token Coupon MCP 继续已有计划，不新建 Planning，也不在网页执行代码。",
     `项目：${JSON.stringify(state.workspace.label)}；workspaceId：${state.workspace.workspaceId}；planningId：${state.planning.planningId}。`,
     "先调用 planning_query，使用上面的 workspaceId / planningId 一次核实授权并读取最新需求、草案、审查与 handoffs，无需重复 workspace_query 或 handoff_query。",
     "从返回的 handoffs 选择当前待处理操作，直接 handoff_claim 领取并获取协议；没有待处理操作时才 planning_prepare，继续规划或审查，再 external_submit。",
@@ -2358,7 +2409,7 @@ function renderHandoffs() {
     line.textContent = `${slot.state === "succeeded" ? "✓ 已提交" : slot.owner ? slot.owner.expired ? "领取已到期" : "已领取处理中" : "等待网页领取"} · ${ownerLabel ? `处理来源 ${ownerLabel} · ` : ""}${slot.pendingInputs} 条待处理输入`;
     const meta = document.createElement("p"); meta.className = "hint"; meta.textContent = `接手码 ${slot.code}${activity ? ` · 最近活动 ${new Date(activity).toLocaleTimeString()}` : ""}`;
     const copy = document.createElement("button"); copy.className = "button button-quiet"; copy.textContent = "复制接手提示";
-    copy.addEventListener("click", () => void copyHandoffPrompt(slot.prompt)); card.append(title, line, meta, copy); root.append(card);
+    copy.addEventListener("click", () => void copyHandoffPrompt(slot.prompt, slot.target)); card.append(title, line, meta, copy); root.append(card);
   }
   for (const role of ["plan", "review"]) for (const target of ["chatgpt", "claude"]) {
     const button = document.createElement("button"); button.className = "button button-quiet"; button.textContent = `交给 ${target === "chatgpt" ? "ChatGPT" : "Claude"}${role === "plan" ? "继续规划" : "审查"}`;
@@ -2368,12 +2419,13 @@ function renderHandoffs() {
       const connected = (state.grants || []).some(grant => grant.source === target && (grant.workspaceIds || [grant.workspaceId]).includes(state.workspace.workspaceId) && grant.scopes.includes("planning:write"));
       if (!connected) { showToast(`请先在连接区为 ${target} 授权当前项目，并保存对应来源。`, true); state.managingConnection = true; await navigate("/connect"); renderConnectionEntry(); return; }
       const job = await startJob("准备网页交接", requestKey => api(`/api/v1/workspaces/${state.workspace.workspaceId}/plannings/${state.planning.planningId}/handoff`, { method: "POST", body: JSON.stringify({ requestKey, role, target }) }), true);
-      if (job?.status === "succeeded") await copyHandoffPrompt(job.result.prompt);
+      if (job?.status === "succeeded") await copyHandoffPrompt(job.result.prompt, target);
     }); root.append(button);
   }
 }
-async function copyHandoffPrompt(prompt) {
+async function copyHandoffPrompt(prompt, target) {
   if (!prompt) return;
+  try { prompt = webpageSelectionHeader(state.workspace?.workspaceId, target) + "\n\n" + prompt; } catch (error) { showToast(error.message, true); return; }
   try { await copyText(prompt); showToast("接手提示已复制。到目标网页发送一次即可。请保持本地服务运行。"); }
   catch { showCopyFallback("复制接手提示，到目标网页发送", prompt); }
 }
@@ -4872,8 +4924,9 @@ $("#copy-web-planning").addEventListener("click", async () => {
   if (!state.workspace || !await confirmPlanChanges()) return;
   const executionDefaults = { runnerId: $("#runner-id").value, mode: "managed", ...($("#runner-model").value.trim() ? { modelId: $("#runner-model").value.trim() } : {}) };
   if (!executionDefaults.runnerId) { showToast("请先选择执行 Runner。", true); return; }
+  let header; try { header = webpageSelectionHeader(state.workspace?.workspaceId); } catch (error) { showToast(error.message, true); return; }
   const prompt = [
-    "使用 Token Coupon MCP，为已授权项目开始一次新的规划。",
+    header, "使用 Token Coupon MCP，为已授权项目开始一次新的规划。",
     "本轮仅负责规划／审查。用户需求中的实现、测试和交付应写入待批准计划，由本机 Runner 后续执行；不要在网页沙箱编写源码、安装依赖、执行测试或生成交付 ZIP。",
     `项目名称：${JSON.stringify(state.workspace.label)}`,
     `项目标识（先用 workspace_query 核实授权）：${JSON.stringify(state.workspace.workspaceId)}`,
@@ -5262,9 +5315,12 @@ $("#connection-return-plan").addEventListener("click", async () => {
 });
 $("#connection-copy-current").addEventListener("click", () => $("#remote-copy").click());
 $("#connection-verify-web").addEventListener("click", async () => {
-  const context = state.planning && state.workspace ? { workspaceId: state.workspace.workspaceId, planningId: state.planning.planningId } : state.connectionReturn;
-  const prompt = ["通过当前选中的 Token Coupon MCP，仅做只读连接验证。请实际调用 workspace_query，汇总授权项目与真实工具回执；不创建 Planning、不领取或提交审查、不批准或执行。", context ? `核实后只读 planning_query：workspaceId=${context.workspaceId}，planningId=${context.planningId}，报告已有计划当前阶段。` : "工具不可用时，报告错误和追踪 ID（如有），不要用网页沙箱替代。"].join("\n");
-  await copyHandoffPrompt(prompt);
+  let header; try { header = webpageSelectionHeader(); } catch (error) { showToast(error.message, true); return; }
+  const prompt = [header, "仅做只读连接验证：实际调用一次 workspace_query({})，不重试，不调用其他工具。",
+    "汇总获准项目，以及回执 connection 中的 MCP 地址、buildId、clientFingerprint、名称来源和 traceId；报告实际调用的工具连接名，无法取得时写未知，不能把本机备注当认证身份。",
+    "不创建 Planning、不领取或提交审查、不批准或执行。不在网页沙箱执行代码。失败保留原始错误及 traceId（如有），不要据此猜测项目未授权。"].join("\n");
+  try { await copyText(prompt); showToast("连接验证提示已复制。请在网页实际选择对应连接后发送；仅核验，不启动业务。"); }
+  catch { showCopyFallback("复制只读连接验证提示", prompt); }
 });
 $("#connection-compare-url").addEventListener("click", () => {
   const result = $("#connection-url-result");
@@ -5429,3 +5485,8 @@ setInterval(() => { if (state.workspace && (!state.activeJob || ["planning.run",
 void init();
 
 setInterval(() => { if (state.planningProgressJob?.status === "running") renderPlanningProgress(); }, 1000);
+
+$("#connection-prompt-client").addEventListener("change", event => {
+  state.promptGrantId = event.target.value; renderConnectionIdentity();
+});
+$("#connection-identity-verify").addEventListener("click", () => $("#connection-verify-web").click());

@@ -1467,10 +1467,10 @@ it("distinguishes valid OAuth from actual webpage calls and retains explicit nav
   expect(h.visible("connection-repair")).toBe(false); expect(h.visible("connection-copy-current")).toBe(false);
   expect(h.visible("connection-action-description")).toBe(false);
   h.element("connection-verify-web").click(); await expect.poll(() => h.copied.length).toBe(1);
-  expect(h.copied[0]).toContain("workspace_query"); expect(h.copied[0]).toContain("planningId=second");
+  expect(h.copied[0]).toContain("workspace_query({})"); expect(h.copied[0]).not.toContain("planningId=second"); expect(h.copied[0]).toContain("不调用其他工具");
   expect(h.copied[0]).toContain("不创建 Planning"); expect(h.copied[0]).toContain("不领取或提交审查");
   const lastCall = { traceId: "safe-trace", at: Date.now(), stage: "tool", outcome: "success", tool: "workspace_query", httpStatus: 200 };
-  h.setRemote({ remoteClientVerified: true, clients: [{ ...client, lastCall }], recentCalls: [lastCall], probeCheck: { state: "succeeded", attempt: 1, maxAttempts: 3, background: true, startedAt: Date.now() } });
+  h.setRemote({ remoteClientVerified: true, clients: [{ ...client, toolVerified: true, lastCall, lastSuccess: lastCall }], recentCalls: [lastCall], probeCheck: { state: "succeeded", attempt: 1, maxAttempts: 3, background: true, startedAt: Date.now() } });
   h.element("refresh").click(); await expect.poll(() => h.visible("connection-action-needed")).toBe(false);
   await expect.poll(() => h.element("connection-current-clients").textContent).toContain("最近工具调用成功");
   expect(h.element("connection-recent-calls").textContent).toContain("safe-trace");
@@ -2860,16 +2860,16 @@ it("summarizes observed OAuth and tool results once, keeps old pending records c
   const h = await page({ ready: true });
   const old = { grantId: "old", clientId: "old-client", source: "claude", workspaceIds: ["project"], expiresAt: Date.now() + 60000, oauthState: "awaiting_token" };
   const ready = { ...old, grantId: "current", clientId: "current-client", oauthState: "token_issued" };
-  h.setGrants([old, ready]); h.setRemote({ validGrants: 2, pendingTokenExchanges: 1, remoteClientVerified: true, recentCalls: [] }); h.element("refresh").click();
+  h.setGrants([old, ready]); h.setRemote({ validGrants: 2, pendingTokenExchanges: 1, remoteClientVerified: true, clients: [{ ...ready, status: "active", toolVerified: true, lastSuccess: { at: Date.now() } }], recentCalls: [] }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("网页已连通");
   expect(h.element("remote-grant-count").textContent).toBe("1 个已授权 · 1 个待完成");
   expect(h.element("remote-grants").textContent).not.toContain("请在原网页连接中完成或重新连接");
   const details = h.element("remote-grant-details") as HTMLDetailsElement; expect(details.open).toBe(false); details.open = true;
   h.setRemote({ recentCalls: [{ stage: "oauth", outcome: "error", clientId: "current-client", code: "invalid_client" }] }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("最近一次网页授权失败（invalid_client）"); expect(details.open).toBe(true);
-  h.setRemote({ recentCalls: [{ stage: "oauth", outcome: "success", clientId: "current-client", code: "oauth_token_issued" }], remoteClientVerified: false }); h.element("refresh").click();
+  h.setRemote({ clients: [], recentCalls: [{ stage: "oauth", outcome: "success", clientId: "current-client", code: "oauth_token_issued" }], remoteClientVerified: false }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("授权成功 · 等待首次工具调用验证");
-  h.setRemote({ remoteClientVerified: true }); h.element("refresh").click(); await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("网页已连通");
+  h.setRemote({ remoteClientVerified: true, clients: [{ ...ready, status: "active", toolVerified: true, lastSuccess: { at: Date.now() } }] }); h.element("refresh").click(); await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("网页已连通");
 });
 
 it("dismisses each notification using its accessible X without changing execution state", async () => {
@@ -3006,4 +3006,88 @@ it("offers an explicit retry for a legacy local planning timeout without a new J
   h.element("retry-planning-turn").click();
   await expect.poll(() => h.posts.some(post => post.path.endsWith("/plannings/first/planner-retry"))).toBe(true);
   expect(h.posts.some(post => post.path.endsWith("/plannings"))).toBe(false);
+});
+
+it("copies a single read-only verification for the explicitly selected connector and keeps clients independent", async () => {
+  const h = await page({ ready: true, hash: "#/connect", multiple: true });
+  const base = { status: "active", source: "chatgpt", usage: "web", mcpUrl: "https://existing.trycloudflare.com/mcp", clientName: "ChatGPT", createdAt: Date.now(), expiresAt: Date.now() + 60000, oauthState: "token_issued" };
+  const old = { ...base, grantId: "old", clientId: "old-client", clientFingerprint: "123456789abc", alias: "coupontest", workspaceIds: ["other"], toolVerified: true, lastSuccess: { at: Date.now() } };
+  const current = { ...base, grantId: "new", clientId: "new-client", clientFingerprint: "abcdef123456", alias: "demo41", workspaceIds: ["project"], toolVerified: false };
+  h.setGrants([current, old]); h.setRemote({ clients: [current, old], validGrants: 2, remoteClientVerified: true }); h.element("refresh").click();
+  const select = h.element("connection-prompt-client") as HTMLSelectElement;
+  await expect.poll(() => select.options.length).toBe(3);
+  expect(select.value).toBe("");
+  select.value = "new"; select.dispatchEvent(new h.w.Event("change"));
+  expect(h.element("connection-identity-status").textContent).toContain("尚未收到此连接");
+  h.element("connection-identity-verify").click(); await expect.poll(() => h.copied.length).toBe(1);
+  const prompt = h.copied[0]!;
+  expect(prompt).toContain('网页连接名称（用户填写，请与网页设置核对）："demo41"');
+  expect(prompt).toContain("abcdef123456"); expect(prompt).toContain("从列表实际选择");
+  expect(prompt).toContain("实际调用一次 workspace_query({})，不重试，不调用其他工具");
+  expect(prompt).not.toContain("coupontest"); expect(prompt).not.toContain("planning_query");
+  expect(h.posts).toHaveLength(0);
+  // Renaming a local note changes the prompt, without modifying the webpage.
+  h.setRemote({ clients: [{ ...current, alias: "demo42" }, old] }); h.element("refresh").click();
+  await expect.poll(() => h.element("connection-identity-status").textContent).toContain("demo42");
+  expect(select.value).toBe("new");
+  h.setRemote({ clients: [{ ...current, status: "revoked" }, old] }); h.element("refresh").click();
+  await expect.poll(() => select.value).toBe(""); // Never silently select old coupontest.
+  h.element("connection-identity-verify").click(); await expect.poll(() => h.copied.length).toBe(2);
+  expect(h.copied[1]).toContain("网页连接名称尚未填写"); expect(h.copied[1]).not.toContain("coupontest");
+});
+
+it("does not apply another project's or SDK client's success to the current workspace", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project", multiple: true });
+  const base = { status: "active", source: "chatgpt", usage: "web", clientName: "ChatGPT", mcpUrl: "https://existing.trycloudflare.com/mcp", createdAt: Date.now(), expiresAt: Date.now() + 60000, oauthState: "token_issued" };
+  const current = { ...base, grantId: "current", clientId: "current-id", workspaceIds: ["project"], alias: "demo41", toolVerified: false };
+  const other = { ...base, grantId: "other", clientId: "other-id", workspaceIds: ["other"], alias: "old", toolVerified: true, lastSuccess: { at: Date.now() } };
+  const sdk = { ...current, grantId: "sdk", usage: "diagnostic", alias: "SDK 自检", toolVerified: true, lastSuccess: { at: Date.now() } };
+  h.setGrants([current, other, sdk]); h.setRemote({ clients: [current, other, sdk], validGrants: 3, remoteClientVerified: true }); h.element("refresh").click();
+  await expect.poll(() => (h.element("connection-prompt-client") as HTMLSelectElement).options.length).toBe(3);
+  expect(h.visible("connection-action-needed")).toBe(true);
+  expect(h.element("workspace-connection-summary").textContent).toContain("待实际调用验证");
+  expect(h.element("connection-prompt-client").textContent).not.toContain("SDK 自检");
+  expect(h.element("connection-current-clients").textContent).toContain("独立 SDK／诊断调用，不计作网页验证");
+  h.setRemote({ clients: [{ ...current, toolVerified: true, lastSuccess: { at: Date.now() } }, other, sdk] }); h.element("refresh").click();
+  await expect.poll(() => h.visible("connection-action-needed")).toBe(false);
+  expect(h.posts).toHaveLength(0);
+});
+
+it("labels unknown names and prefixes new, resume and review prompts without changing business state", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/new" });
+  const client = { grantId: "claude", clientId: "claude-id", status: "active", source: "claude", workspaceIds: ["project"], clientName: "Claude", mcpUrl: "https://existing.trycloudflare.com/mcp" };
+  h.setRemote({ clients: [client] }); h.element("refresh").click();
+  const select = h.element("connection-prompt-client") as HTMLSelectElement;
+  await expect.poll(() => select.options.length).toBe(2); select.value = "claude"; select.dispatchEvent(new h.w.Event("change"));
+  h.element("copy-web-planning").click(); await expect.poll(() => h.copied.length).toBe(1);
+  expect(h.copied[0]).toContain("在 Claude 当前聊天启用并选择");
+  expect(h.copied[0]).toContain("网页连接名称尚未填写");
+  await h.w.eval('navigate("/workspaces/project/plans/first/review")');
+  await h.w.eval('copyResumePrompt()');
+  expect(h.copied[1]).toContain("在 Claude 当前聊天启用并选择"); // Unknown names still require explicit selection.
+  expect(h.copied[1]).toContain("planningId：first");
+  await h.w.eval('copyHandoffPrompt("审查当前版本", "claude")');
+  expect(h.copied[2]).toContain("在 Claude 当前聊天启用并选择"); expect(h.copied[2]).toContain("审查当前版本");
+  await h.w.eval('copyHandoffPrompt("给 ChatGPT 的审查", "chatgpt")');
+  expect(h.copied).toHaveLength(3); expect(h.element("page-error-message").textContent).toContain("来源与本次交接不一致");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("shows the newest OAuth diagnostic and preserves closable errors and folded identity details", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  const grant = { grantId: "current", clientId: "client", alias: "demo41", clientName: "ChatGPT", source: "chatgpt", workspaceIds: ["project"], oauthState: "token_issued", expiresAt: Date.now() + 60000 };
+  h.setGrants([grant]);
+  h.setRemote({ clients: [{ ...grant, status: "active", mcpUrl: "https://existing.trycloudflare.com/mcp" }], recentCalls: [
+    { at: 200, stage: "oauth", clientId: "client", outcome: "success" },
+    { at: 100, stage: "oauth", clientId: "client", outcome: "error", code: "invalid_client" },
+  ] }); h.element("refresh").click();
+  await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("授权成功");
+  expect(h.element("remote-authorization-status").textContent).not.toContain("invalid_client");
+  expect((h.element("connection-current-clients").querySelector("details") as HTMLDetailsElement).open).toBe(false);
+  expect(h.element("connection-current-clients").textContent).toContain("用户填写");
+  (h.element("connection-current-clients").querySelector("details") as HTMLDetailsElement).open = true;
+  h.element("refresh").click(); await new Promise(resolve => setTimeout(resolve, 30));
+  expect((h.element("connection-current-clients").querySelector("details") as HTMLDetailsElement).open).toBe(true);
+  h.w.eval('showToast("参数校验失败：请核对当前工具参数", true)'); h.element("page-error-dismiss").click();
+  expect(h.visible("page-error")).toBe(false); expect(h.posts).toHaveLength(0);
 });

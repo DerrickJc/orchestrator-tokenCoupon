@@ -209,7 +209,7 @@ export interface McpConnectionReceiptDto {
   usage: "web" | "diagnostic";
 }
 export interface RemoteClientStatusDto {
-  grantId: string; clientId: string; name: string; clientName: string; alias?: string;
+  grantId: string; clientId: string; clientFingerprint: string; name: string; clientName: string; alias?: string;
   nameSource: "local_alias" | "client_declared"; usage: "web" | "diagnostic";
   source: string; workspaceIds: string[]; mcpUrl: string; createdAt: number; expiresAt: number;
   status: "active" | "expired" | "revoked" | "address_changed";

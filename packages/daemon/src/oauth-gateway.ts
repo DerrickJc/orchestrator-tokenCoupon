@@ -12,6 +12,7 @@ import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprot
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { sanitizeOutput, type ApplicationService } from "./application-service.js";
 import { createMcpServer } from "./mcp-server.js";
+import { knownRemoteTool } from "./mcp-tool-auth.js";
 import type { RemoteMcpPrincipal, RemoteMcpScope } from "./mcp-server.js";
 import { CloudflaredComponent, type ComponentInfo, type ComponentProvider } from "./cloudflared-component.js";
 import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
@@ -212,7 +213,7 @@ export class RemoteMcpConnection {
       const applicable = calls.filter(item => item.grantId === grant.grantId && item.clientId === grant.clientId && item.endpoint === grant.resource && item.stage === "tool" && item.authorizationKey === authorizationKey(grant));
       const lastCall = applicable.at(-1), lastSuccess = applicable.filter(item => item.outcome === "success").at(-1);
       const clientName = this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端";
-      return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || clientName, clientName, ...(grant.alias ? { alias: grant.alias } : {}), nameSource: grant.alias ? "local_alias" as const : "client_declared" as const, usage: grant.usage ?? "web", toolVerified: Boolean(lastSuccess), source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
+      return { grantId: grant.grantId, clientId: grant.clientId, clientFingerprint: createHash("sha256").update(grant.clientId).digest("hex").slice(0, 12), name: grant.alias || clientName, clientName, ...(grant.alias ? { alias: grant.alias } : {}), nameSource: grant.alias ? "local_alias" as const : "client_declared" as const, usage: grant.usage ?? "web", toolVerified: Boolean(lastSuccess), source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
         status: grant.revokedAt ? "revoked" as const : grant.expiresAt <= now ? "expired" as const : grant.resource !== `${this.config?.publicOrigin}/mcp` ? "address_changed" as const : "active" as const, ...(lastCall ? { lastCall } : {}), ...(lastSuccess ? { lastSuccess } : {}) };
     });
     base.remoteClientVerified = base.clients.some(item => item.status === "active" && item.usage === "web" && item.toolVerified);
@@ -657,8 +658,27 @@ export class RemoteMcpConnection {
         const proposed = (body as { method?: unknown } | undefined)?.method;
         if (typeof proposed === "string" && ["initialize", "tools/list", "tools/call", "notifications/initialized", "ping"].includes(proposed)) method = proposed;
         if (trace) trace.method = method;
-        const server = probe ? createProbeMcpServer() : createMcpServer(this.service, principal!, { traceId, record: event => this.diagnostics.record({ ...event, at: Date.now(), endpoint, stage: "tool", ...identity }) });
+        let handlerObserved = false;
+        const server = probe ? createProbeMcpServer() : createMcpServer(this.service, principal!, { traceId, record: event => {
+          handlerObserved = true;
+          return this.diagnostics.record({ ...event, at: Date.now(), endpoint, stage: "tool", ...identity });
+        } });
         const transport = new (await import("@modelcontextprotocol/sdk/server/streamableHttp.js")).StreamableHTTPServerTransport({ enableJsonResponse: true });
+        // The SDK validates input before calling our guarded handler. Observe its
+        // public transport response too, without changing or retaining the payload.
+        const send = transport.send.bind(transport);
+        transport.send = async (message, options) => {
+          const request = body as { id?: unknown; params?: { name?: unknown } } | undefined;
+          if (!probe && method === "tools/call" && !handlerObserved && "id" in message && message.id === request?.id &&
+            ("error" in message || "result" in message && message.result.isError === true)) {
+            handlerObserved = true;
+            const code = "mcp_tool_input_rejected";
+            if (trace) trace.code = code;
+            await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "tool", outcome: "error", code,
+              ...(knownRemoteTool(request?.params?.name) ? { tool: request.params.name } : {}), durationMs: Date.now() - startedAt, ...identity });
+          }
+          await send(message, options);
+        };
         response.once("close", () => { void server.close().catch(() => undefined); });
         await server.connect(transport as import("@modelcontextprotocol/sdk/shared/transport.js").Transport);
         await transport.handleRequest(request, response, body);

@@ -25,6 +25,10 @@ const scopesByTool: Record<string, RemoteMcpScope[]> = {
   external_cancel: ["planning:write"],
 };
 
+export function knownRemoteTool(value: unknown): value is string {
+  return typeof value === "string" && Object.hasOwn(scopesByTool, value);
+}
+
 /** Add OAuth discovery metadata without changing handlers or local authentication. */
 export function remoteToolRegistration(server: McpServer) {
   const tools = new Map<string, RegisteredTool>();
