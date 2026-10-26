@@ -1,6 +1,6 @@
 import { readdir, realpath, stat, lstat, readFile, readlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, parse, sep } from "node:path";
 import { GitCommandError, ensureRuntimeMetadataIgnored, inspectGitRepository, runGit } from "@token-coupon/core";
 import { normalizeWorkspacePath, workspaceEnvironment } from "./workspace-path.js";
 
@@ -15,7 +15,13 @@ export async function browseDirectories(input?: string, offset = 0, query = "") 
   const all = (await readdir(path, { withFileTypes: true })).filter(entry => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules" && (!term || entry.name.normalize("NFKC").toLocaleLowerCase().includes(term))).sort((a, b) => a.name.localeCompare(b.name));
   const shortcuts = [{ label: "当前项目目录", path: env.currentDirectory }, { label: "主目录", path: env.home }, { label: "文件系统", path: parse(path).root }];
   if (env.isWsl) shortcuts.push({ label: "Windows 磁盘（/mnt）", path: "/mnt" });
-  return { path, parent: dirname(path) === path ? null : dirname(path), shortcuts, query: query.trim(), totalMatches: all.length, entries: all.slice(offset, offset + 100).map(entry => ({ name: entry.name, path: join(path, entry.name) })), nextOffset: offset + 100 < all.length ? offset + 100 : null };
+  const root = parse(path).root, breadcrumbs = [{ label: root, path: root }];
+  let cursor = root;
+  for (const name of path.slice(root.length).split(sep).filter(Boolean)) { cursor = join(cursor, name); breadcrumbs.push({ label: name, path: cursor }); }
+  if (env.platform === "win32") {
+    for (const value of [env.home, env.currentDirectory]) { const drive = parse(value).root; if (drive && !shortcuts.some(item => item.path === drive)) shortcuts.push({ label: `磁盘 ${drive}`, path: drive }); }
+  }
+  return { path, breadcrumbs, environment: { platform: env.platform, isWsl: env.isWsl, label: env.isWsl ? "WSL 后台" : env.platform === "win32" ? "Windows 后台" : "本机后台" }, parent: dirname(path) === path ? null : dirname(path), shortcuts, query: query.trim(), totalMatches: all.length, entries: all.slice(offset, offset + 100).map(entry => ({ name: entry.name, path: join(path, entry.name) })), nextOffset: offset + 100 < all.length ? offset + 100 : null };
 }
 
 export interface WorkspaceGitStatus {

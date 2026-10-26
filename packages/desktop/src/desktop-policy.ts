@@ -19,6 +19,7 @@ export const DESKTOP_IPC = Object.freeze({
   recoveryState: "token-coupon:recovery-state",
   acknowledgeRecovery: "token-coupon:acknowledge-recovery",
   chooseFolder: "token-coupon:choose-folder",
+  openFolder: "token-coupon:open-folder",
   copyText: "token-coupon:copy-text",
   notification: "token-coupon:notification",
   notificationsEnabled: "token-coupon:notifications-enabled",

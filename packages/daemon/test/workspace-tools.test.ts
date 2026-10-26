@@ -82,6 +82,8 @@ it("browses only visible directories, preserves Chinese paths and paginates with
   await writeFile(join(h.path, "secret.env"), "never returned"); await symlink(h.root, join(h.path, "external-link"), "dir");
   const data = await browseDirectories(h.path);
   expect(data.entries.map(entry => entry.name)).toEqual(["课程设计"]); expect(data.path).toBe(h.path); expect(data.parent).toBe(h.root);
+  expect(data.breadcrumbs.at(-1)).toEqual({ label: "中文 项目", path: h.path });
+  expect(data.environment.label).toBeTruthy();
   expect(JSON.stringify(data)).not.toContain("never returned");
   await Promise.all(Array.from({ length: 102 }, (_, i) => mkdir(join(h.path, `folder-${i}`))));
   const first = await browseDirectories(h.path); expect(first.entries).toHaveLength(100); expect(first.nextOffset).toBe(100);

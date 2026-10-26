@@ -5277,11 +5277,21 @@ async function browseWorkspaceFiles() {
   if (!$("#file-dialog").open) $("#file-dialog").showModal();
   await listReferenceFiles(".", 0, ""); renderFileSelection();
 }
+function directoryRecentKey() {
+  const profile = tokenCouponClient.connection?.().handshake?.profileId || location.host;
+  return `tc-directory:${profile}:${state.environment?.platform || "unknown"}:${!!state.environment?.isWsl}`;
+}
+function renderDirectorySelection() {
+  const data = state.directoryBrowser;
+  $("#directory-selection").textContent = data?.selectedPath ? `准备选择：${data.selectedPath}` : "请先选择有效目录";
+  for (const button of $("#directory-list").querySelectorAll("[data-directory-path]")) button.setAttribute("aria-pressed", String(button.dataset.directoryPath === data?.selectedPath));
+  $("#directory-open-system").disabled = !window.tokenCouponDesktop?.openWorkspaceFolder || !data?.selectedPath;
+}
 async function openDirectoryBrowser() {
   let dialog = $("#directory-dialog");
   if (!dialog) {
     dialog = document.createElement("dialog"); dialog.id = "directory-dialog";
-    dialog.innerHTML = `<div class="section-title"><h3>选择后台工作区文件夹</h3><button id="directory-close" type="button" class="button button-quiet">关闭</button></div><p class="hint">这里读取运行后台的主机目录，远程电脑也可使用。支持 Windows／WSL 路径；名称搜索只查当前目录，不递归扫描磁盘。</p><label for="directory-path">后台目录路径</label><div class="reference-path-row"><input id="directory-path" autocomplete="off" placeholder="/home/… 或 D:\\项目"><button id="directory-go" type="button" class="button button-quiet">定位路径</button></div><label for="directory-query">搜索当前目录名称</label><input id="directory-query" type="search" autocomplete="off" placeholder="输入文件夹名称"><p id="directory-status" class="hint" role="status"></p><p id="directory-error" class="field-error" role="status"></p><button id="directory-parent" type="button" class="button button-quiet">上一级</button><div id="directory-list" class="file-list"></div><button id="directory-more" type="button" class="button button-quiet hidden">加载更多</button><button id="directory-use" type="button" class="button button-primary">选择当前文件夹</button>`;
+    dialog.innerHTML = `<div class="section-title"><h3>选择后台工作区文件夹</h3><button id="directory-close" type="button" class="button button-quiet">关闭</button></div><p class="hint">读取后台电脑的目录，远程电脑也可使用；搜索只查当前文件夹，不递归扫描磁盘。</p><p id="directory-environment" class="hint"></p><nav class="directory-toolbar" aria-label="文件夹导航"><button id="directory-back" type="button" class="button button-quiet" aria-label="后退">←</button><button id="directory-forward" type="button" class="button button-quiet" aria-label="前进">→</button><button id="directory-parent" type="button" class="button button-quiet">上一级</button><div id="directory-breadcrumbs" aria-label="目录位置"></div></nav><label for="directory-path">后台目录路径</label><div class="reference-path-row"><input id="directory-path" autocomplete="off" placeholder="/home/… 或 D:\\项目"><button id="directory-go" type="button" class="button button-quiet">定位路径</button></div><label for="directory-query">搜索当前目录名称</label><input id="directory-query" type="search" autocomplete="off" placeholder="输入文件夹名称"><p id="directory-status" class="hint" role="status"></p><p id="directory-error" class="field-error" role="status"></p><div class="directory-explorer"><nav id="directory-shortcuts" aria-label="常用位置与磁盘"></nav><div><div id="directory-list" class="file-list"></div><button id="directory-more" type="button" class="button button-quiet hidden">加载更多</button></div></div><p id="directory-selection" class="directory-selection" role="status"></p><div class="directory-footer"><button id="directory-open-system" type="button" class="button button-quiet">在文件资源管理器中打开</button><button id="directory-use" type="button" class="button button-primary">选择此文件夹</button></div>`;
     document.body.append(dialog);
     $("#directory-close").onclick = () => dialog.close();
     dialog.addEventListener("close", () => { state.directoryRequest = (state.directoryRequest || 0) + 1; clearTimeout(state.directorySearchTimer); });
@@ -5290,48 +5300,91 @@ async function openDirectoryBrowser() {
     $("#directory-path").onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); go(); } };
     $("#directory-query").oninput = () => { clearTimeout(state.directorySearchTimer); state.directorySearchTimer = setTimeout(() => void loadDirectoryBrowser(state.directoryBrowser.path, 0, $("#directory-query").value), 250); };
     $("#directory-parent").onclick = () => { $("#directory-query").value = ""; void loadDirectoryBrowser(state.directoryBrowser.parent, 0, ""); };
+    for (const [id, delta] of [["directory-back", -1], ["directory-forward", 1]]) $("#" + id).onclick = () => {
+      const data = state.directoryBrowser, index = data.historyIndex + delta;
+      if (data.history[index]) { $("#directory-query").value = ""; void loadDirectoryBrowser(data.history[index], 0, "", index); }
+    };
     $("#directory-more").onclick = () => void loadDirectoryBrowser(state.directoryBrowser.path, state.directoryBrowser.nextOffset, state.directoryBrowser.query);
+    $("#directory-open-system").onclick = async () => {
+      try { await window.tokenCouponDesktop.openWorkspaceFolder(state.directoryBrowser.selectedPath); $("#directory-status").textContent = "已请求在本机文件资源管理器中打开；尚未登记或授权工作区。"; }
+      catch (error) { $("#directory-error").textContent = error.message; }
+    };
     $("#directory-use").onclick = () => {
       const value = state.directoryBrowser;
-      if (!value?.path || value.formGeneration !== state.folderSelectionGeneration || !state.creatingWorkspace) { $("#directory-error").textContent = "工作区表单已变化，请关闭后重新选择。"; return; }
-      $("#workspace-path").value = value.path; $("#workspace-selected-path").textContent = value.path; show($("#workspace-path-error"), false);
+      if (!value?.selectedPath || value.formGeneration !== state.folderSelectionGeneration || !state.creatingWorkspace) { $("#directory-error").textContent = "工作区表单已变化，请关闭后重新选择。"; return; }
+      $("#workspace-path").value = value.selectedPath; $("#workspace-selected-path").textContent = value.selectedPath; show($("#workspace-path-error"), false);
+      try { localStorage.setItem(directoryRecentKey(), value.selectedPath); } catch { /* Selection works without persistence. */ }
       $("#workspace-path").dispatchEvent(new Event("input", { bubbles: true })); dialog.close();
     };
   }
-  state.directoryBrowser = { formGeneration: state.folderSelectionGeneration };
+  state.directoryBrowser = { formGeneration: state.folderSelectionGeneration, history: [], historyIndex: -1 };
   $("#directory-query").value = ""; $("#directory-error").textContent = ""; $("#directory-list").replaceChildren();
-  dialog.showModal(); await loadDirectoryBrowser($("#workspace-path").value.trim(), 0, "");
+  let recent = ""; try { recent = localStorage.getItem(directoryRecentKey()) || ""; } catch { /* Optional preference. */ }
+  dialog.showModal(); await loadDirectoryBrowser($("#workspace-path").value.trim() || recent, 0, "");
 }
-async function loadDirectoryBrowser(path, offset = 0, query = "") {
+async function loadDirectoryBrowser(path, offset = 0, query = "", historyIndex) {
   const request = state.directoryRequest = (state.directoryRequest || 0) + 1;
   $("#directory-status").textContent = "正在读取目录…"; $("#directory-error").textContent = ""; $("#directory-use").disabled = true;
   try {
-    const data = await api(`/api/v1/directories?path=${encodeURIComponent(path || "")}&offset=${offset}&query=${encodeURIComponent(query)}`);
+    const data = await api(`/api/v1/directories?path=${encodeURIComponent(path || "")}&offset=${offset}&query=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(12000) });
     if (request !== state.directoryRequest || !$("#directory-dialog").open) return;
-    Object.assign(state.directoryBrowser, { path: data.path, parent: data.parent, query, nextOffset: data.nextOffset });
-    if (document.activeElement !== $("#directory-path")) $("#directory-path").value = data.path;
-    $("#directory-status").textContent = `${data.path} · ${data.totalMatches ?? data.entries.length} 个匹配文件夹`;
+    const view = state.directoryBrowser;
+    if (!offset) {
+      if (historyIndex !== undefined) view.historyIndex = historyIndex;
+      else if (view.history[view.historyIndex] !== data.path) { view.history = view.history.slice(0, view.historyIndex + 1); view.history.push(data.path); view.historyIndex = view.history.length - 1; }
+    }
+    Object.assign(view, { path: data.path, selectedPath: data.path, parent: data.parent, query, nextOffset: data.nextOffset });
+    $("#directory-path").value = data.path; $("#directory-query").value = query;
+    $("#directory-environment").textContent = `${data.environment?.label || "后台电脑"} · 浏览位置与选择结果以后台返回的实际路径为准。`;
+    $("#directory-status").textContent = `${data.path} · ${data.totalMatches ?? data.entries.length} 个匹配文件夹 · 单击选择，双击或按 Enter 打开`;
+    const crumbs = $("#directory-breadcrumbs"); crumbs.replaceChildren();
+    for (const item of data.breadcrumbs || [{ label: data.path, path: data.path }]) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "text-button"; button.textContent = item.label; button.onclick = () => void loadDirectoryBrowser(item.path); crumbs.append(button);
+    }
+    const shortcuts = $("#directory-shortcuts"); shortcuts.replaceChildren();
+    for (const item of data.shortcuts || []) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "text-button"; button.textContent = item.label; button.title = item.path; button.onclick = () => void loadDirectoryBrowser(item.path); shortcuts.append(button);
+    }
     const root = $("#directory-list"); if (!offset) root.replaceChildren();
     for (const entry of data.entries) {
-      const button = document.createElement("button"); button.type = "button"; button.className = "file-entry"; button.textContent = entry.name;
-      button.onclick = () => { $("#directory-query").value = ""; void loadDirectoryBrowser(entry.path, 0, ""); }; root.append(button);
+      const row = document.createElement("div"); row.className = "directory-entry";
+      const button = document.createElement("button"); button.type = "button"; button.className = "file-entry"; button.textContent = entry.name; button.dataset.directoryPath = entry.path; button.setAttribute("aria-pressed", "false");
+      button.onclick = () => { view.selectedPath = entry.path; renderDirectorySelection(); };
+      const enter = () => { $("#directory-query").value = ""; void loadDirectoryBrowser(entry.path, 0, ""); };
+      button.ondblclick = enter; button.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); enter(); } };
+      const open = document.createElement("button"); open.type = "button"; open.className = "text-button"; open.textContent = "打开"; open.setAttribute("aria-label", `打开文件夹 ${entry.name}`); open.onclick = enter;
+      row.append(button, open); root.append(row);
     }
     if (!root.children.length) root.textContent = "当前目录没有匹配的文件夹。";
+    $("#directory-back").disabled = view.historyIndex <= 0; $("#directory-forward").disabled = view.historyIndex >= view.history.length - 1;
     $("#directory-parent").disabled = !data.parent; show($("#directory-more"), data.nextOffset !== null && data.nextOffset !== undefined); $("#directory-use").disabled = false;
-  } catch (error) { if (request === state.directoryRequest) { $("#directory-error").textContent = `路径读取失败：${error.message}。请检查路径或访问权限。`; $("#directory-status").textContent = "未完成目录定位"; } }
+    renderDirectorySelection();
+  } catch (error) { if (request === state.directoryRequest) { $("#directory-error").textContent = `路径读取失败：${error.message}。请检查路径或访问权限，也可使用上一级／常用位置重试。`; $("#directory-status").textContent = "未完成目录定位"; } }
 }
 function closeNavigation() { document.body.classList.remove("navigation-open"); $("#mobile-navigation").setAttribute("aria-expanded", "false"); }
 $("#mobile-navigation").addEventListener("click", () => { const opened = document.body.classList.toggle("navigation-open"); $("#mobile-navigation").setAttribute("aria-expanded", String(opened)); });
 $("#sidebar-close").addEventListener("click", closeNavigation);
 $("#nav-backdrop").addEventListener("click", closeNavigation);
 window.addEventListener("keydown", event => { if (event.key === "Escape") closeNavigation(); });
-async function listReferenceFiles(path, offset = 0, query = state.fileQuery || "") {
+async function listReferenceFiles(path, offset = 0, query = state.fileQuery || "", historyIndex) {
   const workspaceId = state.fileWorkspace, request = state.fileRequest = (state.fileRequest || 0) + 1;
   try {
     show($("#file-error"), false);
     const data = await api(`/api/v1/workspaces/${workspaceId}/repository?tool=repo_list&path=${encodeURIComponent(path)}&offset=${offset}&query=${encodeURIComponent(query)}`);
     if (request !== state.fileRequest || workspaceId !== state.fileWorkspace) return;
+    if (state.fileHistoryWorkspace !== workspaceId) { state.fileHistoryWorkspace = workspaceId; state.fileHistory = []; state.fileHistoryIndex = -1; }
+    if (!offset) {
+      if (historyIndex !== undefined) state.fileHistoryIndex = historyIndex;
+      else if (state.fileHistory[state.fileHistoryIndex] !== data.path) { state.fileHistory = state.fileHistory.slice(0, state.fileHistoryIndex + 1); state.fileHistory.push(data.path); state.fileHistoryIndex = state.fileHistory.length - 1; }
+    }
     state.filePath = data.path; state.fileNextOffset = data.nextOffset; state.fileQuery = query;
+    const breadcrumbs = $("#file-breadcrumbs"); breadcrumbs.replaceChildren();
+    let childPath = ".";
+    for (const part of [".", ...(data.path || ".").split("/").filter(part => part && part !== ".")]) {
+      if (part !== ".") childPath = childPath === "." ? part : `${childPath}/${part}`;
+      const target = childPath, button = document.createElement("button"); button.className = "text-button"; button.type = "button"; button.textContent = part === "." ? "项目" : part; button.onclick = () => void listReferenceFiles(target, 0, ""); breadcrumbs.append(button);
+    }
+    $("#file-back").disabled = state.fileHistoryIndex <= 0; $("#file-forward").disabled = state.fileHistoryIndex >= state.fileHistory.length - 1;
     const root = $("#file-list"); if (!offset) root.replaceChildren();
     $("#file-current-path").textContent = data.path;
     if (document.activeElement !== $("#file-directory-path")) $("#file-directory-path").value = data.path;
@@ -5516,7 +5569,11 @@ async function openDirectoryPicker() {
       ? await window.tokenCouponDesktop.chooseWorkspaceFolder()
       : await api("/api/v1/native-picker", { method: "POST", body: JSON.stringify({ kind: "directory" }), signal: controller.signal });
     if (controller.signal.aborted || !workspaceFormIsCurrent(generation)) return;
-    if (result.cancelled || result.canceled) { closeWorkspaceForm(); showActionFeedback("已取消新建工作区", "已返回工作区选择，原有授权选择与任务保留。"); return; }
+    if (result.cancelled || result.canceled) {
+      if ($("#workspace-path").value.trim() || $("#workspace-label").value.trim()) showActionFeedback("已取消文件夹选择", "原路径与名称已保留，可以继续编辑或登记工作区。");
+      else { closeWorkspaceForm(); showActionFeedback("已取消新建工作区", "已返回工作区选择，原有授权选择与任务保留。"); }
+      return;
+    }
     const selectedPath = result.path || result.paths?.[0];
     if (typeof selectedPath !== "string" || !selectedPath) throw new Error("folder_picker_result_invalid：文件夹选择器没有返回路径");
     $("#workspace-path").value = selectedPath; $("#workspace-selected-path").textContent = selectedPath; show($("#workspace-form")); show($("#workspace-path-error"), false);
@@ -5580,3 +5637,8 @@ $("#connection-prompt-client").addEventListener("change", event => {
 $("#connection-identity-verify").addEventListener("click", () => $("#connection-verify-web").click());
 
 $("#job-feedback-close").addEventListener("click", () => { const id = $("#job-bar").dataset.noticeId; if (id) dismissOperationNotice(id); });
+
+for (const [id, delta] of [["file-back", -1], ["file-forward", 1]]) $("#" + id).addEventListener("click", () => {
+  const index = state.fileHistoryIndex + delta, path = state.fileHistory?.[index];
+  if (path !== undefined) void listReferenceFiles(path, 0, "", index);
+});

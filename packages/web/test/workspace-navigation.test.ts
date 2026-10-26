@@ -3147,3 +3147,23 @@ it("dismisses a blocked operation per Job without discarding requirements, and s
   expect(h.element("operation-feedback-list").children.length).toBe(1);
   expect(JSON.stringify(h.plans)).toBe(before); expect(h.posts).toHaveLength(0);
 });
+
+it("navigates Explorer-style folders, separates selection from browsing and remembers only confirmed choices", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  h.element("add-workspace-main").click();
+  await expect.poll(() => h.element("directory-status").textContent).toContain("/projects");
+  const entry = h.element("directory-list").querySelector<HTMLButtonElement>("[data-directory-path]")!;
+  entry.click(); expect(h.element("directory-selection").textContent).toContain("/projects/新项目");
+  expect((h.element("directory-path") as HTMLInputElement).value).toBe("/projects");
+  entry.dispatchEvent(new h.w.MouseEvent("dblclick"));
+  await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  h.element("directory-back").click(); await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects");
+  h.element("directory-forward").click(); await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  expect((h.element("directory-open-system") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-use").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  h.element("browse-workspace-path").click(); await expect.poll(() => (h.element("directory-dialog") as HTMLDialogElement).open).toBe(true);
+  (h.element("directory-path") as HTMLInputElement).value = "/cancelled"; h.element("directory-go").click();
+  await expect.poll(() => h.element("directory-status").textContent).toContain("/cancelled");
+  h.element("directory-close").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
+});

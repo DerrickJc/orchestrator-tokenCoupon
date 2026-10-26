@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, session, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, session, shell, Tray } from "electron";
 import { API_PROTOCOL, EPOCH_HEADER, PROTOCOL_HEADER } from "@token-coupon/client";
 import { discoverOwnedDaemon } from "@token-coupon/client/node";
 import type { ChildProcess } from "node:child_process";
@@ -11,6 +11,7 @@ import { resolveDevelopmentDaemonRuntime, resolvePackagedDaemonRuntime } from ".
 import { startManagedDaemon } from "./managed-daemon.js";
 import { restoreWindowBounds, type DisplayWorkArea } from "./window-state.js";
 import { resolveDaemonProfileDirectory, resolveDesktopUserData, sameDaemonDirectory, secondInstanceDirectory } from "./desktop-profile.js";
+import { existingDesktopDirectory } from "./desktop-folders.js";
 import { DesktopReconnector } from "./desktop-reconnect.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -95,8 +96,20 @@ function registerIpc(): void {
   });
   ipcMain.handle(DESKTOP_IPC.chooseFolder, async event => {
     assertTrustedSender(event);
-    const result = await dialog.showOpenDialog(window!, { title: "选择工作区文件夹", properties: ["openDirectory"] });
-    return { canceled: result.canceled, path: result.canceled ? undefined : result.filePaths[0] };
+    const preference = join(desktopUserData, "last-folder.json");
+    let defaultPath = app.getPath("home");
+    try { defaultPath = await existingDesktopDirectory(JSON.parse(readFileSync(preference, "utf8")).path); } catch { /* A removed directory does not prevent selection. */ }
+    const result = await dialog.showOpenDialog(window!, { title: "选择工作区文件夹", defaultPath, properties: ["openDirectory"] });
+    const path = result.canceled || !result.filePaths[0] ? undefined : await existingDesktopDirectory(result.filePaths[0]);
+    if (path) { try { writeFileSync(preference, JSON.stringify({ path }) + "\n", { mode: 0o600 }); } catch { /* Remembering a location is optional. */ } }
+    return { canceled: result.canceled, path };
+  });
+  ipcMain.handle(DESKTOP_IPC.openFolder, async (event, input: unknown) => {
+    assertTrustedSender(event);
+    const path = await existingDesktopDirectory(input);
+    const error = await shell.openPath(path);
+    if (error) throw new Error(`desktop_folder_open_failed：${error}`);
+    return { opened: true };
   });
   ipcMain.handle(DESKTOP_IPC.notification, (event, input: unknown) => {
     assertTrustedSender(event);

@@ -653,3 +653,16 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 #job-feedback-diagnostic,.operation-notice pre { white-space:pre-wrap; overflow-wrap:anywhere; }
 #operation-feedback-history-list { display:grid; gap:6px; }
 .operation-notice { margin:8px 0; }
+
+.directory-toolbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+#directory-breadcrumbs { display:flex; flex-wrap:wrap; align-items:center; gap:4px; min-width:0; }
+#directory-breadcrumbs button + button::before { content:"/"; margin-right:8px; color:var(--muted); }
+.directory-explorer { display:grid; grid-template-columns:minmax(110px,155px) minmax(0,1fr); gap:14px; margin:14px 0; }
+#directory-shortcuts { display:flex; flex-direction:column; align-items:stretch; gap:6px; border-right:1px solid var(--line); padding-right:10px; }
+.directory-entry { display:flex; align-items:center; gap:8px; }
+.directory-entry .file-entry { flex:1; min-width:0; overflow-wrap:anywhere; }
+.directory-entry [aria-pressed="true"] { background:#e6eee0; border-color:#9dae91; }
+.directory-selection { overflow-wrap:anywhere; padding:10px; border-radius:7px; background:var(--paper); }
+@media(max-width:600px) { .directory-explorer { grid-template-columns:1fr; } #directory-shortcuts { flex-direction:row; flex-wrap:wrap; border-right:0; border-bottom:1px solid var(--line); padding-bottom:8px; } }
+
+#file-breadcrumbs { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
