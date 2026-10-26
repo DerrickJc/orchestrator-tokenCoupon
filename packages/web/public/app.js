@@ -4859,7 +4859,8 @@ async function pollJob(jobId, label) {
 }
 async function completeJob(job, label) {
   acceptPlanningJob(job);
-  const context = state.jobContexts?.get(job.jobId) || state.jobContext; state.jobContexts?.delete(job.jobId);
+  const previousNotice = [...(state.operationNotices?.values() || [])].find(row => row.job.jobId === job.jobId);
+  const context = state.jobContexts?.get(job.jobId) || previousNotice?.context || state.jobContext; state.jobContexts?.delete(job.jobId);
   rememberExecutionJob(job, context);
   const domainStatus = job.result?.status;
   const awaitingUser = job.status === "succeeded" && domainStatus === "blocked" && Array.isArray(job.result?.waitingForUser) && job.result.waitingForUser.length > 0;

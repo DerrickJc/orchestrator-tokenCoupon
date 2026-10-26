@@ -100,7 +100,7 @@ it("keeps a failed reply for retry, reports empty input, and renders a normal Pl
   const h = await page({ failReply: true });
   expect(h.element("supplement-input").classList.contains("hidden")).toBe(false);
   h.reply("保留这条回复");
-  await expect.poll(() => h.element("toast").textContent).toContain("回复提交失败");
+  await expect.poll(() => h.element("job-feedback-diagnostic").textContent).toContain("回复提交失败");
   expect(h.value("reply-text")).toBe("保留这条回复");
   await expect.poll(() => (h.element("send-reply") as HTMLButtonElement).disabled).toBe(false);
   h.reply(" "); await expect.poll(() => h.element("toast").textContent).toContain("请先填写回复");
@@ -123,7 +123,7 @@ it("waits for asynchronous validation before restoring the saved plan cards", as
 
 it("keeps field edits visible when server validation rejects a field-only patch", async () => {
   const h = await page({ failSave: true }); h.edit("服务器拒绝的修改"); h.element("save-plan").click();
-  await expect.poll(() => h.element("toast").textContent).toContain("计划依赖校验失败");
+  await expect.poll(() => h.element("job-feedback-diagnostic").textContent).toContain("计划依赖校验失败");
   expect(h.requests).toHaveLength(1); expect(h.requests[0]!.body).toHaveProperty("edits.title", "服务器拒绝的修改");
   expect(h.value("plan-editor")).toContain("服务器拒绝的修改"); expect(h.element("plan-editor-wrap").classList.contains("hidden")).toBe(false);
 });
@@ -147,7 +147,7 @@ it("saves before leaving, and stays in the editor when validation fails", async 
   await expect.poll(() => h.element("planning-panel").classList.contains("hidden")).toBe(true); expect(h.view.draft.plan.title).toBe("导航前保存");
   const bad = await page({ failSave: true }); bad.edit("不能保存"); bad.element("new-task").click();
   await expect.poll(() => bad.element("unsaved-plan-dialog").hasAttribute("open")).toBe(true); bad.element("unsaved-plan-save").click();
-  await expect.poll(() => bad.element("toast").textContent).toContain("依赖校验失败");
+  await expect.poll(() => bad.element("job-feedback-diagnostic").textContent).toContain("依赖校验失败");
   expect(bad.element("planning-panel").classList.contains("hidden")).toBe(false); expect(bad.value("plan-editor")).toContain("不能保存");
 });
 
@@ -157,7 +157,7 @@ it("preserves edits across refresh and rejects a save against a changed baseline
   h.view.externalOperations = [{ role: "plan", state: "prepared", expectedRevision: 3, operationId: "old", message: "旧的回复" }];
   h.element("refresh").click(); await expect.poll(() => h.element("plan-edit-status").textContent).toContain("当前草案已更新");
   expect(h.value("plan-editor")).toContain("本地未保存"); expect(h.element("external-operation-list").textContent).toContain("上下文已过期");
-  h.element("save-plan").click(); await expect.poll(() => h.element("toast").textContent).toContain("版本已变化");
+  h.element("save-plan").click(); await expect.poll(() => h.element("job-feedback-diagnostic").textContent).toContain("版本已变化");
   expect(h.requests[0]!.body.expectedPlanHash).toBe("original-hash");
 });
 
