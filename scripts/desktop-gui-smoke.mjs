@@ -116,7 +116,18 @@ async function localClient(origin) {
 
 async function verifyClipboard(page) {
   const text = `Token Coupon clipboard verification ${Date.now()}`;
-  await bounded(application.evaluate(async ({ clipboard }) => { globalThis.__tokenCouponClipboardBeforeTest = await clipboard.read(); }), "save clipboard formats");
+  await bounded(application.evaluate(async ({ clipboard, ClipboardItem }) => {
+    const entries = await clipboard.read();
+    // Electron 44 read() entries are read-only platform views. Snapshot every
+    // payload before changing the clipboard, then construct writable entries.
+    const snapshot = [];
+    for (const entry of entries) {
+      const payloads = {};
+      for (const type of entry.types) payloads[type] = await entry.getType(type);
+      snapshot.push(new ClipboardItem(payloads));
+    }
+    globalThis.__tokenCouponClipboardBeforeTest = snapshot;
+  }), "save clipboard formats");
   try {
     await page.evaluate(value => {
       document.querySelector("#copy-fallback-text").value = value;
