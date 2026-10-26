@@ -1619,7 +1619,7 @@ Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json
 ### 15.3 启动本次新版验收入口
 
 1. 在运行后台的这台 Windows 文件资源管理器地址栏粘贴 `%TEMP%\tc-desktop-20261026-5wPoUV\build`。
-2. 双击 **`Launch Acceptance Preview.cmd`**。它启动该目录下的 `win-unpacked\orchestrator-tokenCoupon.exe`，使用独立的 `acceptance-state\desktop` 和 `acceptance-state\daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。
+2. 双击 **`Launch Acceptance Preview.cmd`**。它启动该目录下的 `win-unpacked\orchestrator-tokenCoupon.exe`，使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
 3. 打开左侧 **桌面交互验收** 工作区，已有两个离线 Mock 草案和含中文/空格的示例目录，用于切换与编辑验收；准备过程未调用付费模型。第一次出现系统默认方式设置时明确选择所需方式，未准备真实 Agent 时不要启动新的 Agent 规划。
 4. 快捷连接初始关闭，预留 MCP 网关端口 **4188**，避免抢用原预览的 4178；需要真实网页验证时在连接中心明确建立独立验收连接。此入口不会自动继承原业务授权或使旧 MCP 地址指向新 profile。
 5. 验收后如需停止测试后台，先确认测试任务不在执行，再使用托盘的安全停止后台入口。只关闭窗口会保留后台，这是现有生命周期设计。安装器另行按下一节验收，不必为检查界面立即覆盖原安装。
@@ -1638,3 +1638,30 @@ Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json
 | 真实网页与 Runner（另记） | 若需要验证，建立独立验收连接，在 GPT/Claude 实际选中它，先只调用一次 workspace_query 核对；再用已安装并登录的 Agent 测一项任务及审批 | 地址/客户端/追踪记录对应，不把旧连接、内部 probe 或 SDK 结果算作本次网页成功。涉及账号与付费调用，应单独记录，不在本批自动测试中声称通过 |
 
 本批代码、自动测试、原生 GUI 和安装负载验证已完成；剩余为以上人工验收、独立 Node 替换决策及下一批 core 功能。本地构建尚未推送、未触发新的远程 CI，也没有覆盖既有 Release。
+
+
+### 15.5 验收启动入口 ACL 修复（2026-10-26）
+
+**现象与原因：** 用户双击验收启动脚本后遇到 `desktop_daemon_start_timeout`，最后核验为 `daemon_discovery_profile_unprotected`，提示 owner 文件 ACL 对其他用户开放。实际后台日志已经打印监听成功；失败发生在桌面发现与信任阶段，不是模型、Cloudflare 或网页授权故障。只读 Windows ACL 检查确认本次 Temp 构建目录、`acceptance-state` 和 owner 文件继承了其他账户的 Modify 权限。Windows 的 `mode: 0o600/0o700` 不能代替 DACL 设置，延长启动等待或忽略 ACL 都不能解决这一问题。此前 GUI 使用用户目录，漏测了提供给用户的临时目录启动配置。
+
+**修复：** 新增 `scripts/prepare-desktop-acceptance.mjs`，用 Windows Node 为对应解包 EXE 生成稳定的独立验收 profile 和 `.cmd`。profile 放在用户主目录的 `.token-coupon-desktop-acceptance/<exe路径短哈希>/`；仅对这些专用目录设置当前用户、SYSTEM 与管理员权限，再以应用同样的 owner/父目录链校验通过后生成入口。父目录无法核实时仍拒绝，不修改用户主目录、全局 Temp 或任意安装父目录权限，也不关闭 HMAC 校验。脚本不迁移旧访问令牌；遇到活跃 profile 不停止原后台。
+
+本机原 `Launch Acceptance Preview.cmd` 已更新，两个原有 Mock 草案对应的工作区已重新登记，源文件与历史草案保留。新 profile 的快捷连接仍关闭，预留 4188；原业务应用与授权没有改动。EXE/安装器本身没有改动，不需要重新下载或安装。
+
+**现在如何启动：**
+
+1. 在旧报错窗口选择 **退出应用**。不要仅点击“重试”：已运行的进程仍持有旧 profile 环境变量。
+2. 打开 `%TEMP%\tc-desktop-20261026-5wPoUV\build`，重新双击 **Launch Acceptance Preview.cmd**。
+3. 打开 **桌面交互验收**，应看到原来的两个 Mock 规划；点击左下角刷新，应出现刷新成功反馈。
+
+维护者为其他 Windows 解包目录重新准备同类独立入口时，在源码根目录使用 Windows Node（路径替换为实际路径）：
+
+```powershell
+node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacked\orchestrator-tokenCoupon.exe" --output "D:\Preview\Launch Acceptance Preview.cmd"
+```
+
+它只准备验收入口，不自动打开窗口或登记业务项目。原始验收记录仍在原工作区，需要时由用户打开已有目录；不要手工把旧 owner/token 文件复制到新 profile。已经在运行的验收 profile 应先正常停止再重新准备，脚本不会为通过验证强行结束它。
+
+**验证：** Node 脚本语法和 `git diff --check` 通过；身份发现/profile/后台管理/发布相关 5 文件 10 项回归通过。真实 Windows GUI 现在使用同一准备逻辑，测试工作区/启动器位于 Temp、凭据位于独立私有用户目录，完整窗口/后台重连/恢复回归通过，报告增加 `privateAcceptanceProfile=verified-outside-temp`。另使用用户启动脚本的相同配置实际启动窗口，核验 userData、HMAC 挑战、刷新成功、两个原有草案及只停止本次后台，全部通过，付费模型调用为 0。没有重新宣称完成安装升级、原生文件夹弹窗或真实网页账号验收。
+
+新增报告在本次临时根目录的 `gui-private-profile-report/desktop-gui-smoke.json`、`repaired-acceptance-verification.json`；启动截图为 `repaired-acceptance-startup.png`。本次修复不改变安装器 SHA-256，也没有合并 main、推送或发布。

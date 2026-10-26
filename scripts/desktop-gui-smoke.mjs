@@ -1,7 +1,7 @@
 // Real Electron GUI acceptance in an isolated profile. No Runner or paid model calls.
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -10,6 +10,7 @@ import { _electron as electron } from "playwright-core";
 import { createClient } from "../packages/client/dist/index.js";
 import { discoverOwnedDaemon, readDaemonOwnerCredential } from "../packages/client/dist/node.js";
 import { directoryFootprint } from "./desktop-measurements.mjs";
+import { prepareDesktopAcceptance } from "./prepare-desktop-acceptance.mjs";
 
 function option(name) { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; }
 const executablePath = option("--executable");
@@ -21,9 +22,13 @@ for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "htt
 process.env.NO_PROXY = process.env.no_proxy = "127.0.0.1,localhost,::1";
 await mkdir(outputDirectory, { recursive: true });
 const manifest = JSON.parse(await readFile(join(dirname(executablePath), "resources/token-coupon-runtime/runtime-manifest.json"), "utf8"));
-const root = await mkdtemp(join(process.platform === "win32" ? homedir() : tmpdir(), ".token-coupon-desktop-gui-"));
-const profile = join(root, "daemon"), desktopHome = join(root, "桌面 profile");
-await mkdir(profile, { mode: 0o700 });
+const root = await mkdtemp(join(tmpdir(), ".token-coupon-desktop-gui-"));
+// Exercise the actual preview-launcher setup with a Temp/build-side workspace,
+// while credentials live in a separately protected user profile.
+const acceptanceProfile = process.platform === "win32"
+  ? await prepareDesktopAcceptance(executablePath, join(root, "Launch GUI Acceptance.cmd"), { instanceId: `gui-${randomUUID()}` }) : undefined;
+const profile = acceptanceProfile?.daemon ?? join(root, "daemon"), desktopHome = acceptanceProfile?.desktop ?? join(root, "桌面 profile");
+await mkdir(profile, { recursive: true, mode: 0o700 });
 const noSandbox = process.argv.includes("--no-sandbox");
 assert(!noSandbox || process.platform === "linux", "--no-sandbox is only a Linux CI test escape hatch");
 const environment = { ...process.env, TOKEN_COUPON_DESKTOP_HOME: desktopHome };
@@ -403,7 +408,7 @@ try {
   assert.deepEqual(pageErrors, [], "the real renderer should load without JavaScript errors");
   const resourceMeasurements = await measurements();
   await writeFile(join(outputDirectory, "desktop-measurements.json"), `${JSON.stringify(resourceMeasurements, null, 2)}\n`);
-  const report = { platform: process.platform, electronVersion: await application.evaluate(() => process.versions.electron),
+  const report = { platform: process.platform, privateAcceptanceProfile: acceptanceProfile ? "verified-outside-temp" : "posix-profile", electronVersion: await application.evaluate(() => process.versions.electron),
     buildId: manifest.buildId, packagedStartup: "passed", restrictedPreload: "passed", childFrameIsolation: "passed", popupDenied: "passed",
     notificationPreferencePersistence: "passed", nativeClipboardCopy: "passed", detachedDaemonReuse: "passed", safeStopAndRestart: "passed",
     liveDaemonReconnect: "passed", draftRecoveryNoReplay: "passed", secondInstanceProfileGuard: "passed",
@@ -419,4 +424,5 @@ try {
   try { await stopDaemon().catch(error => { if (acceptanceFailure) console.error("Cleanup after failed acceptance:", error.message); else throw error; }); }
   finally { await closeWindow(); }
   await rm(root, { recursive: true, force: true });
+  if (acceptanceProfile) await rm(acceptanceProfile.root, { recursive: true, force: true });
 }
