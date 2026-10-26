@@ -55,6 +55,8 @@ describe("desktop preview packaging", () => {
   it("keeps runtime resources outside ASAR, disables publication and preserves user data", () => {
     const config = desktopBuilderConfiguration({ appDirectory: "/app", outputDirectory: "/out", resourcesDirectory: "/stage", electronVersion: "44.9.1" });
     expect(config.asar).toBe(true);
+    expect(config.compression).toBe("maximum");
+    expect(config.nsis.differentialPackage).toBe(false);
     expect(config.productName).toBe("orchestrator-tokenCoupon");
     expect(config.appId).toBe("org.token-coupon.desktop");
     expect(config.nsis.shortcutName).toBe("orchestrator-tokenCoupon");

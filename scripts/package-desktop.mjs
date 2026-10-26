@@ -51,11 +51,13 @@ export function desktopBuilderConfiguration({ appDirectory, outputDirectory, ele
     appId: "org.token-coupon.desktop", productName: "orchestrator-tokenCoupon", electronVersion,
     directories: { app: appDirectory, output: outputDirectory },
     files: ["dist/**/*", "node_modules/@token-coupon/client/**/*", "package.json"],
+    // No automatic updater is shipped: optimize the full NSIS payload rather than a differential block map.
+    compression: "maximum",
     asar: true, npmRebuild: false, nodeGypRebuild: false, forceCodeSigning: false, publish: null,
     electronLanguages: ["en-US", "zh-CN"],
     ...(electronDist ? { electronDist } : {}),
     win: { icon: join(appDirectory, "dist/token-coupon.ico"), requestedExecutionLevel: "asInvoker", signAndEditExecutable: false },
-    nsis: { shortcutName: "orchestrator-tokenCoupon", uninstallDisplayName: "orchestrator-tokenCoupon", oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
+    nsis: { differentialPackage: false, shortcutName: "orchestrator-tokenCoupon", uninstallDisplayName: "orchestrator-tokenCoupon", oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
       deleteAppDataOnUninstall: false, runAfterFinish: false, artifactName: "Token-Coupon-${version}-${arch}-preview-setup.${ext}" },
     linux: { executableName: "token-coupon", category: "Development", icon: join(appDirectory, "dist/token-coupon.png") },
   };
@@ -102,7 +104,7 @@ export async function packageDesktop({ outputDirectory, mode = "dir", bundledNod
     const artifacts = await build({ projectDir: appDirectory, targets: Platform.current().createTarget(mode === "installer" ? "nsis" : "dir", Arch[process.arch]),
       config: configuration, publish: "never" });
     const report = { format: 1, applicationVersion: shell.manifest.version, buildId: runtime.manifest.buildId,
-      platform: process.platform, arch: process.arch, electronVersion: shell.electronVersion, mode, signed: false, releaseReady: false,
+      platform: process.platform, arch: process.arch, electronVersion: shell.electronVersion, mode, installerCompression: { requested: configuration.compression, differentialPackage: configuration.nsis.differentialPackage, automaticUpdates: false }, signed: false, releaseReady: false,
       runtimeSmoke: smokeResults, artifacts: [] };
     for (const artifact of artifacts) {
       const path = relative(outputDirectory, artifact);

@@ -46,5 +46,5 @@ export function runtimeFileAllowed(path) {
   if (segments.some(part => ["node_modules", ".git", ".github", "test", "tests", "__tests__", "coverage", "docs", "examples", "benchmarks"].includes(part))) return false;
   // README may be the license itself (e.g. SDK "SEE LICENSE IN README.md").
   if (/^(?:\.env(?:\.|$)|changelog(?:\.|$)|tsconfig(?:\.|$))/i.test(name)) return false;
-  return !/\.(?:map|ts|tsx|tsbuildinfo)$|\.(?:test|spec)\.[cm]?js$/i.test(name);
+  return !/\.d\.[cm]ts$|\.(?:map|ts|tsx|tsbuildinfo)$|\.(?:test|spec)\.[cm]?js$/i.test(name);
 }
