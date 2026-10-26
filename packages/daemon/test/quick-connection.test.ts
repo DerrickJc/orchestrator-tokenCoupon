@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ApplicationService } from "../src/application-service.js";
 import { createLocalServer } from "../src/http-server.js";
-import { installCloudflared } from "../src/cloudflared-component.js";
+import { installCloudflared, ensureCloudflaredLicense } from "../src/cloudflared-component.js";
 import { RemoteMcpConnection, type ConnectionPhase } from "../src/oauth-gateway.js";
 import { discoverQuickOrigin, QuickTunnelAdapter, type TunnelAdapter } from "../src/quick-tunnel.js";
 import { PersistentQuickTunnelAdapter } from "../src/persistent-tunnel.js";
@@ -650,10 +650,26 @@ describe("component integrity and tunnel parser", () => {
     await installCloudflared(root, asset, new AbortController().signal, () => undefined, fetcher);
     const binary = process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
     expect(await readFile(join(root, binary))).toEqual(content);
+    expect(await readFile(join(root, "LICENSE"), "utf8")).toContain("Apache License");
+    expect(JSON.parse(await readFile(join(root, "installed.json"), "utf8"))).toMatchObject({ archiveSha256: asset.sha256 });
     const bad = { ...asset, sha256: "0".repeat(64) };
     const rejected = join(root, "rejected");
     await expect(installCloudflared(rejected, bad, new AbortController().signal, () => undefined, fetcher)).rejects.toThrow("component_integrity_failed");
     await expect(readFile(join(rejected, binary))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("repairs missing cached licenses and never publishes an incomplete installation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc-component-license-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    await ensureCloudflaredLicense(root);
+    const expected = await readFile(join(root, "LICENSE"));
+    await rm(join(root, "LICENSE")); await ensureCloudflaredLicense(root);
+    expect(await readFile(join(root, "LICENSE"))).toEqual(expected);
+    await writeFile(join(root, "LICENSE"), "incomplete"); await ensureCloudflaredLicense(root);
+    expect(await readFile(join(root, "LICENSE"))).toEqual(expected);
+    const blocked = join(root, "blocked"); await mkdir(join(blocked, "LICENSE"), { recursive: true });
+    const content = Buffer.from("verified fixture binary"), asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
+    await expect(installCloudflared(blocked, asset, new AbortController().signal, () => undefined, async () => new Response(content))).rejects.toThrow("component_install_failed");
+    await expect(readFile(join(blocked, "installed.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.skipIf(process.platform === "win32")("recognizes only complete Quick Tunnel origins across process output chunks", async () => {

@@ -17,6 +17,8 @@ async function fixture() {
     for (const file of ["main.js", "index.js", "index.d.ts", "index.d.mts", "index.d.cts", "main.js.map"]) await writeFile(join(dir, "dist", file), "fixture");
   }
   await mkdir(join(root, "packages/core/resources")); await writeFile(join(root, "packages/core/resources/mock-process.mjs"), "fixture");
+  await mkdir(join(root, "packages/daemon/THIRD_PARTY_LICENSES"));
+  await writeFile(join(root, "packages/daemon/THIRD_PARTY_LICENSES/cloudflared-LICENSE"), "cloudflared Apache-2.0 fixture");
   await writeFile(join(root, "packages/daemon/dist/build-info.json"), JSON.stringify({ format: 1, applicationVersion: "0.1.0", buildId: "fixture" }));
   async function dependency(name: string, manifest = {}) {
     const dir = join(root, "node_modules", name); await mkdir(dir, { recursive: true });
@@ -42,6 +44,7 @@ it("ships only the runtime closure, retaining nested dependencies and licenses w
   expect((await readdir(join(stage.root, "node_modules/transport"))).sort()).toEqual(["LICENSE", "README.md", "index.js", "node_modules", "package.json"]);
   expect(await readFile(join(stage.root, "node_modules/transport/node_modules/leaf/index.js"), "utf8")).toContain("nested");
   expect((await readdir(join(stage.root, "node_modules/@token-coupon/core/dist"))).sort()).toEqual(["index.js", "main.js"]);
+  expect(await readFile(join(stage.root, "node_modules/@token-coupon/daemon/THIRD_PARTY_LICENSES/cloudflared-LICENSE"), "utf8")).toBe("cloudflared Apache-2.0 fixture");
 });
 it("rejects a missing required dependency instead of emitting a broken package", async () => {
   const h = await fixture(); await expect(runtimeDependencies(h.root)).rejects.toThrow("runtime_dependency_missing");
@@ -50,4 +53,10 @@ it.skipIf(process.platform === "win32")("refuses dependency links that escape th
   const h = await fixture(), outside = await fixture();
   await mkdir(join(h.root, "node_modules")); await symlink(join(outside.root, "packages/client"), join(h.root, "node_modules/transport"));
   await expect(runtimeDependencies(h.root)).rejects.toThrow("runtime_resource_outside_source");
+});
+
+it("fails packaging if the component license resource is missing", async () => {
+  const h = await fixture(); await h.dependency("transport");
+  await rm(join(h.root, "packages/daemon/THIRD_PARTY_LICENSES"), { recursive: true });
+  await expect(stageDesktopRuntime(h.root)).rejects.toMatchObject({ code: "ENOENT" });
 });

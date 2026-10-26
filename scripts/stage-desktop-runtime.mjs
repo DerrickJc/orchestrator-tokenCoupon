@@ -56,6 +56,7 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
       await copy(join(from, "package.json"), join(destination, "package.json"));
       await copy(join(from, "dist"), join(destination, "dist"));
       if (name === "core") await copy(join(from, "resources"), join(destination, "resources"));
+      if (name === "daemon") await copy(join(from, "THIRD_PARTY_LICENSES"), join(destination, "THIRD_PARTY_LICENSES"));
       copied.push(`@token-coupon/${name}`);
     }
     let nodeExecutable;
