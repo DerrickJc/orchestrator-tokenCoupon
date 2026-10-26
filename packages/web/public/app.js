@@ -4769,15 +4769,22 @@ function renderOperationNotices() {
   root.replaceChildren(); history.replaceChildren();
   const latest = $("#job-bar").dataset.noticeId;
   const rows = [...(state.operationNotices?.values() || [])].filter(row => operationNoticeMatches(row.context));
-  const dismissed = state.dismissedOperationNotices || new Set();
+  const dismissed = state.dismissedOperationNotices ??= new Set();
+  const running = $("#job-bar").dataset.state === "running" && !latest;
+  const visible = rows.slice().reverse().filter(row => !dismissed.has(row.id));
+  const current = visible.find(row => row.id === latest);
+  const ordered = current ? [current, ...visible.filter(row => row !== current)] : visible;
+  // Clear old banners, not their Jobs or domain state. A running operation
+  // consumes one of the two slots; older records remain available on demand.
+  for (const row of ordered.slice(running ? 1 : 2)) dismissed.add(row.id);
   for (const row of rows) {
     if (row.id === latest) { show($("#job-bar"), !dismissed.has(row.id)); show($("#job-feedback-close")); }
     const restore = document.createElement("button"); restore.type = "button"; restore.className = "text-button";
     restore.textContent = `${row.text}${dismissed.has(row.id) ? " · 提示已关闭，点击查看" : ""}`;
-    restore.onclick = () => { state.dismissedOperationNotices?.delete(row.id); renderOperationNotices(); };
+    restore.onclick = () => { state.dismissedOperationNotices?.delete(row.id); state.operationNotices.delete(row.id); state.operationNotices.set(row.id, row); renderOperationNotices(); };
     history.append(restore);
     if (row.id === latest || dismissed.has(row.id)) continue;
-    const card = document.createElement("section"); card.className = `operation-notice notice notice-${row.tone === "error" ? "error" : "warn"}`;
+    const card = document.createElement("section"); card.className = `operation-notice notice notice-${row.tone === "error" ? "error" : row.tone === "warning" ? "warn" : "success"}`;
     const title = document.createElement("strong"); title.textContent = row.text;
     const close = document.createElement("button"); close.type = "button"; close.className = "notification-dismiss"; close.textContent = "×"; close.setAttribute("aria-label", "关闭本次操作提示"); close.onclick = () => dismissOperationNotice(row.id);
     const details = document.createElement("details"), summary = document.createElement("summary"), diagnostic = document.createElement("pre"); summary.textContent = "查看操作诊断"; diagnostic.textContent = row.job.error || row.text; details.append(summary, diagnostic);
@@ -4792,6 +4799,7 @@ async function startJob(label, submit, waitForCompletion = false, allowDuringExe
   state.submittingJob = true; const context = { feedbackId: key(), workspaceId: state.workspace.workspaceId, workspaceLabel: state.workspace.label, planningId: state.planning?.planningId, planTitle: state.planning?.draft?.plan?.title || state.planning?.title, sessionId: state.planning?.session?.sessionId, submittedAt: Date.now(), label };
   state.jobContext = context; delete $("#job-bar").dataset.noticeId; delete $("#job-bar").dataset.tone; show($("#job-feedback-close"), false); show($("#job-feedback-details"), false); show($("#job-feedback-next"), false); show($("#job-bar")); $("#job-bar").dataset.state = "running"; $("#job-label").textContent = `${label} · 正在提交…`; show($("#job-bar .spinner")); show($("#job-view-result"), false); show($("#cancel-job"), false);
   renderJobPlanLink(context);
+  renderOperationNotices();
   try {
     const job = await submit(context.feedbackId); context.jobId = job.jobId; state.activeJob = job; state.jobContexts ??= new Map(); state.jobContexts.set(job.jobId, context); rememberExecutionJob(job, context); acceptPlanningJob(job); state.submittingJob = false; show($("#cancel-job"), job.status === "running"); show($("#job-bar")); $("#job-label").textContent = `${label} · ${job.status === "running" ? "处理中" : statuses[job.status] || job.status}`; renderJobPlanLink(context);
     if (job.status === "running") {

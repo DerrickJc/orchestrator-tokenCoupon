@@ -240,7 +240,7 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
   .event-entry { grid-template-columns:64px minmax(0,1fr); }
   .event-entry .event-content { grid-column:1/-1; }
 }
-.operation-status-stack { position:sticky; top:8px; z-index:16; }
+.operation-status-stack { position:static; display:grid; gap:8px; margin-bottom:12px; }
 .operation-status-stack .job-bar,.operation-status-stack #pending-action-banner { position:static; top:auto; margin:8px 0; }
 /* Anchors remain visible below the shared sticky status stack. */
 #pending-approval-box,#runtime-model-panel,#attempt-reader,#session-health { scroll-margin-top:150px; }
@@ -652,7 +652,15 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 #job-feedback-details { flex-basis:100%; }
 #job-feedback-diagnostic,.operation-notice pre { white-space:pre-wrap; overflow-wrap:anywhere; }
 #operation-feedback-history-list { display:grid; gap:6px; }
-.operation-notice { margin:8px 0; }
+.operation-notice { margin:0; min-width:0; }
+#operation-feedback-list { display:grid; gap:8px; }
+.operation-status-stack .job-bar,.operation-status-stack #pending-action-banner { margin:0; }
+.operation-status-stack .notification-dismiss { position:absolute; top:8px; right:8px; }
+.operation-status-stack .job-bar,.operation-status-stack .operation-notice { padding:12px 44px 12px 14px; line-height:1.6; overflow-wrap:anywhere; }
+.operation-notice > strong { display:block; }
+#operation-feedback-history { min-width:0; padding:4px 0; }
+#operation-feedback-history-list { max-height:220px; overflow:auto; }
+#operation-feedback-history-list > button { text-align:left; overflow-wrap:anywhere; line-height:1.6; }
 
 .directory-toolbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 #directory-breadcrumbs { display:flex; flex-wrap:wrap; align-items:center; gap:4px; min-width:0; }

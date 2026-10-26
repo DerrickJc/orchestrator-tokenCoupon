@@ -3167,3 +3167,25 @@ it("navigates Explorer-style folders, separates selection from browsing and reme
   h.element("directory-close").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/projects/新项目");
   expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
 });
+
+it("keeps only two operation banners, retires old repeats and counts a running Job", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/review" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  for (let n = 1; n <= 4; n++) {
+    await h.w.eval(`startJob("操作 ${n}", async () => ({jobId:"limit-${n}",workspaceId:"project",planningId:"first",status:"failed",error:"test_failure：错误 ${n}"}))`);
+  }
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(h.element("operation-feedback-list").textContent).toContain("错误 3");
+  expect(h.element("operation-feedback-list").textContent).not.toContain("错误 1");
+  expect(h.element("operation-feedback-history-list").children.length).toBe(4);
+  expect(h.visible("job-bar")).toBe(true);
+  h.w.eval('renderOperationNotices()');
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  h.w.eval('void startJob("新操作", () => new Promise(resolve => { window.finishLimitedJob = resolve; }))');
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(h.element("job-bar").dataset.state).toBe("running");
+  h.w.eval('window.finishLimitedJob({jobId:"limit-5",workspaceId:"project",planningId:"first",status:"succeeded"})');
+  await expect.poll(() => h.element("job-bar").dataset.state).toBe("succeeded");
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(h.posts).toHaveLength(0);
+});
