@@ -680,3 +680,10 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .brand-name { display:flex; flex-direction:column; min-width:0; font-size:16px; line-height:1.2; }
 .brand-name > span { white-space:nowrap; }
 .brand-name small { margin-top:6px; }
+
+/* Git setup stays legible at compact desktop widths. */
+.git-identity-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(230px,100%),1fr)); gap:8px 16px; }
+#git-identity .git-identity-fields label { margin:4px 0; min-width:0; }
+#git-identity input { width:100%; box-sizing:border-box; }
+#git-readiness-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+#git-readiness-actions .field-error { flex-basis:100%; }

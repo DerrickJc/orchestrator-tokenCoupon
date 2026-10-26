@@ -1910,6 +1910,20 @@ function renderGitReadiness(needed) {
   $("#git-readiness-commands").textContent = (data?.commands || []).join("\n");
   $("#git-readiness-paths").textContent = (data?.paths || []).join("\n");
   show($("#git-manual-help"), !!(data?.commands?.length || data?.paths?.length));
+  const identity = data?.identity, identityPanel = $("#git-identity");
+  show(identityPanel, !!data && !["not_repository", "wrong_root", "error"].includes(data.state));
+  if (state.gitIdentityWorkspace !== state.workspace?.workspaceId) {
+    state.gitIdentityWorkspace = state.workspace?.workspaceId; state.gitIdentitySignature = null;
+    $("#git-name").value = ""; $("#git-email").value = ""; $("#git-identity-error").textContent = "";
+  }
+  const identitySignature = JSON.stringify(identity);
+  if (state.gitIdentitySignature !== identitySignature) {
+    state.gitIdentitySignature = identitySignature;
+    identityPanel.open = identity?.configured === false;
+    $("#git-name").value = identity?.name || ""; $("#git-email").value = identity?.email || "";
+  }
+  $("#git-identity-summary").textContent = identity?.configured ? "Git 身份已就绪 · 修改本仓库身份" : "设置本仓库 Git 身份";
+  $("#git-identity-status").textContent = identity?.configured ? `已读取有效 Git 配置${identity.name ? `：${identity.name} <${identity.email}>` : ""}，无需重复填写。` : identity?.configured === false ? "创建提交前需要填写姓名和邮箱。保存只影响此仓库，不修改全局配置。" : "填写后仅保存到此仓库；已有 Git 配置也可直接复用。";
   const actions = $("#git-readiness-actions"); actions.replaceChildren();
   $("#git-steps").textContent = `检查仓库 → 检查基线 → 处理变更 → 就绪 · 当前：${({ not_repository: "等待初始化", no_commit: "等待首次提交", metadata_tracked: "修复运行记录跟踪", dirty: "等待确认提交", ready: "全部完成" })[data?.state] || "检查中／需处理"}`;
   const selection = $("#git-file-selection"), files = $("#git-file-list");
@@ -1930,7 +1944,9 @@ function renderGitReadiness(needed) {
   const options = { not_repository: ["initialize", "初始化 Git 仓库"], no_commit: ["initial-commit", "创建空的首次提交"], metadata_tracked: ["untrack-runtime", "取消跟踪运行记录（保留文件）"] };
   if (options[data?.state]) {
     const [action, text] = options[data.state], button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = text; button.dataset.gitAction = action;
-    button.disabled = !!state.activeJob; button.addEventListener("click", () => prepareGitFromUI(action)); actions.append(button);
+    button.disabled = !!state.activeJob || (action === "initial-commit" && identity?.configured === false);
+    button.addEventListener("click", () => prepareGitFromUI(action)); actions.append(button);
+    if (action === "initial-commit" && identity?.configured === false) { const note = document.createElement("span"); note.className = "field-error"; note.textContent = "先在下方保存 Git 姓名和邮箱，再创建首次提交。"; actions.append(note); }
   }
   if (data?.state === "wrong_root" && data.repositoryRoot) {
     const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = "选择仓库根目录";
@@ -2021,7 +2037,9 @@ async function previewGitFromUI(mode) {
       summary.append(status, path); pre.textContent = item.text; details.append(summary, pre); box.append(details);
     }
     $("#git-commit-message").value = preview.suggestedMessage;
-    $("#git-preview-error").textContent = "";
+    const missingIdentity = state.gitReadiness?.workspaceId === workspaceId && state.gitReadiness.identity?.configured === false;
+    $("#git-preview-error").textContent = missingIdentity ? "可以预览文件；提交前请关闭预览，在 Git 身份区域填写姓名和邮箱并保存。" : "";
+    $("#git-confirm-commit").disabled = missingIdentity;
     $("#git-preview-dialog").showModal();
   } catch (error) { showToast(error.message, true); }
 }
@@ -5499,10 +5517,19 @@ $("#git-preview-selected").addEventListener("click", () => previewGitFromUI("sel
 $("#git-preview-close").addEventListener("click", () => { $("#git-preview-dialog").close(); state.gitPreview = null; });
 $("#git-confirm-commit").addEventListener("click", confirmGitCommit);
 $("#git-save-identity").addEventListener("click", async () => {
-  if (!state.workspace || !await askConfirm("保存仓库 Git 身份", `仅修改此仓库 Git 身份：${state.workspace.path}`, "保存身份")) return;
-  await startJob("保存仓库身份", requestKey => api(`/api/v1/workspaces/${state.workspace.workspaceId}/git/identity`, { method: "POST", body: JSON.stringify({ requestKey, confirmed: true, name: $("#git-name").value, email: $("#git-email").value }) }), true);
+  const workspace = state.workspace, name = $("#git-name").value.trim(), email = $("#git-email").value.trim();
+  if (!workspace) return;
+  if (!name || !email || /[\r\n\0]/.test(name + email) || !$("#git-email").checkValidity()) {
+    $("#git-identity-error").textContent = "请填写提交者姓名和有效邮箱；仅用于 Git 提交记录。"; return;
+  }
+  $("#git-identity-error").textContent = "";
+  if (!await askConfirm("保存仓库 Git 身份", `仅修改此仓库 Git 身份：${workspace.path}\n${name} <${email}>`, "保存身份") || state.workspace?.workspaceId !== workspace.workspaceId) return;
+  const job = await startJob("保存仓库身份", requestKey => api(`/api/v1/workspaces/${workspace.workspaceId}/git/identity`, { method: "POST", body: JSON.stringify({ requestKey, confirmed: true, name, email }) }), true);
+  if (state.workspace?.workspaceId !== workspace.workspaceId) return;
   await refreshGitReadiness(true);
+  if (job?.status === "succeeded") $("#git-identity").open = false;
 });
+
 if (!globalThis.tokenCouponAttemptSelection) {
   $("#attempt-select").addEventListener("change", () => { if (state.attemptSelection) { state.attemptSelection.mode = "history"; state.attemptSelection.selectedAttemptId = $("#attempt-select").value; } void selectAttempt(); });
   $("#attempt-show-latest").addEventListener("click", () => { if (state.attemptSelection) { state.attemptSelection.mode = "auto"; state.attemptSelection.selectedAttemptId = state.latestAttemptChoice?.attemptId || ""; } $("#attempt-select").value = state.latestAttemptChoice?.attemptId || ""; void selectAttempt(); });

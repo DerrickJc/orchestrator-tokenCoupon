@@ -147,3 +147,18 @@ it("refuses partial staging and preserves a failing hook's index and files", asy
   expect((await runGit(h.path, ["rev-parse", "HEAD"])).stdout.trim()).toBe(preview.head);
   expect((await runGit(h.path, ["show", ":code.txt"])).stdout).toBe("unstaged version");
 });
+
+it("reports missing identity before the initial commit and refuses to stage selected files until configured", async () => {
+  const h = await fixture(); await prepareWorkspaceGit(h.path, "initialize");
+  await runGit(h.path, ["config", "user.name", ""]); await runGit(h.path, ["config", "user.email", ""]);
+  await writeFile(join(h.path, "README.md"), "first project file");
+  expect(await workspaceGitStatus(h.path)).toMatchObject({ state: "no_commit", identity: { configured: false } });
+  const preview = await previewGitCommit(h.path, "selected", ["README.md"]);
+  await expect(commitWorkspaceGit(h.path, { ...preview, mode: "selected", message: "initial source" })).rejects.toThrow("git_identity_required");
+  expect((await runGit(h.path, ["ls-files", "--stage"])).stdout).toBe("");
+  await identity(h.path);
+  expect(await workspaceGitStatus(h.path)).toMatchObject({ state: "no_commit", identity: { configured: true, name: "Workspace Test", email: "workspace@example.invalid" } });
+  const result = await commitWorkspaceGit(h.path, { ...preview, mode: "selected", message: "initial source" });
+  expect(result.status.state).toBe("ready");
+  expect((await runGit(h.path, ["show", "HEAD:README.md"])).stdout).toBe("first project file");
+});

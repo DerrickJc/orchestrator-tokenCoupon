@@ -3189,3 +3189,22 @@ it("keeps only two operation banners, retires old repeats and counts a running J
   expect(h.element("operation-feedback-list").children.length).toBe(1);
   expect(h.posts).toHaveLength(0);
 });
+
+it("explains missing Git identity before committing and reuses an already configured author", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  h.setGitStatus({ state: "no_commit", message: "等待首次提交", identity: { configured: false }, changes: [] });
+  h.element("git-refresh").click();
+  await expect.poll(() => (h.element("git-identity") as HTMLDetailsElement).open).toBe(true);
+  expect((h.element("git-readiness-actions").querySelector('[data-git-action="initial-commit"]') as HTMLButtonElement).disabled).toBe(true);
+  expect(h.element("git-identity-status").textContent).toContain("不修改全局配置");
+  h.element("git-save-identity").click(); expect(h.element("git-identity-error").textContent).toContain("请填写");
+  expect(h.posts.some(item => item.path.endsWith("/git/identity"))).toBe(false);
+  (h.element("git-name") as HTMLInputElement).value = "正在编辑的姓名";
+  h.element("git-refresh").click(); await new Promise(resolve => setTimeout(resolve, 50));
+  expect((h.element("git-name") as HTMLInputElement).value).toBe("正在编辑的姓名");
+  h.setGitStatus({ state: "ready", message: "已就绪", identity: { configured: true, name: "Existing Author", email: "author@example.invalid" }, changes: [] });
+  h.element("git-refresh").click();
+  await expect.poll(() => h.element("git-identity-status").textContent).toContain("无需重复填写");
+  expect((h.element("git-identity") as HTMLDetailsElement).open).toBe(false);
+  expect((h.element("git-name") as HTMLInputElement).value).toBe("Existing Author");
+});
