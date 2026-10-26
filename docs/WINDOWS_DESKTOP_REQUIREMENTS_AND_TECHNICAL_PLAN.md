@@ -1665,3 +1665,12 @@ node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacke
 **验证：** Node 脚本语法和 `git diff --check` 通过；身份发现/profile/后台管理/发布相关 5 文件 10 项回归通过。真实 Windows GUI 现在使用同一准备逻辑，测试工作区/启动器位于 Temp、凭据位于独立私有用户目录，完整窗口/后台重连/恢复回归通过，报告增加 `privateAcceptanceProfile=verified-outside-temp`。另使用用户启动脚本的相同配置实际启动窗口，核验 userData、HMAC 挑战、刷新成功、两个原有草案及只停止本次后台，全部通过，付费模型调用为 0。没有重新宣称完成安装升级、原生文件夹弹窗或真实网页账号验收。
 
 新增报告在本次临时根目录的 `gui-private-profile-report/desktop-gui-smoke.json`、`repaired-acceptance-verification.json`；启动截图为 `repaired-acceptance-startup.png`。本次修复不改变安装器 SHA-256，也没有合并 main、推送或发布。
+
+
+### 15.6 Windows 验收入口代理补充（2026-10-26）
+
+下载失败再次排查发现：Windows 系统静态代理已启用，127.0.0.1:7897 正在监听，但从验收入口启动的进程没有 HTTP_PROXY/HTTPS_PROXY/NO_PROXY。对同一个固定版本官方 GitHub 组件 URL 的实际 Windows 请求，直连 10 秒超时；经本机代理 772 ms 返回 HTTP 206，因此不是 SHA-256、授权或模型问题。
+
+验收入口生成脚本现在读取用户已启用的 Windows 静态 HTTP/HTTPS 代理，作为这个 `.cmd` 的缺省配置；已显式配置的进程代理优先，不修改系统/用户全局代理。没有启用代理、PAC-only、SOCKS-only 或含认证信息的值不写入脚本；本机控制链保持 loopback 直连。当前验收入口已补充代理并在无执行 Session 的前提下重启，保留两个 Mock 草案。代理方案仅覆盖此维护者验收启动脚本，不表示标准 EXE 已自动支持全部 Windows/PAC/SOCKS 代理。
+
+新增代理解析、禁用/PAC/SOCKS、认证信息与命令字符拒绝回归，并加入 Windows 原生测试入口。5 文件 14 项定向测试通过；首次沙箱因禁止 loopback 监听而 EPERM，沙箱外同组重跑通过。真实 Windows 通过官方下载与 SHA-256 校验后，又暴露包内 cloudflared 许可证漏装导致的 ENOENT，需继续按下一节修复；本节不把下载成功当作公网连接成功。
