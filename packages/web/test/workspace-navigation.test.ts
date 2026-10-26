@@ -3149,14 +3149,15 @@ it("dismisses a blocked operation per Job without discarding requirements, and s
   expect(JSON.stringify(h.plans)).toBe(before); expect(h.posts).toHaveLength(0);
 });
 
-it("navigates Explorer-style folders, separates selection from browsing and remembers only confirmed choices", async () => {
+it("uses compact AO-style directory navigation and remembers only explicitly confirmed choices", async () => {
   const h = await page({ ready: true, hash: "#/workspaces" });
   h.element("add-workspace-main").click();
   await expect.poll(() => h.element("directory-status").textContent).toContain("/projects");
   const entry = h.element("directory-list").querySelector<HTMLButtonElement>("[data-directory-path]")!;
-  entry.click(); expect(h.element("directory-selection").textContent).toContain("/projects/新项目");
-  expect((h.element("directory-path") as HTMLInputElement).value).toBe("/projects");
-  entry.dispatchEvent(new h.w.MouseEvent("dblclick"));
+  expect(h.element("directory-dialog").classList.contains("workspace-directory-picker")).toBe(true);
+  expect(h.element("directory-title").textContent).toBe("选择工作区文件夹");
+  expect(entry.querySelector("svg")).not.toBeNull();
+  entry.click();
   await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects/新项目");
   h.element("directory-back").click(); await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects");
   h.element("directory-forward").click(); await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects/新项目");
@@ -3266,5 +3267,64 @@ it("closes the Git picker on workspace switches and browses project files withou
   await expect.poll(() => h.w.eval('__testState.workspace?.workspaceId')).toBe("other");
   expect((h.element("git-files-dialog") as HTMLDialogElement).open).toBe(false);
   await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("已选 0 个");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("shows loading and recoverable directory errors and prevents confirming an unvalidated edited path", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  const original = h.w.fetch; let release: ((value: Response) => void) | undefined, fail = true;
+  h.w.fetch = (async (raw: string, init?: any) => {
+    if (raw.includes("/api/v1/directories")) {
+      const path = new URL(raw, "http://local").searchParams.get("path");
+      if (path === "/locked" && fail) return Response.json({ error: "permission denied" }, { status: 403 });
+      if (!path) return new Promise<Response>(resolve => { release = resolve; });
+    }
+    return original(raw, init);
+  }) as any;
+  h.element("add-workspace-main").click();
+  await expect.poll(() => !!release).toBe(true);
+  expect(h.element("directory-list").getAttribute("aria-busy")).toBe("true");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  release!(Response.json({ path: "/projects", parent: "/", entries: [], totalMatches: 0, nextOffset: null }));
+  await expect.poll(() => (h.element("directory-use") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("directory-list").textContent).toContain("没有子目录");
+  (h.element("directory-path") as HTMLInputElement).value = "/locked"; h.element("directory-path").dispatchEvent(new h.w.Event("input"));
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-go").click(); await expect.poll(() => h.visible("directory-error-box")).toBe(true);
+  expect(h.element("directory-error").textContent).toContain("permission denied");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  fail = false; h.element("directory-retry").click();
+  await expect.poll(() => (h.element("directory-use") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.visible("directory-error-box")).toBe(false);
+  h.element("directory-use").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/locked");
+  expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
+});
+
+it("keeps a newly typed directory path when an older request finishes and ignores queued close events after reopening", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  const original = h.w.fetch; let release: ((value: Response) => void) | undefined;
+  h.w.fetch = (async (raw: string, init?: any) => raw.includes("/api/v1/directories") && !new URL(raw, "http://local").searchParams.get("path") ? new Promise<Response>(resolve => { release = resolve; }) : original(raw, init)) as any;
+  h.element("add-workspace-main").click(); await expect.poll(() => !!release).toBe(true);
+  (h.element("directory-path") as HTMLInputElement).value = "/new-path"; h.element("directory-path").dispatchEvent(new h.w.Event("input"));
+  release!(Response.json({ path: "/projects", parent: "/", entries: [], nextOffset: null }));
+  await expect.poll(() => h.element("directory-list").getAttribute("aria-busy")).toBe("false");
+  expect((h.element("directory-path") as HTMLInputElement).value).toBe("/new-path");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-go").click(); await expect.poll(() => h.element("directory-status").textContent).toContain("/new-path");
+  h.element("directory-cancel").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("");
+  (h.element("workspace-path") as HTMLInputElement).value = "/reopened";
+  h.element("browse-workspace-path").click(); h.element("directory-dialog").dispatchEvent(new h.w.Event("close"));
+  await expect.poll(() => h.element("directory-status").textContent).toContain("/reopened");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("directory-shortcuts").textContent).toContain("排课后端");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("starts a fresh workspace picker in the backend user home instead of the packaged daemon directory", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  h.w.eval('__testState.environment.home = "/users/current"; __testState.environment.currentDirectory = "/application/runtime/daemon/dist"');
+  h.element("add-workspace-main").click();
+  await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/users/current");
+  expect(h.element("directory-shortcuts").textContent).toContain("主目录");
   expect(h.posts).toHaveLength(0);
 });
