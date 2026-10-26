@@ -3091,3 +3091,39 @@ it("shows the newest OAuth diagnostic and preserves closable errors and folded i
   h.w.eval('showToast("参数校验失败：请核对当前工具参数", true)'); h.element("page-error-dismiss").click();
   expect(h.visible("page-error")).toBe(false); expect(h.posts).toHaveLength(0);
 });
+
+it("reports a coalesced manual refresh, keeps input and distinguishes unchanged state", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/overview" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  await expect.poll(() => h.w.eval('__testState.remoteFetching')).toBe(false);
+  const original = h.w.fetch; let finish: ((value: Response) => void) | undefined, count = 0;
+  h.w.fetch = ((raw: string, init?: any) => raw === "/api/v1/workspaces/project/plannings" ? (count++, new Promise<Response>(resolve => { finish = resolve; })) : original(raw, init)) as any;
+  (h.element("reply-text") as HTMLTextAreaElement).value = "保留尚未发送的输入";
+  h.element("refresh").click(); h.element("refresh").click();
+  await expect.poll(() => count).toBe(1);
+  expect((h.element("refresh") as HTMLButtonElement).disabled).toBe(true);
+  expect(h.element("refresh-feedback").textContent).toContain("正在更新");
+  finish!(Response.json(h.plans));
+  await expect.poll(() => h.element("refresh-feedback").textContent).toContain("刷新成功");
+  expect(h.element("refresh-feedback").textContent).toContain("状态无变化");
+  expect(h.element("refresh-last-success").textContent).toContain("最近成功");
+  expect((h.element("reply-text") as HTMLTextAreaElement).value).toBe("保留尚未发送的输入");
+  h.element("refresh-feedback-close").click(); expect(h.visible("refresh-feedback-wrap")).toBe(false);
+  expect((h.element("refresh") as HTMLButtonElement).disabled).toBe(false); expect(h.posts).toHaveLength(0);
+});
+
+it("reports partial refresh failure without discarding cached plan data or claiming success", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/overview" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  await expect.poll(() => h.w.eval('__testState.remoteFetching')).toBe(false);
+  const original = h.w.fetch;
+  h.w.fetch = ((raw: string, init?: any) => raw === "/api/v1/remote-connection" ? Promise.resolve(Response.json({ error: "后台连接暂不可用" }, { status: 503 })) : original(raw, init)) as any;
+  h.element("refresh").click();
+  await expect.poll(() => h.element("refresh-feedback").textContent).toContain("部分刷新失败");
+  expect(h.element("refresh-feedback").textContent).toContain("连接与授权");
+  expect(h.element("planning-title").textContent).toBe("计划 first");
+  expect((h.element("refresh") as HTMLButtonElement).disabled).toBe(false);
+  h.w.fetch = original; h.element("refresh").click();
+  await expect.poll(() => h.element("refresh-feedback").textContent).toContain("刷新成功");
+  expect(h.posts).toHaveLength(0);
+});

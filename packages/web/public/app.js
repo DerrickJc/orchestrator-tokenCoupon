@@ -197,7 +197,7 @@ function commandPaletteEntries() {
     { label: "连接中心", hint: "连接与网页授权", run: () => navigate("/connect") },
     { label: "工作区与计划", hint: "选择或新建工作区", run: () => navigate("/workspaces") },
     { label: "系统设置", hint: "规划、审查、修订与诊断默认方式", run: () => navigate("/settings") },
-    { label: "刷新状态", hint: "重新读取当前工作区和计划", run: () => refreshAll() },
+    { label: "刷新状态", hint: "重新读取当前工作区和计划", run: () => manualRefresh() },
   ];
   if (state.workspace) entries.push({ label: `新建计划 · ${state.workspace.label}`, hint: "打开规划设置，不会立即提交", run: () => startNewTask() });
   if (state.workspace && state.planning) {
@@ -296,11 +296,16 @@ const remoteScopeLabels = {
   "session:read": "查看 Session、任务状态与交付证据",
   "session:control": "运行、暂停、恢复或重试已批准计划",
 };
-async function refreshRemoteConnection() {
-  if (state.remoteFetching) { state.remoteRefreshPending = true; return; }
+async function refreshRemoteConnection(rethrow = false) {
+  if (state.remoteFetching) {
+    if (!rethrow) { state.remoteRefreshPending = true; return; }
+    const until = Date.now() + 15000;
+    while (state.remoteFetching && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 25));
+    if (state.remoteFetching) throw new Error("连接刷新超时，请重试");
+  }
   state.remoteFetching = true;
   try {
-    const status = await api("/api/v1/remote-connection");
+    const status = await api("/api/v1/remote-connection", { signal: AbortSignal.timeout(12000) });
     state.remoteStatus = status;
     const quickUnavailable = status.quickTunnel?.available === false;
     const quickReason = status.quickTunnel?.reason || "当前后台暂不支持快捷连接。可使用本机 Agent 或已有固定 HTTPS 网关。";
@@ -368,6 +373,7 @@ async function refreshRemoteConnection() {
     state.remoteUnavailable = true; state.connectionFlow = null; renderConnectionSummary(); renderConnectionClients();
     $("#remote-status").textContent = "服务不可用"; $("#remote-status").className = "badge badge-error";
     $("#remote-error").textContent = error.message; show($("#remote-error"));
+    if (rethrow) throw error;
   } finally {
     state.remoteFetching = false;
     if (state.remoteRefreshPending) { state.remoteRefreshPending = false; queueMicrotask(() => void refreshRemoteConnection()); }
@@ -384,7 +390,7 @@ function inferWebSource(value) {
 async function refreshRemoteApprovals() {
   let requests; let grants;
   const grantVersion = state.grantVersion || 0;
-  try { [requests, grants] = await Promise.all([api("/api/v1/remote-connection/approvals"), api("/api/v1/remote-connection/grants")]); }
+  try { [requests, grants] = await Promise.all([api("/api/v1/remote-connection/approvals", { signal: AbortSignal.timeout(12000) }), api("/api/v1/remote-connection/grants", { signal: AbortSignal.timeout(12000) })]); }
   catch { state.authorizationsFresh = false; configureGlobalPending(); return; }
   state.authorizationsFresh = true;
   requests = [...requests].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -1821,7 +1827,7 @@ async function loadPlanning(planningId) {
   const changed = planningId !== state.planning?.planningId;
   if (changed) { state.taskActivity = {}; state.attemptView = null; }
   const workspaceId = state.workspace.workspaceId, sequence = state.navigationSequence;
-  const planning = await api(`/api/v1/workspaces/${workspaceId}/plannings/${planningId}`);
+  const planning = await api(`/api/v1/workspaces/${workspaceId}/plannings/${planningId}`, { signal: AbortSignal.timeout(12000) });
   if (workspaceId !== state.workspace?.workspaceId || sequence !== state.navigationSequence || state.route?.planningId !== planningId) return;
   state.planning = planning;
   if (state.plannerProgressSupported && planning.localOperation) {
@@ -2202,12 +2208,42 @@ function startNewTask() {
   state.resetPlanningPolicy = true;
   return navigate(`/workspaces/${encodeURIComponent(state.workspace.workspaceId)}/new`);
 }
+function refreshSnapshot() {
+  return JSON.stringify([state.workspaces.map(w => [w.workspaceId, w.label]), state.plannings.map(p => [p.planningId, p.revision, p.status]), state.planning?.revision,
+    state.planning?.session?.status, state.remoteStatus?.transport, state.remoteStatus?.validGrants, state.remoteStatus?.clients]);
+}
+async function manualRefresh() {
+  if (state.manualRefresh) return state.manualRefresh;
+  const button = $("#refresh"), feedback = $("#refresh-feedback"), navigation = state.navigationSequence, before = refreshSnapshot();
+  const scope = state.planning?.draft?.plan?.title || state.workspace?.label || "当前页面";
+  button.disabled = true; button.textContent = "正在刷新…"; feedback.textContent = "正在更新当前页面状态…"; show($("#refresh-feedback-wrap"));
+  const tasks = [
+    ["工作区与计划", async () => {
+      if (state.workspace) await refreshAll(true);
+      else { const rows = await api("/api/v1/workspaces", { signal: AbortSignal.timeout(12000) }); if (navigation === state.navigationSequence) { state.workspaces = rows; renderWorkspaces(); } }
+    }],
+    ["连接与授权", async () => { await refreshRemoteConnection(true); if (state.authorizationsFresh === false) throw new Error("网页授权状态未更新"); }],
+    ...(globalThis.tokenCouponGlobalPending?.refreshChecked ? [["待处理状态", () => globalThis.tokenCouponGlobalPending.refreshChecked()]] : []),
+  ];
+  state.manualRefresh = (async () => {
+    const results = await Promise.allSettled(tasks.map(([, run]) => run()));
+    const failures = results.flatMap((result, i) => result.status === "rejected" ? [`${tasks[i][0]}：${result.reason?.message || "读取失败"}`] : []);
+    const current = navigation === state.navigationSequence;
+    const prefix = current ? "" : `${scope} · `;
+    const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    feedback.textContent = failures.length ? `${prefix}${failures.length === tasks.length ? "刷新失败" : "部分刷新失败"}：${failures.join("；")}。未更新部分保留上次状态，请重试。` : `${prefix}刷新成功${before === refreshSnapshot() ? " · 状态无变化" : ""} · ${time}`;
+    feedback.dataset.kind = failures.length ? "warning" : "success";
+    if (!failures.length) { state.lastManualRefreshAt = time; $("#refresh-last-success").textContent = `最近成功 ${time}${current ? "" : ` · ${scope}`}`; }
+    show($("#refresh-feedback-wrap"));
+  })().finally(() => { state.manualRefresh = null; button.disabled = false; button.textContent = "刷新状态"; });
+  return state.manualRefresh;
+}
 async function refreshAll(rethrow = false) {
   if (!state.workspace) return;
   try {
-    const workspaceId = state.workspace.workspaceId;
-    const plannings = await api(`/api/v1/workspaces/${workspaceId}/plannings`);
-    if (state.workspace?.workspaceId !== workspaceId) return;
+    const workspaceId = state.workspace.workspaceId, navigation = state.navigationSequence;
+    const plannings = await api(`/api/v1/workspaces/${workspaceId}/plannings`, { signal: AbortSignal.timeout(12000) });
+    if (state.workspace?.workspaceId !== workspaceId || navigation !== state.navigationSequence) return;
     state.plannings = plannings;
     renderPlanningList();
     const id = state.planning?.planningId;
@@ -5058,7 +5094,8 @@ $("#local-state-cancel").addEventListener("click", () => decideLocalInputNavigat
 $("#unsaved-local-state-dialog").addEventListener("cancel", event => { event.preventDefault(); decideLocalInputNavigation("cancel"); });
 window.addEventListener("beforeunload", (event) => { if (planHasChanges()) { event.preventDefault(); event.returnValue = ""; } });
 $("#cancel-job").addEventListener("click", async () => { if (!state.activeJob) return; try { await api(`/api/v1/jobs/${state.activeJob.jobId}/cancel`, { method: "POST", body: JSON.stringify({ workspaceId: state.activeJob.workspaceId }) }); $("#job-label").textContent = "已请求取消，正在等待 Runner 收尾"; } catch (error) { showToast(error.message, true); } });
-$("#refresh").addEventListener("click", () => { void refreshAll(); void refreshRemoteConnection(); void globalThis.tokenCouponGlobalPending?.refresh(); }); $("#reconnect").addEventListener("click", () => { void reconnectDesktop(); }); $("#clear-log").addEventListener("click", () => { $("#event-log").replaceChildren(); });
+$("#refresh").addEventListener("click", () => void manualRefresh());
+$("#refresh-feedback-close").addEventListener("click", () => show($("#refresh-feedback-wrap"), false)); $("#reconnect").addEventListener("click", () => { void reconnectDesktop(); }); $("#clear-log").addEventListener("click", () => { $("#event-log").replaceChildren(); });
 $("#desktop-reconnect").addEventListener("click", () => { void reconnectDesktop(); });
 $("#desktop-restore-inputs").addEventListener("click", () => { void restoreDesktopRecovery(); });
 $("#desktop-connection-close").addEventListener("click", () => { show($("#desktop-connection-banner"), false); });

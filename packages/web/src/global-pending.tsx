@@ -6,7 +6,7 @@ import { createPendingQueueState } from "./pending-queue-state.js";
 import { createPlanningTodoState } from "./planning-todo-state.js";
 
 interface QueueContext { epoch: string; supported: boolean; planningSupported: boolean; authorizations: GlobalPendingModel["authorizations"]; authorizationFresh: boolean; }
-declare global { var tokenCouponGlobalPending: { configure(context: QueueContext): void; refresh(): Promise<void>; unavailable(): void } | undefined; }
+declare global { var tokenCouponGlobalPending: { configure(context: QueueContext): void; refresh(): Promise<void>; refreshChecked(): Promise<void>; unavailable(): void } | undefined; }
 const mount = document.getElementById("global-pending-root");
 if (!mount) throw new Error("global_pending_mount_missing");
 const root = createRoot(mount);
@@ -42,6 +42,11 @@ const timer = setInterval(() => { if (dialog.open && context.supported) void que
 globalThis.tokenCouponGlobalPending = {
   configure(next) { context = next; queue.reset(next.epoch); plans.reset(next.epoch); render(); },
   async refresh() { if (context.supported) await Promise.all([queue.refresh(), ...(dialog.open && context.planningSupported ? [plans.refresh()] : [])]); },
+  async refreshChecked() {
+    if (!context.supported) return;
+    await Promise.all([queue.refresh(), ...(dialog.open && context.planningSupported ? [plans.refresh()] : [])]);
+    if (queue.current().error || dialog.open && plans.current().error) throw new Error("待处理列表读取失败");
+  },
   unavailable() { context = { ...context, authorizationFresh: false }; queue.unavailable(); plans.unavailable(); },
 };
 if (import.meta.hot) import.meta.hot.dispose(() => {

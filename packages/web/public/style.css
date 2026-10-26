@@ -639,3 +639,9 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .connection-identity-controls select { width:100%; min-width:0; text-overflow:ellipsis; }
 .connection-identity-controls .button { flex:0 0 auto; }
 #connection-identity p { margin:10px 0 0; overflow-wrap:anywhere; }
+
+.sidebar-footer-actions { flex-wrap:wrap; }
+.refresh-feedback { position:relative; flex-basis:100%; padding:8px 28px 8px 8px; border:1px solid var(--line); border-radius:7px; font-size:12px; overflow-wrap:anywhere; }
+#refresh-last-success { flex-basis:100%; color:var(--muted); }
+.refresh-feedback [data-kind="warning"] { color:#986126; }
+.refresh-feedback .notification-dismiss { top:2px; right:2px; }
