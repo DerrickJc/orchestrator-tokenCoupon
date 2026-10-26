@@ -52,6 +52,7 @@ describe("ClaudeManagedRunner", () => {
       { type: "runner.model.reported", model: "deepseek-flash", source: "claude-sdk-assistant" },
     ]);
     expect(queryMock.mock.calls[0]?.[0].options.model).toBe("configured-alias");
+    expect(queryMock.mock.calls[0]?.[0].options.pathToClaudeCodeExecutable).toBe(join(fixtureRoot, "bin", "claude"));
   });
 
   it.each([

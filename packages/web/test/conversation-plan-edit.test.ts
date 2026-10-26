@@ -1,3 +1,4 @@
+import { createClient } from "@token-coupon/client";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
@@ -6,7 +7,7 @@ import { afterEach, expect, it } from "vitest";
 const windows: JSDOM[] = [];
 afterEach(async () => { await new Promise(resolve => setImmediate(resolve)); for (const dom of windows.splice(0)) dom.window.close(); });
 async function page(options: { mcp?: boolean; failReply?: boolean; failSave?: boolean; asyncSave?: boolean; handoff?: boolean; unconnected?: boolean } = {}) {
-  const [html, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
+  const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: "http://127.0.0.1:4177/#/workspaces/workspace/plans/plan/draft", runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
   const w = dom.window;
   Object.assign(w, { Headers, EventSource: class { addEventListener() {} close() {} } });
@@ -69,7 +70,8 @@ async function page(options: { mcp?: boolean; failReply?: boolean; failSave?: bo
     if (path.endsWith("/jobs/save")) return Response.json(saveResult());
     throw new Error(`unexpected GET ${path}`);
   };
-  w.eval(script);
+  Object.assign(w, { createClient: () => createClient({ fetch: ((path, options) => w.fetch(String(path), options)) as typeof fetch, eventSource: (path) => new w.EventSource(path) }) });
+  w.eval(clientScript.replace(/^import .*;$/m, "")); w.eval(script);
   const element = (id: string) => w.document.getElementById(id)!;
   const value = (id: string) => (element(id) as HTMLTextAreaElement).value;
   const input = (id: string, text: string) => { (element(id) as HTMLTextAreaElement).value = text; element(id).dispatchEvent(new w.Event("input", { bubbles: true })); };
@@ -98,7 +100,7 @@ it("keeps a failed reply for retry, reports empty input, and renders a normal Pl
   const h = await page({ failReply: true });
   expect(h.element("supplement-input").classList.contains("hidden")).toBe(false);
   h.reply("保留这条回复");
-  await expect.poll(() => h.element("toast").textContent).toContain("回复提交失败");
+  await expect.poll(() => h.element("job-feedback-diagnostic").textContent).toContain("回复提交失败");
   expect(h.value("reply-text")).toBe("保留这条回复");
   await expect.poll(() => (h.element("send-reply") as HTMLButtonElement).disabled).toBe(false);
   h.reply(" "); await expect.poll(() => h.element("toast").textContent).toContain("请先填写回复");
@@ -121,7 +123,7 @@ it("waits for asynchronous validation before restoring the saved plan cards", as
 
 it("keeps field edits visible when server validation rejects a field-only patch", async () => {
   const h = await page({ failSave: true }); h.edit("服务器拒绝的修改"); h.element("save-plan").click();
-  await expect.poll(() => h.element("toast").textContent).toContain("计划依赖校验失败");
+  await expect.poll(() => h.element("job-feedback-diagnostic").textContent).toContain("计划依赖校验失败");
   expect(h.requests).toHaveLength(1); expect(h.requests[0]!.body).toHaveProperty("edits.title", "服务器拒绝的修改");
   expect(h.value("plan-editor")).toContain("服务器拒绝的修改"); expect(h.element("plan-editor-wrap").classList.contains("hidden")).toBe(false);
 });
@@ -145,7 +147,7 @@ it("saves before leaving, and stays in the editor when validation fails", async 
   await expect.poll(() => h.element("planning-panel").classList.contains("hidden")).toBe(true); expect(h.view.draft.plan.title).toBe("导航前保存");
   const bad = await page({ failSave: true }); bad.edit("不能保存"); bad.element("new-task").click();
   await expect.poll(() => bad.element("unsaved-plan-dialog").hasAttribute("open")).toBe(true); bad.element("unsaved-plan-save").click();
-  await expect.poll(() => bad.element("toast").textContent).toContain("依赖校验失败");
+  await expect.poll(() => bad.element("job-feedback-diagnostic").textContent).toContain("依赖校验失败");
   expect(bad.element("planning-panel").classList.contains("hidden")).toBe(false); expect(bad.value("plan-editor")).toContain("不能保存");
 });
 
@@ -155,7 +157,7 @@ it("preserves edits across refresh and rejects a save against a changed baseline
   h.view.externalOperations = [{ role: "plan", state: "prepared", expectedRevision: 3, operationId: "old", message: "旧的回复" }];
   h.element("refresh").click(); await expect.poll(() => h.element("plan-edit-status").textContent).toContain("当前草案已更新");
   expect(h.value("plan-editor")).toContain("本地未保存"); expect(h.element("external-operation-list").textContent).toContain("上下文已过期");
-  h.element("save-plan").click(); await expect.poll(() => h.element("toast").textContent).toContain("版本已变化");
+  h.element("save-plan").click(); await expect.poll(() => h.element("job-feedback-diagnostic").textContent).toContain("版本已变化");
   expect(h.requests[0]!.body.expectedPlanHash).toBe("original-hash");
 });
 

@@ -12,8 +12,10 @@ import { runPlannerCli } from "./planner-cli.js";
 import { createTaskRunner, diagnoseRegisteredRunners, listRegisteredRunners, probeRegisteredRunner, validateCliRunnerProfile } from "./runner-factory.js";
 import { createRunnerInteractionIO, readAttemptInteractions, submitAttemptInteractionReply } from "./interaction-cli.js";
 import { showSessionLogs } from "./session-logs-cli.js";
+import { runDaemonCli } from "./daemon-cli.js";
 
 const usage = `用法：
+  token-coupon daemon --help  （显式连接既有后台，共用 Web/桌面执行状态）
   token-coupon plan show --file <计划.json>
   token-coupon plan run --file <计划.json> [--workspace <目录>] [--accept-edits]
       [--isolation git-worktree --verification-task <taskId>] [--max-parallel <1-8>] [--setup-file <setup.json>]
@@ -282,6 +284,7 @@ function sessionExitCode(snapshot: import("@token-coupon/core").SessionSnapshot)
 }
 
 export async function runCli(args: string[]): Promise<number> {
+  if (args[0] === "daemon") return runDaemonCli(args.slice(1));
   if (args[0] === "session" && args[1] === "recover") {
     let workspace = process.cwd();
     let sessionId: string | undefined;

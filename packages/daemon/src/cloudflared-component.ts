@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { networkFetch, networkErrorCode } from "./network-fetch.js";
@@ -39,6 +39,7 @@ export class CloudflaredComponent implements ComponentProvider {
       const manifest = JSON.parse(await readFile(join(directory, "installed.json"), "utf8")) as { archiveSha256: string; binarySha256: string };
       const file = await lstat(executable);
       if (!file.isFile() || file.isSymbolicLink() || manifest.archiveSha256 !== asset.sha256 || !/^[a-f0-9]{64}$/.test(manifest.binarySha256) || await fileDigest(executable) !== (asset.archive ? manifest.binarySha256 : asset.sha256)) throw new Error("component_integrity_failed：缓存组件校验失败，请移除应用组件缓存后重试");
+      await ensureCloudflaredLicense(directory);
       return { executable, version: await binaryVersion(executable, signal), source: "managed" };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -58,6 +59,7 @@ export async function installCloudflared(directory: string, asset: ComponentAsse
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await mkdir(temporary, { mode: 0o700 });
+    await ensureCloudflaredLicense(temporary);
     const download = join(temporary, "download");
     const timeout = AbortSignal.timeout(120_000);
     stage = "download";
@@ -92,9 +94,10 @@ export async function installCloudflared(directory: string, asset: ComponentAsse
     await chmod(binary, 0o700); signal.throwIfAborted();
     const executable = join(directory, process.platform === "win32" ? "cloudflared.exe" : "cloudflared");
     await rename(binary, executable);
-    await writeFile(join(directory, "installed.json"), JSON.stringify({ version: CLOUDFLARED_VERSION, archiveSha256: asset.sha256, binarySha256 }) + "\n", { mode: 0o600 });
+    await rename(join(temporary, "LICENSE"), join(directory, "LICENSE"));
     await writeFile(join(directory, "THIRD_PARTY_NOTICE.txt"), "cloudflared by Cloudflare, Inc. — Apache-2.0\nSource: https://github.com/cloudflare/cloudflared\nLicense: https://github.com/cloudflare/cloudflared/blob/main/LICENSE\n", { mode: 0o600 });
-    await copyFile(new URL("../THIRD_PARTY_LICENSES/cloudflared-LICENSE", import.meta.url), join(directory, "LICENSE"));
+    // Publish the completion marker only after all required resources exist.
+    await writeFile(join(directory, "installed.json"), JSON.stringify({ version: CLOUDFLARED_VERSION, archiveSha256: asset.sha256, binarySha256 }) + "\n", { mode: 0o600 });
   } catch (error) {
     signal.throwIfAborted();
     if (error instanceof Error && error.message.startsWith("component_")) throw error;
@@ -104,6 +107,24 @@ export async function installCloudflared(directory: string, asset: ComponentAsse
     if (stage !== "download") throw new Error(`component_install_failed：组件安装失败${code ? `（${code}）` : ""}；请检查缓存目录权限和应用许可资源是否完整`);
     throw new Error(`component_download_failed：官方下载连接失败${code ? `（${code}）` : ""}；应用会读取 HTTP_PROXY/HTTPS_PROXY/NO_PROXY，请检查代理是否可达及 GitHub 下载网络`);
   } finally { await rm(temporary, { recursive: true, force: true }).catch(() => undefined); }
+}
+
+/** Also repairs caches written by old installers before their license copy failed. */
+export async function ensureCloudflaredLicense(directory: string): Promise<void> {
+  let license: Buffer;
+  try { license = await readFile(new URL("../THIRD_PARTY_LICENSES/cloudflared-LICENSE", import.meta.url)); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("component_license_missing：应用缺少 cloudflared 许可资源，请更新应用安装包后重试");
+    throw error;
+  }
+  const target = join(directory, "LICENSE");
+  try {
+    const info = await lstat(target);
+    if (info.isFile() && !info.isSymbolicLink() && (await readFile(target)).equals(license)) return;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const temporary = join(directory, `.license-${randomUUID()}`);
+  try { await writeFile(temporary, license, { flag: "wx", mode: 0o600 }); await rename(temporary, target); }
+  finally { await rm(temporary, { force: true }).catch(() => undefined); }
 }
 
 async function binaryVersion(executable: string, signal: AbortSignal): Promise<string> {

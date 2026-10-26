@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parsePlan } from "./validate-plan.js";
 import type { ExecutionConfig } from "./task.js";
@@ -10,6 +10,8 @@ import { validateConfirmationState } from "./confirmation.js";
 import { ensureRuntimeMetadataIgnored } from "./runtime-metadata.js";
 import { parseExecutionSelection } from "./execution-selection.js";
 import type { ConfirmationEvent, ConfirmationProposalSet } from "./planner-types.js";
+import { atomicWrite } from "./atomic-file.js";
+export { atomicWrite } from "./atomic-file.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -87,6 +89,19 @@ export class PlannerStore {
     return snapshots.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  /** Stable directory cursor for bounded global observations; does not read conversation bodies. */
+  async listIdsPage(after?: string, limit = 5): Promise<{ planningIds: string[]; nextAfter: string | null }> {
+    if (after !== undefined) this.validateId(after);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Planner 分页大小必须为 1–100");
+    const entries = await readdir(this.root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const ids = entries.filter(entry => entry.isDirectory() && isUuid(entry.name) && (!after || entry.name > after)).map(entry => entry.name).sort();
+    const planningIds = ids.slice(0, limit);
+    return { planningIds, nextAfter: ids.length > limit ? planningIds.at(-1)! : null };
+  }
+
   async save(snapshot: PlannerConversationSnapshot): Promise<void> {
     const current = await this.load(snapshot.planningId);
     if (snapshot.revision !== current.revision + 1) throw new Error("Planner 快照 revision 冲突");
@@ -118,6 +133,16 @@ export class PlannerStore {
       const existing = await readJson(path) as typeof value;
       if (existing.stateHash !== value.stateHash || canonicalHash(existing.state) !== value.stateHash) throw new Error("需求版本不可覆盖");
     }
+  }
+
+  async nextDraftRevision(planningId: string, minimum: number): Promise<number> {
+    this.validateId(planningId);
+    if (!Number.isSafeInteger(minimum) || minimum < 1) throw new Error("draftRevision 无效");
+    const names = await readdir(join(this.directory(planningId), "drafts"));
+    const next = names.filter(name => /^[1-9][0-9]*\.json$/.test(name))
+      .reduce((revision, name) => Math.max(revision, Number(name.slice(0, -5)) + 1), minimum);
+    if (!Number.isSafeInteger(next)) throw new Error("草案版本超限");
+    return next;
   }
 
   async writeConfirmationProposal(planningId: string, proposal: ConfirmationProposalSet): Promise<void> {
@@ -254,17 +279,6 @@ export async function readJson(path: string): Promise<unknown> {
   const info = await stat(path);
   if (info.size > RECORD_LIMIT) throw new Error("Planner 记录超过 4 MiB");
   return JSON.parse(await readFile(path, "utf8")) as unknown;
-}
-
-export async function atomicWrite(path: string, contents: string): Promise<void> {
-  const temporary = join(dirname(path), ".snapshot-" + randomUUID() + ".tmp");
-  try {
-    await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
-    await rename(temporary, path);
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
-  }
 }
 
 export function validateDraft(value: unknown): PlannerDraft {

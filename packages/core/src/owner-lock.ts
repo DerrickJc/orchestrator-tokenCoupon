@@ -3,13 +3,15 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
+import { acquireWindowsCoordination, windowsProcessStart } from "./windows-coordination.js";
 
-export interface ProcessOwner { pid: number; hostname?: string; processStart?: string; bootId?: string; }
+export interface ProcessOwner { pid: number; hostname?: string; processStart?: string; bootId?: string; platform?: NodeJS.Platform; }
 export type OwnerObservation = { state: "active" | "owner_exited" | "owner_identity_changed" | "unknown"; reason: string };
 export interface ExecutionLock extends ProcessOwner { schemaVersion?: number; token: string; sessionId: string | null; acquiredAt: string; }
 export interface LockObservation extends OwnerObservation { path: string; exists: boolean; owner?: ExecutionLock; identity?: string; }
 
 export async function processStart(pid: number): Promise<string | undefined> {
+  if (process.platform === "win32") return windowsProcessStart(pid);
   if (process.platform !== "linux") return undefined;
   try { const stat = await readFile(`/proc/${pid}/stat`, "utf8"); return stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19]; }
   catch { return undefined; }
@@ -17,10 +19,11 @@ export async function processStart(pid: number): Promise<string | undefined> {
 export async function currentOwner(): Promise<ProcessOwner & { hostname: string }> {
   const start = await processStart(process.pid);
   const bootId = await readFile("/proc/sys/kernel/random/boot_id", "utf8").then((s) => s.trim()).catch(() => undefined);
-  return { pid: process.pid, hostname: hostname(), ...(start ? { processStart: start } : {}), ...(bootId ? { bootId } : {}) };
+  return { pid: process.pid, hostname: hostname(), platform: process.platform, ...(start ? { processStart: start } : {}), ...(bootId ? { bootId } : {}) };
 }
 export async function observeOwner(owner?: ProcessOwner): Promise<OwnerObservation> {
   if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid < 1) return { state: "unknown", reason: "owner 身份缺失或 PID 无效" };
+  if (owner.platform && owner.platform !== process.platform || process.platform === "win32" && !owner.platform) return { state: "unknown", reason: "owner 来自其他运行平台或缺少平台身份；不能跨 Windows/WSL 接管" };
   if (owner.hostname && owner.hostname !== hostname()) return { state: "unknown", reason: "owner 位于其他主机" };
   if (owner.bootId) {
     const boot = await readFile("/proc/sys/kernel/random/boot_id", "utf8").then((s) => s.trim()).catch(() => undefined);
@@ -61,7 +64,7 @@ export function lockDescription(lock: LockObservation): string {
 
 /** Kernel advisory locks release on process death: persistent guard files are not ownership. */
 export async function acquireLockCoordination(paths: string[], waitSeconds = 0): Promise<() => Promise<void>> {
-  if (process.platform !== "linux") throw new Error("lock_coordination_unsupported：当前恢复协调需要 Linux flock；不安全地降级解锁被禁止");
+  if (process.platform !== "linux" && process.platform !== "win32") throw new Error("lock_coordination_unsupported：当前协调支持 Linux flock 与 Windows Mutex；不安全地降级解锁被禁止");
   const releases: Array<() => Promise<void>> = [];
   try {
     for (const path of paths) {
@@ -69,6 +72,7 @@ export async function acquireLockCoordination(paths: string[], waitSeconds = 0):
       const guard = `${path}.coord`;
       const info = await lstat(guard).catch((e: NodeJS.ErrnoException) => { if (e.code !== "ENOENT") throw e; return undefined; });
       if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error("协调文件必须是普通文件");
+      if (process.platform === "win32") { releases.push(await acquireWindowsCoordination(path, waitSeconds)); continue; }
       const child = spawn("flock", ["-w", String(waitSeconds), "--", guard, process.execPath, "-e", "process.stdout.write('ready\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0))"], { stdio: ["pipe", "pipe", "pipe"] });
       const exit = new Promise<void>((resolve) => { child.once("close", () => resolve()); child.once("error", () => resolve()); });
       await new Promise<void>((resolve, reject) => {

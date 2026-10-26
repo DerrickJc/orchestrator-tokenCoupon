@@ -1,4 +1,7 @@
 export type { PlanDefinition, PlannedTask } from "./plan.js";
+export { resolveNativeExecutable, spawnNative } from "./native-command.js";
+export { resolveAgentExecutable, agentComponentHome, managedClaudePackage } from "./agent-executable.js";
+export type { ExternalAgentId } from "./agent-executable.js";
 export type { DecisionReference, PlanDecisionContext, SelectedDecision } from "./plan.js";
 export { decisionValueHash } from "./plan.js";
 export type { ExecutionConfig, ExecutionMode, RequiredRunnerCapability, TaskDefinition } from "./task.js";
@@ -38,7 +41,7 @@ export type { WorktreeSetupCommand, WorktreeSetupProfile } from "./worktree-setu
 export { cleanupSessionWorktrees, continueSessionLanding, formatSession, resumeSession, retrySession, runPlan, validateMockTaskScenarios, validateVerificationTask } from "./task-orchestrator.js";
 export type { ContinueLandingOptions, PlanRunOptions, RetryOptions, SessionCleanupOptions, SessionOperationOptions, SessionOperationResult, TaskRunnerFactory, TaskRunnerFactoryOptions } from "./task-orchestrator.js";
 export { DEFAULT_REPOSITORY_OUTPUT_BUDGET, RepositoryReader, repositoryToolDefinitions, verifyRepositoryEvidence } from "./repository-reader.js";
-export { PlannerStore, PlannerLockError, canonicalHash, validateDraft } from "./planner-store.js";
+export { PlannerStore, PlannerLockError, canonicalHash, validateDraft, atomicWrite } from "./planner-store.js";
 export { ReviewStore, validateReviewRecord } from "./review-store.js";
 export { PlannerInvocationError } from "./planner-runtime.js";
 export type { PlannerEventObserver } from "./planner-runtime.js";
@@ -66,8 +69,9 @@ export {
 } from "./planner-conversation.js";
 export type { ExternalPlannerPreparation } from "./planner-conversation.js";
 export type { PlannerOperationResult, PlannerRunOptions, PlannerStartOptions } from "./planner-conversation.js";
-export { currentOwner, observeOwner, inspectLock, acquireLockCoordination } from "./owner-lock.js";
+export { currentOwner, processStart, observeOwner, inspectLock, acquireLockCoordination } from "./owner-lock.js";
 export { diagnoseSession, formatSessionDiagnosis, recoverSession } from "./session-recovery.js";
+export type { SessionDiagnosis } from "./session-recovery.js";
 export { PLANNING_DECISION_IDS, PLANNING_STATUSES } from "./planning-protocol.js";
 export { applyReviewActions } from "./review-actions.js";
 export type { ReviewAction } from "./review-actions.js";

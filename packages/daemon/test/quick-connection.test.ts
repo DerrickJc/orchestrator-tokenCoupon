@@ -1,21 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { extractWWWAuthenticateParams } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ApplicationService } from "../src/application-service.js";
 import { createLocalServer } from "../src/http-server.js";
-import { installCloudflared } from "../src/cloudflared-component.js";
+import { installCloudflared, ensureCloudflaredLicense } from "../src/cloudflared-component.js";
 import { RemoteMcpConnection, type ConnectionPhase } from "../src/oauth-gateway.js";
 import { discoverQuickOrigin, QuickTunnelAdapter, type TunnelAdapter } from "../src/quick-tunnel.js";
 import { PersistentQuickTunnelAdapter } from "../src/persistent-tunnel.js";
 import { probeRemoteMcp, ProbeError, type PublicProbe } from "../src/remote-probe.js";
 
 const cleanups: Array<() => Promise<void>> = [];
+const persistentWait = process.platform === "win32" ? 30000 : 5000;
+const persistentTimeout = process.platform === "win32" ? 90000 : 15000;
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function freePort(): Promise<number> {
@@ -29,7 +32,7 @@ async function freePort(): Promise<number> {
 
 async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: TunnelAdapter; componentExecutable?: string; healthIntervalMs?: number; probeImpl?: PublicProbe; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-quick-"));
-  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
   const path = join(root, "project"); await mkdir(path);
   const dataDirectory = join(root, "state");
   const service = new ApplicationService({ dataDirectory }); await service.initialize();
@@ -60,10 +63,14 @@ async function fixture(options: { probe?: "real" | "fail" | "pause"; tunnel?: Tu
     component: { async get(_signal, stage) { stage("checking"); return { executable: options.componentExecutable ?? "/fake/cloudflared", version: "cloudflared version 2026.10.0", source: "existing" as const }; } },
     tunnel, probe, retryDelaysMs: options.retryDelaysMs ?? [10], probeBudgetMs: options.probeBudgetMs ?? 45000, healthIntervalMs: options.healthIntervalMs ?? 0, startupBudgetMs: options.startupBudgetMs ?? 0, startupRetryDelayMs: options.startupRetryDelayMs ?? 5,
   } satisfies import("../src/oauth-gateway.js").ConnectionDependencies;
+  if (options.componentExecutable === process.execPath) {
+    const directory = join(dataDirectory, "components", "tunnel-runtime"); await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "tunnel"), "setTimeout(()=>process.stderr.write('https://example-quick.trycloudflare.com\\n'),800);setInterval(()=>{},1000);process.on('SIGTERM',()=>process.exit(0));");
+  }
   const remote = new RemoteMcpConnection(service, dataDirectory, port, dependencies);
   await remote.initialize(); cleanups.push(() => remote.shutdown());
   const waitFor = async (phase: ConnectionPhase) => {
-    for (let i = 0; i < 150; i++) {
+    for (let i = 0; i < (process.platform === "win32" ? 1500 : 150); i++) {
       if (remote.status().transport === phase) return remote.status();
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -88,6 +95,100 @@ async function authorize(h: Awaited<ReturnType<typeof fixture>>, scopes: string[
 }
 
 describe("Quick Tunnel connection", () => {
+  it("binds read-only verification to each grant and current authorization, excluding locally marked SDK diagnostics", async () => {
+    const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const otherPath = join(h.root, "other-project"); await mkdir(otherPath);
+    const other = await h.service.addWorkspace(otherPath, "另一个项目");
+    const connect = async (label: string, workspaceId: string, diagnostic: boolean) => {
+      const auth = await authorize(h, ["planning:read"], { clientName: "ChatGPT" });
+      await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId, source: "chatgpt", scopes: ["planning:read"], alias: label });
+      const grant = h.remote.grants().find(item => item.clientId === auth.client.client_id)!;
+      if (diagnostic) await h.remote.updateGrant(grant.grantId, { workspaceIds: [workspaceId], source: "chatgpt", usage: "diagnostic" });
+      const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+      const response = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` }) });
+      const token = (await response.json() as { access_token: string }).access_token;
+      const client = new Client({ name: "claimed-webpage-name-is-not-trusted", version: "1" }); cleanups.push(() => client.close());
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${h.origin}/mcp`), { fetch: h.proxyFetch, requestInit: { headers: { Authorization: `Bearer ${token}`, "X-Token-Coupon-Usage": "web" } } }));
+      return { client, grant, token };
+    };
+    const sdk = await connect("SDK 自检", h.workspace.workspaceId, true);
+    expect(h.remote.status().remoteClientVerified).toBe(false); // OAuth + tools/list is insufficient.
+    const sdkReply = await sdk.client.callTool({ name: "workspace_query", arguments: {} });
+    const sdkData = sdkReply.structuredContent?.data as { workspaces: Array<{ workspaceId: string }>; connection: Record<string, unknown> };
+    expect(sdkData.workspaces.map(item => item.workspaceId)).toEqual([h.workspace.workspaceId]);
+    expect(sdkData.connection).toMatchObject({ mcpUrl: `${h.origin}/mcp`, alias: "SDK 自检", aliasSource: "local_user", clientNameSource: "client_declared", usage: "diagnostic", traceId: sdkReply._meta?.["token-coupon/traceId"] });
+    expect(sdkData.connection.clientFingerprint).toMatch(/^[a-f0-9]{12}$/);
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+    expect(h.remote.status().clients?.find(item => item.grantId === sdk.grant.grantId)).toMatchObject({ toolVerified: true, usage: "diagnostic" });
+    const web = await connect("demo41", other.workspaceId, false);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.toolVerified).toBe(false);
+    const reply = await web.client.callTool({ name: "workspace_query", arguments: {} });
+    const data = reply.structuredContent?.data as { workspaces: Array<{ workspaceId: string }>; connection: Record<string, unknown> };
+    expect(data.workspaces.map(item => item.workspaceId)).toEqual([other.workspaceId]);
+    expect(data.connection).toMatchObject({ alias: "demo41", usage: "web" });
+    expect(data.connection.clientFingerprint).not.toBe(sdkData.connection.clientFingerprint);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.clientFingerprint).toBe(data.connection.clientFingerprint);
+    expect(h.remote.status().remoteClientVerified).toBe(true);
+    const traceId = data.connection.traceId;
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.lastSuccess?.traceId).toBe(traceId);
+    await h.remote.renameGrant(web.grant.grantId, "demo42"); // Renaming does not change authorization.
+    expect(h.remote.status().remoteClientVerified).toBe(true);
+    await h.remote.updateGrant(web.grant.grantId, { workspaceIds: [h.workspace.workspaceId], source: "chatgpt" });
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+    await h.remote.updateGrant(web.grant.grantId, { workspaceIds: [other.workspaceId], source: "chatgpt" });
+    expect(h.remote.status().remoteClientVerified).toBe(false); // Switching back must not revive old evidence.
+    const fresh = await web.client.callTool({ name: "workspace_query", arguments: {} });
+    expect((fresh.structuredContent?.data as { connection: { alias: string } }).connection.alias).toBe("demo42");
+    expect(h.remote.status().remoteClientVerified).toBe(true);
+    const failed = await web.client.callTool({ name: "planning_query", arguments: { workspaceId: h.workspace.workspaceId } });
+    expect(failed.isError).toBe(true);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)).toMatchObject({ toolVerified: true, lastCall: { outcome: "error", code: "mcp_workspace_forbidden" } });
+    const invalid = await web.client.callTool({ name: "workspace_query", arguments: { privateExtra: "DO_NOT_LOG_THIS_VALUE" } });
+    expect(invalid.isError).toBe(true);
+    expect(h.remote.status().clients?.find(item => item.grantId === web.grant.grantId)?.lastCall).toMatchObject({ outcome: "error", code: "mcp_tool_input_rejected", tool: "workspace_query" });
+    const unknown = await web.client.callTool({ name: "DO_NOT_LOG_THIS_UNKNOWN_NAME", arguments: {} });
+    expect(unknown.isError).toBe(true);
+    const serialized = JSON.stringify([sdkReply, reply, h.remote.status()]);
+    for (const secret of [sdk.token, web.token, h.workspace.path, other.path, "claimToken", "DO_NOT_LOG_THIS_VALUE", "DO_NOT_LOG_THIS_UNKNOWN_NAME"]) expect(serialized).not.toContain(secret);
+    expect(await h.service.listPlannings(h.workspace.workspaceId)).toEqual([]);
+    expect(await h.service.listPlannings(other.workspaceId)).toEqual([]);
+    await h.remote.revokeGrant(web.grant.grantId);
+    expect(h.remote.status().remoteClientVerified).toBe(false);
+  });
+
+  it("traces Host and route rejection, missing credentials and one authenticated tool call without logging secrets", async () => {
+    const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
+    const wrongHost = await new Promise<{ status: number | undefined; trace: string | string[] | undefined }>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${h.port}/mcp`, { headers: { Host: "not-allowed.example" } }, response => {
+        response.resume(); response.once("end", () => resolve({ status: response.statusCode, trace: response.headers["x-token-coupon-trace"] }));
+      }); request.once("error", reject); request.end();
+    });
+    expect(wrongHost.status).toBe(421); const hostTrace = wrongHost.trace;
+    const missing = await h.proxyFetch(`${h.origin}/PRIVATE_ROUTE?secret=PRIVATE_QUERY`); expect(missing.status).toBe(404); await missing.body?.cancel();
+    const denied = await h.proxyFetch(`${h.origin}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", "Mcp-Session-Id": "PRIVATE_SESSION", "Mcp-Protocol-Version": "PRIVATE_VERSION", "X-Token-Coupon-Trace": "forged-trace" }, body: JSON.stringify({ method: "tools/call", params: { secret: "PRIVATE_BODY" } }) });
+    expect(denied.status).toBe(401);
+    expect(denied.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${h.origin}/.well-known/oauth-protected-resource/mcp"`);
+    expect(extractWWWAuthenticateParams(denied).resourceMetadataUrl?.href).toBe(`${h.origin}/.well-known/oauth-protected-resource/mcp`);
+    const deniedTrace = denied.headers.get("x-token-coupon-trace"); await denied.body?.cancel();
+    await expect.poll(() => h.remote.status().recentCalls?.find(item => item.traceId === hostTrace && item.requestState === "completed")).toMatchObject({ stage: "ingress", httpStatus: 421, code: "remote_host_invalid" });
+    expect(h.remote.status().recentCalls?.some(item => item.traceId === deniedTrace && item.stage === "authentication")).toBe(true);
+    expect(h.remote.status().recentCalls?.find(item => item.traceId === deniedTrace && item.requestState === "received")).toMatchObject({ route: "/mcp", httpMethod: "POST", authorization: "missing", protocolVersion: "other", hasSessionId: true });
+    const auth = await authorize(h, ["planning:read"]);
+    await h.remote.decideApproval(auth.pending.requestId, { decision: "allow", workspaceId: h.workspace.workspaceId, scopes: ["planning:read"] });
+    const approved = await h.remote.approvalStatus(auth.pending.requestId), code = new URL(approved.redirectUrl!).searchParams.get("code")!;
+    const exchange = await h.proxyFetch(`${h.origin}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", client_id: auth.client.client_id, code, code_verifier: auth.verifier, redirect_uri: auth.redirectUri, resource: `${h.origin}/mcp` }) });
+    const tokens = await exchange.json() as { access_token: string };
+    const client = new Client({ name: "ingress-trace-test", version: "1" }); cleanups.push(() => client.close());
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${h.origin}/mcp`), { fetch: h.proxyFetch, requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } } }));
+    expect((await client.callTool({ name: "workspace_query", arguments: {} })).isError).not.toBe(true);
+    await expect.poll(() => h.remote.status().recentCalls?.find(item => item.method === "tools/call" && item.requestState === "completed")).toBeDefined();
+    const tool = h.remote.status().recentCalls!.find(item => item.stage === "tool" && item.tool === "workspace_query")!;
+    const related = h.remote.status().recentCalls!.filter(item => item.traceId === tool.traceId);
+    expect(related).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "ingress", requestState: "received", authorization: "bearer" }), expect.objectContaining({ stage: "transport", method: "tools/call", httpStatus: 200 }), expect.objectContaining({ stage: "ingress", requestState: "completed", method: "tools/call", httpStatus: 200 })]));
+    expect(h.remote.status().gatewayTracing?.lastToolAt).toBeDefined();
+    const saved = await readFile(join(h.dataDirectory, "remote-mcp-diagnostics.json"), "utf8");
+    for (const secret of [tokens.access_token, auth.verifier, "PRIVATE_ROUTE", "PRIVATE_QUERY", "PRIVATE_SESSION", "PRIVATE_VERSION", "PRIVATE_BODY", "forged-trace"]) expect(saved).not.toContain(secret);
+  });
   it.each(["none", "client_secret_post", "omit"] as const)("keeps DCR authentication consistent through Claude callback, token exchange, refresh and MCP (%s)", async authMethod => {
     const h = await fixture(); await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
     const auth = await authorize(h, ["planning:read"], { clientName: "Claude", redirectUri: "https://claude.ai/api/mcp/auth_callback", authMethod });
@@ -169,27 +270,23 @@ describe("Quick Tunnel connection", () => {
   });
 
   it("preserves a persistent tunnel while discovery is still pending during business shutdown", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tc-discovery-restart-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
-    const executable = join(root, "cloudflared-fixture");
-    await writeFile(executable, `#!${process.execPath}\nsetTimeout(()=>process.stderr.write('https://example-quick.trycloudflare.com\\n'),800);setInterval(()=>{},1000);`, { mode: 0o755 });
-    const tunnel = new PersistentQuickTunnelAdapter(5000, 50);
+    const executable = process.execPath;
+    const tunnel = new PersistentQuickTunnelAdapter(persistentWait, 250);
     const h = await fixture({ tunnel, componentExecutable: executable }); cleanups.push(() => h.remote.stop());
     await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId });
     const { readTunnelRecord } = await import("../src/persistent-tunnel.js");
     const directory = join(h.dataDirectory, "components", "tunnel-runtime");
-    await expect.poll(() => readTunnelRecord(directory), { timeout: 5000 }).toBeDefined();
+    await expect.poll(() => readTunnelRecord(directory), { timeout: persistentWait }).toBeDefined();
     const pid = (await readTunnelRecord(directory))!.pid;
     await h.remote.shutdown();
     const restored = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => restored.stop());
-    await restored.initialize(); await expect.poll(() => restored.status().transport, { timeout: 5000 }).toBe("ready");
+    await restored.initialize(); await expect.poll(() => restored.status().transport, { timeout: persistentWait }).toBe("ready");
     expect((await readTunnelRecord(directory))!.pid).toBe(pid); expect(restored.status().connectionProcess?.recovered).toBe(true);
-  }, 15_000);
+  }, persistentTimeout);
 
   it("recovers a persistent gateway with the same OAuth client, access token, refresh token and real MCP calls", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tc-persistent-oauth-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
-    const executable = join(root, "cloudflared-fixture");
-    await writeFile(executable, `#!${process.execPath}\nprocess.stderr.write('https://example-quick.trycloudflare.com\\n');setInterval(()=>{},1000);`, { mode: 0o755 });
-    const h = await fixture({ tunnel: new PersistentQuickTunnelAdapter(5000, 50), componentExecutable: executable });
+    const executable = process.execPath;
+    const h = await fixture({ tunnel: new PersistentQuickTunnelAdapter(persistentWait, 250), componentExecutable: executable });
     cleanups.push(() => h.remote.stop());
     await h.remote.startQuick({ consent: true, workspaceId: h.workspace.workspaceId }); await h.waitFor("ready");
     expect(h.remote.status().connectionProcess).toEqual({ persistent: true, recovered: false });
@@ -203,7 +300,7 @@ describe("Quick Tunnel connection", () => {
     const offline = await h.proxyFetch(`${h.origin}/mcp`); expect(offline.status).toBe(503); expect(offline.headers.get("retry-after")).toBe("2");
     const restored = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, { ...h.dependencies, component: { async get() { throw new Error("recovery must not download components"); } } });
     cleanups.push(() => restored.stop());
-    await restored.initialize(); await expect.poll(() => restored.status().transport, { timeout: 5000 }).toBe("ready");
+    await restored.initialize(); await expect.poll(() => restored.status().transport, { timeout: persistentWait }).toBe("ready");
     expect(restored.status().connectionProcess).toEqual({ persistent: true, recovered: true });
     expect(restored.status().mcpUrl).toBe(`${h.origin}/mcp`); expect(restored.status().addressChanged).toBe(false);
     expect(restored.grants()[0]!.grantId).toBe(grantId);
@@ -226,7 +323,7 @@ describe("Quick Tunnel connection", () => {
     await restored.stop(); expect(restored.grants()).toHaveLength(0);
     const stopped = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => stopped.shutdown());
     await stopped.initialize(); expect(stopped.status().enabled).toBe(false);
-  }, 20_000);
+  }, persistentTimeout);
 
   it("retains dynamic OAuth client metadata for reauthorization and exposes only safe request history", async () => {
     const h = await fixture();
@@ -290,7 +387,7 @@ describe("Quick Tunnel connection", () => {
     await restarted.stop();
     const stopped = new RemoteMcpConnection(h.service, h.dataDirectory, h.port, h.dependencies); cleanups.push(() => stopped.shutdown());
     await stopped.initialize(); expect(stopped.status().enabled).toBe(false); expect(starts).toBe(2);
-  }, 15_000);
+  }, persistentTimeout);
 
   it("requires consent and serializes a switch from a pending tunnel to fixed HTTPS", async () => {
     const h = await fixture();
@@ -452,17 +549,20 @@ describe("Quick Tunnel connection", () => {
 
   it("requires a local browser session and Origin to start or approve a connection", async () => {
     const h = await fixture(); const port = await freePort();
+    const secondPath = join(h.root, "second-project"); await mkdir(secondPath);
+    const secondWorkspace = await h.service.addWorkspace(secondPath);
     const server = await createLocalServer(h.service, { port, host: "127.0.0.1", dataDirectory: h.dataDirectory, remoteMcp: h.remote });
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
     cleanups.push(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
     const origin = `http://127.0.0.1:${port}`;
-    const body = JSON.stringify({ consent: true, workspaceId: h.workspace.workspaceId });
+    const body = JSON.stringify({ consent: true, workspaceId: h.workspace.workspaceId, workspaceIds: [secondWorkspace.workspaceId] });
     const start = (headers: Record<string, string>) => fetch(`${origin}/api/v1/remote-connection/quick`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
     expect((await start({ Origin: origin })).status).toBe(403);
     const landing = await fetch(origin); const cookie = landing.headers.getSetCookie()[0]!.split(";", 1)[0]!;
     expect((await start({ Cookie: cookie, Origin: "https://evil.test" })).status).toBe(403);
     const accepted = await start({ Cookie: cookie, Origin: origin }); expect(accepted.status).toBe(202);
     await h.waitFor("ready");
+    expect(h.remote.status().workspaceIds).toEqual([h.workspace.workspaceId, secondWorkspace.workspaceId]);
     expect((await h.proxyFetch(`${h.origin}/api/v1/remote-connection`)).status).toBe(404);
     const auth = await authorize(h, ["planning:read"]);
     const route = `${origin}/api/v1/remote-connection/approvals/${auth.pending.requestId}`;
@@ -524,7 +624,7 @@ describe("Quick Tunnel connection", () => {
 
 describe("component integrity and tunnel parser", () => {
   it("cleans incomplete downloads on cancellation and refuses oversized downloads", async () => {
-    const root = await mkdtemp(join(tmpdir(), "token-coupon-cancel-install-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const root = await mkdtemp(join(tmpdir(), "token-coupon-cancel-install-")); cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const content = Buffer.from("download");
     const asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
     const controller = new AbortController();
@@ -535,7 +635,7 @@ describe("component integrity and tunnel parser", () => {
   });
 
   it.skipIf(process.platform === "win32")("stops a process that fails to provide a URL and distinguishes unexpected exit", async () => {
-    const root = await mkdtemp(join(tmpdir(), "token-coupon-timeout-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const root = await mkdtemp(join(tmpdir(), "token-coupon-timeout-")); cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const script = join(root, "silent-component"); await writeFile(script, "#!/bin/sh\nexec sleep 300\n", { mode: 0o700 });
     await expect(new QuickTunnelAdapter(50).start(script, 4178, root, new AbortController().signal, () => undefined)).rejects.toThrow("tunnel_url_timeout");
     const exitScript = join(root, "exit-component"); await writeFile(exitScript, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
@@ -543,22 +643,39 @@ describe("component integrity and tunnel parser", () => {
   });
   it("rejects a tampered download before it can be installed", async () => {
     const root = await mkdtemp(join(tmpdir(), "token-coupon-component-"));
-    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const content = Buffer.from("official binary test bytes");
     const asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
     const fetcher: typeof fetch = async () => new Response(content);
     await installCloudflared(root, asset, new AbortController().signal, () => undefined, fetcher);
-    expect(await readFile(join(root, "cloudflared"))).toEqual(content);
+    const binary = process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
+    expect(await readFile(join(root, binary))).toEqual(content);
+    expect(await readFile(join(root, "LICENSE"), "utf8")).toContain("Apache License");
+    expect(JSON.parse(await readFile(join(root, "installed.json"), "utf8"))).toMatchObject({ archiveSha256: asset.sha256 });
     const bad = { ...asset, sha256: "0".repeat(64) };
     const rejected = join(root, "rejected");
     await expect(installCloudflared(rejected, bad, new AbortController().signal, () => undefined, fetcher)).rejects.toThrow("component_integrity_failed");
-    await expect(readFile(join(rejected, "cloudflared"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(rejected, binary))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("repairs missing cached licenses and never publishes an incomplete installation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc-component-license-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    await ensureCloudflaredLicense(root);
+    const expected = await readFile(join(root, "LICENSE"));
+    await rm(join(root, "LICENSE")); await ensureCloudflaredLicense(root);
+    expect(await readFile(join(root, "LICENSE"))).toEqual(expected);
+    await writeFile(join(root, "LICENSE"), "incomplete"); await ensureCloudflaredLicense(root);
+    expect(await readFile(join(root, "LICENSE"))).toEqual(expected);
+    const blocked = join(root, "blocked"); await mkdir(join(blocked, "LICENSE"), { recursive: true });
+    const content = Buffer.from("verified fixture binary"), asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
+    await expect(installCloudflared(blocked, asset, new AbortController().signal, () => undefined, async () => new Response(content))).rejects.toThrow("component_install_failed");
+    await expect(readFile(join(blocked, "installed.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.skipIf(process.platform === "win32")("recognizes only complete Quick Tunnel origins across process output chunks", async () => {
     expect(discoverQuickOrigin("URL https://sample.trycloudflare.com | ready")).toBe("https://sample.trycloudflare.com");
     expect(discoverQuickOrigin("https://sample.trycloudflare.com.evil.test")).toBeUndefined();
-    const root = await mkdtemp(join(tmpdir(), "token-coupon-tunnel-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const root = await mkdtemp(join(tmpdir(), "token-coupon-tunnel-")); cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 }));
     const script = join(root, "fake-cloudflared");
     await writeFile(script, "#!/bin/sh\nprintf 'https://chunked.trycloud' >&2\nprintf 'flare.com\\n' >&2\nexec sleep 300\n", { mode: 0o700 });
     const adapter = new QuickTunnelAdapter();

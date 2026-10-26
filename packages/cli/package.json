@@ -7,6 +7,7 @@
     "token-coupon": "./dist/main.js"
   },
   "dependencies": {
+    "@token-coupon/client": "*",
     "@token-coupon/core": "*"
   },
   "scripts": {

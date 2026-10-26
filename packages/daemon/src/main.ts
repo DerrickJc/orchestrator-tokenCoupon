@@ -4,22 +4,26 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createMcpServer } from "./mcp-server.js";
 import { acquireDaemonOwner } from "./daemon-owner.js";
 import { RemoteMcpConnection } from "./oauth-gateway.js";
+import { resolveDaemonDataDirectory } from "./runtime-paths.js";
+import { installBoundedProcessLogging } from "./bounded-process-log.js";
 
 function option(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
   return index < 0 ? fallback : process.argv[index + 1] ?? fallback;
 }
 
+const logFile = option("--log-file", process.env.TOKEN_COUPON_DAEMON_LOG ?? "");
+if (logFile) installBoundedProcessLogging(logFile);
 const port = Number(option("--port", process.env.TOKEN_COUPON_DAEMON_PORT ?? "4177"));
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("--port 必须是 1024 到 65535 之间的整数");
 const host = option("--host", "127.0.0.1");
-const dataDirectory = option("--data-dir", process.env.TOKEN_COUPON_DAEMON_HOME ?? `${process.env.HOME ?? "."}/.token-coupon/daemon`);
-const releaseOwner = await acquireDaemonOwner(dataDirectory);
+const dataDirectory = resolveDaemonDataDirectory(process.argv.includes("--data-dir") ? option("--data-dir", "") : undefined);
+const releaseOwner = await acquireDaemonOwner(dataDirectory, port);
 const service = new ApplicationService({ dataDirectory });
 await service.initialize();
 const remoteMcp = new RemoteMcpConnection(service, dataDirectory);
 await remoteMcp.initialize();
-const server = await createLocalServer(service, { port, host, dataDirectory, remoteMcp });
+const server = await createLocalServer(service, { port, host, dataDirectory, ownerToken: releaseOwner.token, remoteMcp, requestShutdown: shutdown });
 const stdio = process.argv.includes("--mcp-stdio");
 server.listen(port, host, () => (stdio ? process.stderr : process.stdout).write(`Token Coupon 本机控制台已启动：http://${host.includes(":") ? `[${host}]` : host}:${port}\nMCP HTTP 入口：/mcp（独立 Bearer 认证）。按 Ctrl+C 停止业务后端，常驻快捷隧道保留；彻底断开请先在连接中心停止连接。\n`));
 if (stdio) await createMcpServer(service).connect(new StdioServerTransport());
@@ -30,11 +34,11 @@ server.on("error", (error) => {
 });
 
 let shuttingDown = false;
-const shutdown = () => {
+function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   server.closeAllConnections();
   void remoteMcp.shutdown().finally(() => server.close(() => { void service.shutdown().then(releaseOwner).finally(() => process.exit(0)); }));
-};
+}
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);

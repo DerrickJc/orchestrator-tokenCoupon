@@ -1,7 +1,7 @@
+import type { RemoteClientStatusDto } from "@token-coupon/client";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
@@ -12,12 +12,16 @@ import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprot
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { sanitizeOutput, type ApplicationService } from "./application-service.js";
 import { createMcpServer } from "./mcp-server.js";
+import { knownRemoteTool } from "./mcp-tool-auth.js";
 import type { RemoteMcpPrincipal, RemoteMcpScope } from "./mcp-server.js";
 import { CloudflaredComponent, type ComponentInfo, type ComponentProvider } from "./cloudflared-component.js";
 import { PRESERVE_TUNNEL, type TunnelAdapter, type TunnelRuntime } from "./quick-tunnel.js";
 import { PersistentQuickTunnelAdapter } from "./persistent-tunnel.js";
 import { createProbeMcpServer, probeRemoteMcp, ProbeError, retryableProbeFailure, type PublicProbe } from "./remote-probe.js";
 import { ConnectionDiagnostics, type ConnectionObservation } from "./connection-diagnostics.js";
+import { gatewayTrace, traceGatewayRequest } from "./gateway-tracing.js";
+import { assertQuickTunnelSupported, quickTunnelSupport } from "./connection-platform.js";
+import { createPrivateGateway, protectPrivateGateway, removePrivateGateway, type PrivateGatewayEndpoint } from "./private-gateway.js";
 
 const require = createRequire(import.meta.url);
 const express = require("express") as ExpressFactory;
@@ -42,7 +46,7 @@ interface AuthorizationRequest {
 type WebSource = "chatgpt" | "claude" | "other";
 interface StoredGrant {
   grantId: string; clientId: string; workspaceId: string; workspaceIds?: string[]; source?: WebSource; alias?: string; redirectHost: string; scopes: RemoteMcpScope[]; resource: string;
-  createdAt: number; expiresAt: number; revokedAt?: number;
+  createdAt: number; expiresAt: number; revokedAt?: number; usage?: "web" | "diagnostic"; authorizationRevision?: number;
   access: Array<{ digest: string; expiresAt: number }>;
   refreshDigest?: string; previousRefreshDigests: string[];
 }
@@ -50,6 +54,7 @@ interface StoredCode { digest: string; grantId: string; clientId: string; redire
 interface PersistedState { version: 1; clients: StoredClient[]; requests: AuthorizationRequest[]; grants: StoredGrant[]; codes: StoredCode[]; }
 
 export interface RemoteConnectionStatus {
+  quickTunnel: { available: boolean; reason?: string };
   configured: boolean; enabled: boolean; publicOrigin?: string; mcpUrl?: string; gateway: "stopped" | "running" | "error";
   gatewayAddress?: string; lastError?: string; pendingApprovals: number; validGrants: number;
   remoteClientVerified: boolean;
@@ -68,15 +73,16 @@ export interface RemoteConnectionStatus {
   addressChanged: boolean;
   previousMcpUrl?: string;
   probeCheck?: { state: "checking" | "retrying" | "succeeded" | "failed"; attempt: number; maxAttempts: number; background: boolean; startedAt: number; retryAt?: number; lastError?: string };
-  clients?: Array<{ grantId: string; clientId: string; name: string; source: string; workspaceIds: string[]; mcpUrl: string; createdAt: number; expiresAt: number; status: "active" | "expired" | "revoked" | "address_changed"; oauthState: "awaiting_token" | "token_issued"; lastCall?: ConnectionObservation }>;
+  clients?: RemoteClientStatusDto[];
   recentCalls?: ConnectionObservation[];
   diagnosticsUnavailable?: boolean;
+  gatewayTracing?: { enabled: true; lastRequestAt?: number; lastToolAt?: number };
   authorizationRequests?: Array<{ requestId: string; clientId: string; clientName: string; createdAt: number; expiresAt: number; status: "pending" | "approved" | "rejected" | "expired" }>;
   authorizationStates?: Array<{ grantId: string; source: string; workspaceIds: string[]; status: "active" | "expired" | "revoked" }>;
 }
 export type ConnectionPhase = "stopped" | "checking" | "downloading" | "verifying" | "starting" | "discovering" | "probing" | "ready" | "reconnecting" | "disconnected" | "error";
 interface ConnectionConfig { mode: "quick_tunnel" | "fixed_https"; publicOrigin?: string; previousOrigin?: string; enabled: boolean; port: number; workspaceId?: string; workspaceIds?: string[]; scopes?: RemoteMcpScope[]; connectionOnly?: boolean; }
-export interface ConnectionDependencies { component?: ComponentProvider; tunnel?: TunnelAdapter; probe?: PublicProbe; healthIntervalMs?: number; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number; }
+export interface ConnectionDependencies { platform?: NodeJS.Platform; component?: ComponentProvider; tunnel?: TunnelAdapter; probe?: PublicProbe; healthIntervalMs?: number; retryDelaysMs?: number[]; probeBudgetMs?: number; startupBudgetMs?: number; startupRetryDelayMs?: number; }
 
 /** Owns the remote gateway and its separate, project-scoped OAuth grants. */
 export class RemoteMcpConnection {
@@ -85,8 +91,8 @@ export class RemoteMcpConnection {
   private state: PersistedState = { version: 1, clients: [], requests: [], grants: [], codes: [] };
   private stateQueue: Promise<void> = Promise.resolve();
   private server: Server | undefined;
-  private gatewaySocket: string | undefined;
-  private gatewaySocketDirectory: string | undefined;
+  private gatewayEndpoint: PrivateGatewayEndpoint | undefined;
+  private gatewayAuthCleanup: (() => void) | undefined;
   private config: ConnectionConfig | undefined;
   private startupError: string | undefined;
   private loadFailed = false;
@@ -119,8 +125,10 @@ export class RemoteMcpConnection {
   private probeCheck: RemoteConnectionStatus["probeCheck"];
   private readonly diagnostics: ConnectionDiagnostics;
   private readonly tokenExchangeContext = new AsyncLocalStorage<{ code?: string }>();
+  private readonly platform: NodeJS.Platform;
 
   constructor(private readonly service: ApplicationService, private readonly dataDirectory: string, private port = 4178, dependencies: ConnectionDependencies = {}) {
+    this.platform = dependencies.platform ?? process.platform;
     this.configPath = join(dataDirectory, "remote-mcp-connection.json");
     this.statePath = join(dataDirectory, "remote-mcp-oauth.json");
     this.component = dependencies.component ?? new CloudflaredComponent(dataDirectory);
@@ -190,7 +198,7 @@ export class RemoteMcpConnection {
     const grants = active.length;
     const pendingApprovals = this.state.requests.filter((request) => !request.decision && request.expiresAt > now).length;
     const busy = ["checking", "downloading", "verifying", "starting", "discovering", "probing", "reconnecting"].includes(this.phase);
-    const base: RemoteConnectionStatus = { configured: Boolean(this.config), enabled: Boolean(this.config?.enabled), gateway: this.server?.listening ? "running" : this.startupError ? "error" : "stopped", pendingApprovals, validGrants: grants, pendingTokenExchanges: active.filter(grant => !grant.refreshDigest && !grant.access.length).length, remoteClientVerified: false, mode: this.config?.mode ?? "quick_tunnel", transport: this.phase, busy, addressChanged: this.addressChanged };
+    const base: RemoteConnectionStatus = { quickTunnel: quickTunnelSupport(this.platform), configured: Boolean(this.config), enabled: Boolean(this.config?.enabled), gateway: this.server?.listening ? "running" : this.startupError ? "error" : "stopped", pendingApprovals, validGrants: grants, pendingTokenExchanges: active.filter(grant => !grant.refreshDigest && !grant.access.length).length, remoteClientVerified: false, mode: this.config?.mode ?? "quick_tunnel", transport: this.phase, busy, addressChanged: this.addressChanged };
     const authorizationHistory = [...this.state.requests].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(request => {
       const status: NonNullable<RemoteConnectionStatus["authorizationRequests"]>[number]["status"] = request.decision ?? (request.expiresAt <= now ? "expired" : "pending");
       return { requestId: request.requestId, clientId: request.clientId, clientName: request.clientName, createdAt: request.createdAt, expiresAt: request.expiresAt, status };
@@ -198,12 +206,17 @@ export class RemoteMcpConnection {
     base.authorizationRequests = authorizationHistory;
     base.authorizationStates = this.state.grants.slice(-100).map(grant => ({ grantId: grant.grantId, source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], status: grant.revokedAt ? "revoked" : grant.expiresAt <= now ? "expired" : "active" }));
     const calls = this.diagnostics.recent();
+    const currentCalls = calls.filter(item => item.endpoint === `${this.config?.publicOrigin}/mcp`);
+    const lastRequestAt = currentCalls.filter(item => item.stage === "ingress" && item.requestState === "received").at(-1)?.at, lastToolAt = currentCalls.filter(item => item.stage === "tool").at(-1)?.at;
+    base.gatewayTracing = { enabled: true, ...(lastRequestAt === undefined ? {} : { lastRequestAt }), ...(lastToolAt === undefined ? {} : { lastToolAt }) };
     base.clients = [...this.state.grants].sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(grant => {
-      const lastCall = calls.filter(item => item.grantId === grant.grantId && item.endpoint === grant.resource && item.stage === "tool").at(-1);
-      return { grantId: grant.grantId, clientId: grant.clientId, name: grant.alias || this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端", source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
-        status: grant.revokedAt ? "revoked" as const : grant.expiresAt <= now ? "expired" as const : grant.resource !== `${this.config?.publicOrigin}/mcp` ? "address_changed" as const : "active" as const, ...(lastCall ? { lastCall } : {}) };
+      const applicable = calls.filter(item => item.grantId === grant.grantId && item.clientId === grant.clientId && item.endpoint === grant.resource && item.stage === "tool" && item.authorizationKey === authorizationKey(grant));
+      const lastCall = applicable.at(-1), lastSuccess = applicable.filter(item => item.outcome === "success").at(-1);
+      const clientName = this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "历史网页客户端";
+      return { grantId: grant.grantId, clientId: grant.clientId, clientFingerprint: createHash("sha256").update(grant.clientId).digest("hex").slice(0, 12), name: grant.alias || clientName, clientName, ...(grant.alias ? { alias: grant.alias } : {}), nameSource: grant.alias ? "local_alias" as const : "client_declared" as const, usage: grant.usage ?? "web", toolVerified: Boolean(lastSuccess), source: grant.source || "来源待确认", workspaceIds: grant.workspaceIds ?? [grant.workspaceId], mcpUrl: grant.resource, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" as const : "awaiting_token" as const,
+        status: grant.revokedAt ? "revoked" as const : grant.expiresAt <= now ? "expired" as const : grant.resource !== `${this.config?.publicOrigin}/mcp` ? "address_changed" as const : "active" as const, ...(lastCall ? { lastCall } : {}), ...(lastSuccess ? { lastSuccess } : {}) };
     });
-    base.remoteClientVerified = base.clients.some(item => item.status === "active" && item.lastCall?.outcome === "success");
+    base.remoteClientVerified = base.clients.some(item => item.status === "active" && item.usage === "web" && item.toolVerified);
     base.recentCalls = calls.filter(item => item.endpoint === `${this.config?.publicOrigin}/mcp`).slice(-20).reverse();
     base.diagnosticsUnavailable = this.diagnostics.storageUnavailable;
     if (this.probeCheck) base.probeCheck = { ...this.probeCheck };
@@ -241,6 +254,7 @@ export class RemoteMcpConnection {
   }
 
   async startQuick(input: { consent: boolean; workspaceId?: string; connectionOnly?: boolean; workspaceIds?: string[]; scopes?: string[]; port?: number }): Promise<RemoteConnectionStatus> {
+    assertQuickTunnelSupported(this.platform);
     if (this.loadFailed) throw new Error("remote_connection_state_invalid：请先检查本地授权状态");
     if (input.consent !== true) throw new Error("remote_consent_required：请确认使用 Cloudflare 和自动下载官方连接组件");
     if (!input.workspaceId && input.connectionOnly !== true) throw new Error("oauth_workspace_required：请选择项目，或显式选择仅建立连接");
@@ -321,7 +335,7 @@ export class RemoteMcpConnection {
     }
     if (signal.aborted) { if (signal.reason === PRESERVE_TUNNEL && runtime.detach) await runtime.detach(); else await runtime.stop(); signal.throwIfAborted(); }
     this.runtime = runtime;
-    if (runtime.attach && this.gatewaySocket) await runtime.attach(this.gatewaySocket);
+    if (runtime.attach && this.gatewayEndpoint) await runtime.attach(this.gatewayEndpoint.socketPath, this.gatewayEndpoint.token);
     const origin = validatePublicOrigin(runtime.origin);
     if (!/^https:\/\/[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com$/.test(origin)) throw new Error("tunnel_origin_invalid：组件未返回有效 Quick Tunnel 地址");
     if (this.recoveredTunnel && previousOrigin !== origin) await this.revokeAll();
@@ -436,10 +450,10 @@ export class RemoteMcpConnection {
     return this.state.requests.filter((request) => !request.decision && request.expiresAt > Date.now()).sort((a, b) => b.createdAt - a.createdAt).map((request) => ({ requestId: request.requestId, clientName: request.clientName, clientId: request.clientId, redirectHost: new URL(request.redirectUri).origin, requestedScopes: request.requestedScopes, createdAt: request.createdAt, expiresAt: request.expiresAt, ...(this.config?.mode === "quick_tunnel" && this.config.workspaceId ? { workspaceId: this.config.workspaceId, workspaceIds: this.config.workspaceIds ?? [this.config.workspaceId] } : {}) }));
   }
 
-  grants(): Array<{ workspaceIds: string[]; source?: WebSource; alias?: string; grantId: string; clientName: string; clientId: string; redirectHost: string; workspaceId: string; workspaceLabel: string; scopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; oauthState: "awaiting_token" | "token_issued" }> {
+  grants(): Array<{ workspaceIds: string[]; source?: WebSource; alias?: string; grantId: string; clientName: string; clientId: string; redirectHost: string; workspaceId: string; workspaceLabel: string; scopes: RemoteMcpScope[]; createdAt: number; expiresAt: number; oauthState: "awaiting_token" | "token_issued"; usage: "web" | "diagnostic" }> {
     const labels = new Map(this.service.listWorkspaces().map((workspace) => [workspace.workspaceId, workspace.label]));
     return this.state.grants.filter((grant) => !grant.revokedAt && grant.expiresAt > Date.now() && grant.resource === `${this.config?.publicOrigin}/mcp`).sort((a, b) => b.createdAt - a.createdAt).map((grant) => ({
-      grantId: grant.grantId, clientName: this.state.clients.find((client) => client.client_id === grant.clientId)?.client_name || "未命名网页客户端",
+      usage: grant.usage ?? "web", grantId: grant.grantId, clientName: this.state.clients.find((client) => client.client_id === grant.clientId)?.client_name || "未命名网页客户端",
       clientId: grant.clientId, redirectHost: grant.redirectHost, workspaceId: grant.workspaceId, workspaceIds: grant.workspaceIds ?? [grant.workspaceId], ...(grant.source ? { source: grant.source } : {}), ...(grant.alias ? { alias: grant.alias } : {}),
       workspaceLabel: labels.get(grant.workspaceId) || "项目已移除", scopes: grant.scopes, createdAt: grant.createdAt, expiresAt: grant.expiresAt, oauthState: grant.refreshDigest || grant.access.length ? "token_issued" : "awaiting_token",
     }));
@@ -458,7 +472,8 @@ export class RemoteMcpConnection {
   }
 
   /** Only called by the authenticated local console, never by a remote tool. */
-  async updateGrant(grantId: string, input: { workspaceIds: string[]; source: WebSource; alias?: string }): Promise<void> {
+  async updateGrant(grantId: string, input: { workspaceIds: string[]; source: WebSource; alias?: string; usage?: "web" | "diagnostic" }): Promise<void> {
+    if (input.usage !== undefined && !["web", "diagnostic"].includes(input.usage)) throw new Error("oauth_usage_invalid：连接用途必须是网页或独立诊断");
     if (!["chatgpt", "claude", "other"].includes(input.source) || !input.workspaceIds.length) throw new Error("oauth_grant_update_invalid");
     for (const id of input.workspaceIds) {
       await this.service.getWorkspace(id);
@@ -468,7 +483,10 @@ export class RemoteMcpConnection {
       if (!grant) throw new Error("oauth_grant_not_found");
       if (!this.config?.enabled || grant.resource !== `${this.config.publicOrigin}/mcp`) throw new Error("oauth_resource_invalid：此授权不属于当前连接，请在网页重新授权");
       await this.includeAuthorizedWorkspaces(input.workspaceIds);
+      const previousKey = authorizationKey(grant);
       grant.workspaceIds = [...new Set(input.workspaceIds)]; grant.workspaceId = grant.workspaceIds[0]!; grant.source = input.source;
+      if (input.usage !== undefined) grant.usage = input.usage;
+      if (previousKey !== authorizationKey(grant)) grant.authorizationRevision = (grant.authorizationRevision ?? 1) + 1;
       if (input.alias !== undefined) { if (input.alias.trim()) grant.alias = input.alias.trim().slice(0, 80); else delete grant.alias; }
     });
     await this.service.publish({ type: "remote_authorization.updated", payload: { grantId } });
@@ -545,14 +563,16 @@ export class RemoteMcpConnection {
     const extra = info.extra ?? {};
     if (typeof extra.grantId !== "string" || typeof extra.workspaceId !== "string") return undefined;
     const grant = this.state.grants.find((item) => item.grantId === extra.grantId)!;
-    const originalSource = grant.source;
+    const originalSource = grant.source, originalAuthorizationKey = authorizationKey(grant);
     return { grantId: extra.grantId, clientId: info.clientId, workspaceId: extra.workspaceId, workspaceIds: grant.workspaceIds ?? [grant.workspaceId],
       ...(grant.source ? { source: grant.source } : {}),
+      connection: { mcpUrl: grant.resource, authorizationKey: originalAuthorizationKey, usage: grant.usage ?? "web", ...(grant.alias ? { alias: grant.alias } : {}), clientName: this.state.clients.find(item => item.client_id === grant.clientId)?.client_name || "未命名网页客户端" },
       assertActive: async (workspaceId?: string) => {
         await this.verifyAccessToken(token);
         const current = this.state.grants.find((item) => item.grantId === extra.grantId)!;
         if (workspaceId && !(current.workspaceIds ?? [current.workspaceId]).includes(workspaceId)) throw new Error("mcp_workspace_forbidden：项目授权已移除");
         if (current.source !== originalSource) throw new Error("mcp_source_changed：来源已变更，请重新连接并领取");
+        if (authorizationKey(current) !== originalAuthorizationKey) throw new Error("mcp_authorization_changed：授权范围已变更，请重试读取最新授权");
       },
       scopes: info.scopes as RemoteMcpScope[], expiresAt: (info.expiresAt ?? 0) * 1000 };
   }
@@ -562,8 +582,12 @@ export class RemoteMcpConnection {
     const app = express();
     const allowedHosts = new Set([new URL(origin).host, `127.0.0.1:${this.port}`, `localhost:${this.port}`]);
     app.use(((request: ExpressRequest, response: ExpressResponse, next: (error?: unknown) => void) => {
+      const auth = request.headers.authorization, candidate = typeof auth === "string" && /^Bearer\s+\S+$/i.test(auth) ? auth.replace(/^Bearer\s+/i, "") : "";
+      const challenge = request.headers["x-token-coupon-probe"];
+      const internal = !!candidate && (this.probeTokens.get(digest(candidate)) ?? 0) > Date.now() || request.method === "GET" && typeof challenge === "string" && (this.probeTokens.get(digest(challenge)) ?? 0) > Date.now();
+      const trace = traceGatewayRequest(request, response, `${origin}/mcp`, event => this.diagnostics.record(event), internal);
       const host = request.headers.host?.toLowerCase();
-      if (!host || !allowedHosts.has(host)) { response.status(421).json({ error: "remote_host_invalid" }); return; }
+      if (!host || !allowedHosts.has(host)) { response.status(421).json({ error: "remote_host_invalid", traceId: trace.traceId }); return; }
       response.setHeader("X-Content-Type-Options", "nosniff"); response.setHeader("Referrer-Policy", "no-referrer"); response.setHeader("Cache-Control", "no-store");
       next();
     }) as unknown as Handler);
@@ -579,7 +603,7 @@ export class RemoteMcpConnection {
     // Token diagnostics persist field names and machine codes, never credential values.
     app.use(((request: ExpressRequest, response: ExpressResponse, next: () => void) => {
       if (request.method !== "POST" || (request.url || "").split("?", 1)[0] !== "/token") { next(); return; }
-      const traceId = randomUUID(), startedAt = Date.now(), context: { code?: string } = {};
+      const traceId = gatewayTrace(request)?.traceId ?? randomUUID(), startedAt = Date.now(), context: { code?: string } = {};
       response.setHeader("X-Token-Coupon-Trace", traceId);
       const json = response.json.bind(response);
       response.json = (value: unknown) => {
@@ -601,7 +625,7 @@ export class RemoteMcpConnection {
     }) as unknown as Handler);
     app.use(mcpAuthRouter({ provider: this.provider, issuerUrl: new URL(origin), baseUrl: new URL(origin), resourceServerUrl: new URL(`${origin}/mcp`), scopesSupported: SUPPORTED_SCOPES, resourceName: "Token Coupon local project tools" }) as unknown as Handler);
     app.all("/mcp", async (request, response) => {
-      const traceId = randomUUID(), startedAt = Date.now(), endpoint = `${origin}/mcp`;
+      const trace = gatewayTrace(request), traceId = trace?.traceId ?? randomUUID(), startedAt = Date.now(), endpoint = `${origin}/mcp`;
       response.setHeader("X-Token-Coupon-Trace", traceId);
       const authorization = request.headers.authorization;
       const token = typeof authorization === "string" && /^Bearer\s+\S+$/i.test(authorization) ? authorization.replace(/^Bearer\s+/i, "") : "";
@@ -613,13 +637,14 @@ export class RemoteMcpConnection {
       if (!principal && !probe) {
         const known = token && token.length <= 256 ? this.state.grants.find(grant => grant.access.some(access => safeEqual(access.digest, digest(token)))) : undefined;
         const code = known?.revokedAt ? "oauth_grant_revoked" : known && known.resource !== endpoint ? "oauth_resource_changed" : known ? "oauth_token_expired" : "oauth_authorization_required";
+        if (trace) trace.code = code;
         if (!internalChallenge) await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "authentication", outcome: "error", code, httpStatus: 401,
           ...(known ? { grantId: known.grantId, clientId: known.clientId } : {}) });
         const metadata = `https://${new URL(origin).host}/.well-known/oauth-protected-resource/mcp`;
         response.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store", "WWW-Authenticate": `Bearer resource_metadata=\"${metadata}\"` });
         response.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "OAuth authorization required", data: { traceId, code: "oauth_authorization_required" } } })); return;
       }
-      const identity = principal ? { grantId: principal.grantId, clientId: principal.clientId } : {};
+      const identity = principal ? { grantId: principal.grantId, clientId: principal.clientId, ...(principal.connection ? { authorizationKey: principal.connection.authorizationKey } : {}) } : {};
       if (!probe && this.config?.mode === "quick_tunnel" && (!this.lastProbeAt || ["error", "disconnected", "stopped"].includes(this.phase))) {
         await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "transport", outcome: "error", code: "remote_not_ready", httpStatus: 503, ...identity });
         response.status(503).json({ error: "remote_not_ready", traceId }); return;
@@ -632,12 +657,33 @@ export class RemoteMcpConnection {
         const body = request.method === "POST" ? await parseBody(request, 256 * 1024) : undefined;
         const proposed = (body as { method?: unknown } | undefined)?.method;
         if (typeof proposed === "string" && ["initialize", "tools/list", "tools/call", "notifications/initialized", "ping"].includes(proposed)) method = proposed;
-        const server = probe ? createProbeMcpServer() : createMcpServer(this.service, principal!, { traceId, record: event => this.diagnostics.record({ ...event, at: Date.now(), endpoint, stage: "tool", ...identity }) });
+        if (trace) trace.method = method;
+        let handlerObserved = false;
+        const server = probe ? createProbeMcpServer() : createMcpServer(this.service, principal!, { traceId, record: event => {
+          handlerObserved = true;
+          return this.diagnostics.record({ ...event, at: Date.now(), endpoint, stage: "tool", ...identity });
+        } });
         const transport = new (await import("@modelcontextprotocol/sdk/server/streamableHttp.js")).StreamableHTTPServerTransport({ enableJsonResponse: true });
+        // The SDK validates input before calling our guarded handler. Observe its
+        // public transport response too, without changing or retaining the payload.
+        const send = transport.send.bind(transport);
+        transport.send = async (message, options) => {
+          const request = body as { id?: unknown; params?: { name?: unknown } } | undefined;
+          if (!probe && method === "tools/call" && !handlerObserved && "id" in message && message.id === request?.id &&
+            ("error" in message || "result" in message && message.result.isError === true)) {
+            handlerObserved = true;
+            const code = "mcp_tool_input_rejected";
+            if (trace) trace.code = code;
+            await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "tool", outcome: "error", code,
+              ...(knownRemoteTool(request?.params?.name) ? { tool: request.params.name } : {}), durationMs: Date.now() - startedAt, ...identity });
+          }
+          await send(message, options);
+        };
         response.once("close", () => { void server.close().catch(() => undefined); });
         await server.connect(transport as import("@modelcontextprotocol/sdk/shared/transport.js").Transport);
         await transport.handleRequest(request, response, body);
       } catch {
+        if (trace) trace.code = "mcp_transport_failed";
         if (!probe) await this.diagnostics.record({ traceId, at: Date.now(), endpoint, stage: "transport", outcome: "error", code: "mcp_transport_failed", durationMs: Date.now() - startedAt, ...identity });
         if (!response.headersSent) response.status(500).json({ error: "mcp_transport_failed", traceId });
         else response.end();
@@ -657,15 +703,14 @@ export class RemoteMcpConnection {
     });
     const privateGateway = this.tunnel.persistentGateway && this.config?.mode === "quick_tunnel";
     if (privateGateway) {
-      this.gatewaySocketDirectory = await mkdtemp(join(tmpdir(), "tc-gateway-"));
-      await chmod(this.gatewaySocketDirectory, 0o700);
-      this.gatewaySocket = join(this.gatewaySocketDirectory, "gateway.sock");
+      this.gatewayEndpoint = await createPrivateGateway();
+      if (this.gatewayEndpoint.token) this.gatewayAuthCleanup = protectPrivateGateway(server, this.gatewayEndpoint.token);
     }
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         const ready = () => { server.removeListener("error", reject); resolve(); };
-        if (this.gatewaySocket) server.listen(this.gatewaySocket, ready); else server.listen(this.port, "127.0.0.1", ready);
+        if (this.gatewayEndpoint) server.listen({ path: this.gatewayEndpoint.socketPath, readableAll: false, writableAll: false }, ready); else server.listen(this.port, "127.0.0.1", ready);
       });
     } catch (error) { await this.clearGatewaySocket(); throw error; }
     this.server = server;
@@ -673,14 +718,15 @@ export class RemoteMcpConnection {
 
   private async stopGateway(): Promise<void> {
     this.gatewayHandler = undefined;
+    this.gatewayAuthCleanup?.(); this.gatewayAuthCleanup = undefined;
     const server = this.server; this.server = undefined;
     if (server?.listening) await new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); });
     await this.clearGatewaySocket();
   }
 
   private async clearGatewaySocket(): Promise<void> {
-    if (this.gatewaySocketDirectory) await rm(this.gatewaySocketDirectory, { recursive: true, force: true });
-    this.gatewaySocket = undefined; this.gatewaySocketDirectory = undefined;
+    this.gatewayAuthCleanup?.(); this.gatewayAuthCleanup = undefined;
+    await removePrivateGateway(this.gatewayEndpoint); this.gatewayEndpoint = undefined;
   }
 
   private async registerClient(input: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">): Promise<OAuthClientInformationFull> {
@@ -890,4 +936,10 @@ async function abortableDelay(milliseconds: number, signal: AbortSignal): Promis
     const timer = setTimeout(() => { signal.removeEventListener("abort", aborted); resolve(); }, milliseconds);
     signal.addEventListener("abort", aborted, { once: true });
   });
+}
+
+/** Bound to the current local grant, never to request headers or client claims. */
+function authorizationKey(grant: StoredGrant): string {
+  return createHash("sha256").update(JSON.stringify([grant.grantId, grant.clientId, grant.resource,
+    [...new Set(grant.workspaceIds ?? [grant.workspaceId])].sort(), [...grant.scopes].sort(), grant.source ?? "", grant.usage ?? "web", grant.authorizationRevision ?? 1])).digest("hex").slice(0, 32);
 }

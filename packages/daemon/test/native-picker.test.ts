@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it } from "vitest";
@@ -22,7 +22,7 @@ it("uses Windows system dialogs and no user interpolation in its PowerShell sour
 it("treats cancellation as a normal empty result and checks file containment after resolving symlinks", async () => {
   expect(await normalizePickedPaths({ cancelled: true, paths: ["invalid"] }, "directory")).toEqual({ cancelled: true, paths: [] });
   const root = await mkdtemp(join(tmpdir(), "native-picker-")); roots.push(root); const workspace = join(root, "中文 项目"); await mkdir(workspace); await writeFile(join(workspace, "设计.md"), "reference"); await writeFile(join(root, "outside.md"), "outside");
-  expect(await normalizePickedPaths({ cancelled: false, paths: [workspace] }, "directory")).toEqual({ cancelled: false, paths: [workspace] });
+  expect(await normalizePickedPaths({ cancelled: false, paths: [workspace] }, "directory")).toEqual({ cancelled: false, paths: [await realpath(workspace)] });
   expect(await normalizePickedPaths({ cancelled: false, paths: [join(workspace, "设计.md")] }, "files", workspace)).toEqual({ cancelled: false, paths: ["设计.md"] });
   await symlink(join(root, "outside.md"), join(workspace, "link.md"));
   await expect(normalizePickedPaths({ cancelled: false, paths: [join(workspace, "link.md")] }, "files", workspace)).rejects.toThrow("outside_workspace");

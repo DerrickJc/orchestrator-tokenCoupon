@@ -82,6 +82,8 @@ it("browses only visible directories, preserves Chinese paths and paginates with
   await writeFile(join(h.path, "secret.env"), "never returned"); await symlink(h.root, join(h.path, "external-link"), "dir");
   const data = await browseDirectories(h.path);
   expect(data.entries.map(entry => entry.name)).toEqual(["课程设计"]); expect(data.path).toBe(h.path); expect(data.parent).toBe(h.root);
+  expect(data.breadcrumbs.at(-1)).toEqual({ label: "中文 项目", path: h.path });
+  expect(data.environment.label).toBeTruthy();
   expect(JSON.stringify(data)).not.toContain("never returned");
   await Promise.all(Array.from({ length: 102 }, (_, i) => mkdir(join(h.path, `folder-${i}`))));
   const first = await browseDirectories(h.path); expect(first.entries).toHaveLength(100); expect(first.nextOffset).toBe(100);
@@ -144,4 +146,19 @@ it("refuses partial staging and preserves a failing hook's index and files", asy
   await expect(commitWorkspaceGit(h.path, { ...preview, mode: "selected", message: "must fail" })).rejects.toThrow("git commit");
   expect((await runGit(h.path, ["rev-parse", "HEAD"])).stdout.trim()).toBe(preview.head);
   expect((await runGit(h.path, ["show", ":code.txt"])).stdout).toBe("unstaged version");
+});
+
+it("reports missing identity before the initial commit and refuses to stage selected files until configured", async () => {
+  const h = await fixture(); await prepareWorkspaceGit(h.path, "initialize");
+  await runGit(h.path, ["config", "user.name", ""]); await runGit(h.path, ["config", "user.email", ""]);
+  await writeFile(join(h.path, "README.md"), "first project file");
+  expect(await workspaceGitStatus(h.path)).toMatchObject({ state: "no_commit", identity: { configured: false } });
+  const preview = await previewGitCommit(h.path, "selected", ["README.md"]);
+  await expect(commitWorkspaceGit(h.path, { ...preview, mode: "selected", message: "initial source" })).rejects.toThrow("git_identity_required");
+  expect((await runGit(h.path, ["ls-files", "--stage"])).stdout).toBe("");
+  await identity(h.path);
+  expect(await workspaceGitStatus(h.path)).toMatchObject({ state: "no_commit", identity: { configured: true, name: "Workspace Test", email: "workspace@example.invalid" } });
+  const result = await commitWorkspaceGit(h.path, { ...preview, mode: "selected", message: "initial source" });
+  expect(result.status.state).toBe("ready");
+  expect((await runGit(h.path, ["show", "HEAD:README.md"])).stdout).toBe("first project file");
 });

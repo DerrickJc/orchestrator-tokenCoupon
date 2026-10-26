@@ -10,9 +10,15 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/cli && npm run build --workspace @token-coupon/daemon",
-    "typecheck": "npm run build --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/cli && npm run typecheck --workspace @token-coupon/daemon",
-    "daemon": "npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/daemon && node packages/daemon/dist/main.js",
+    "build": "npm run build --workspace @token-coupon/client && npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/cli && npm run build --workspace @token-coupon/web && npm run build --workspace @token-coupon/daemon && npm run build --workspace @token-coupon/desktop",
+    "typecheck": "npm run build --workspace @token-coupon/client && npm run typecheck --workspace @token-coupon/client && npm run build --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/core && npm run typecheck --workspace @token-coupon/cli && npm run typecheck --workspace @token-coupon/web && npm run typecheck --workspace @token-coupon/daemon && npm run typecheck --workspace @token-coupon/desktop",
+    "daemon": "npm run build --workspace @token-coupon/client && npm run build --workspace @token-coupon/core && npm run build --workspace @token-coupon/web && npm run build --workspace @token-coupon/daemon && node packages/daemon/dist/main.js",
+    "desktop": "npm run build && npm run start --workspace @token-coupon/desktop",
+    "web:dev": "npm run dev --workspace @token-coupon/web",
+    "desktop:stage-resources": "npm run build && node scripts/assemble-desktop-resources.mjs",
+    "desktop:package": "npm run build && node scripts/package-desktop.mjs",
+    "desktop:installer": "npm run build && node scripts/package-desktop.mjs --mode installer",
+    "desktop:smoke-gui": "node scripts/desktop-gui-smoke.mjs",
     "cli": "npm run build && node packages/cli/dist/main.js",
     "demo:phase3.5": "npm run build && node scripts/phase3.5-demo.mjs",
     "demo:phase3.5-bugfix": "npm run build && node scripts/phase3.5-bugfix-demo.mjs",
@@ -25,13 +31,16 @@
     "demo:phase6": "npm run build && node scripts/phase6-demo.mjs",
     "demo:phase6-mixed-live": "npm run build && node scripts/phase6-mixed-live-demo.mjs",
     "test": "npm run build && vitest run",
+    "test:windows-native": "npm run build && vitest run --testTimeout 30000 --hookTimeout 30000 packages/core/test/claude-windows-process.test.ts packages/core/test/native-command.test.ts packages/core/test/agent-executable.test.ts packages/core/test/owner-coordination.test.ts packages/core/test/owner-platform.test.ts packages/core/test/windows-process-tree.test.ts packages/core/test/worktree-path.test.ts packages/core/test/worktree-isolation.test.ts packages/core/test/atomic-file.test.ts packages/daemon/test/native-picker.test.ts packages/daemon/test/connection-platform.test.ts packages/daemon/test/private-gateway.test.ts packages/daemon/test/persistent-tunnel.test.ts packages/daemon/test/quick-connection.test.ts packages/daemon/test/agent-components.test.ts packages/daemon/test/agent-components-http.test.ts packages/daemon/test/claude-model-catalog.test.ts packages/desktop/test/daemon-runtime.test.ts packages/desktop/test/desktop-policy.test.ts packages/desktop/test/desktop-profile.test.ts packages/desktop/test/acceptance-proxy.test.ts packages/desktop/test/desktop-folders.test.ts packages/desktop/test/desktop-reconnect.test.ts packages/desktop/test/runtime-dependencies.test.ts packages/desktop/test/runtime-assembly.test.ts packages/desktop/test/package-desktop.test.ts packages/desktop/test/desktop-release.test.ts packages/desktop/test/window-state.test.ts",
     "demo:phase6-bugfix": "npm run build && node scripts/phase6-bugfix-demo.mjs",
     "demo:phase7-web-handoff": "npm run build && node scripts/phase7-web-handoff-demo.mjs",
     "demo:phase7-biz01-execution-live": "npm run build && node scripts/phase7-biz01-execution-live-demo.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "electron-builder": "26.17.0",
     "jsdom": "^26.1.0",
+    "playwright-core": "1.64.1",
     "typescript": "^6.0.0",
     "vite": "^8.1.0",
     "vitest": "^5.0.3"

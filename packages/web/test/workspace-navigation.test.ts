@@ -1,8 +1,12 @@
+import { createClient } from "@token-coupon/client";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { JSDOM } from "jsdom";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it } from "vitest";
 import { defaultSystemSettings } from "../../daemon/src/system-settings.js";
+import { AttemptDiagnosisDialog } from "../src/attempt-diagnosis-dialog-ui.js";
 
 const windows: JSDOM[] = [];
 async function chooseNativeFolder(h: Awaited<ReturnType<typeof page>>) {
@@ -30,8 +34,25 @@ it("opens backend directory selection by default for remote clients and register
   expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces", body: { path: "/projects/远程项目" } });
   expect(h.nativeCalls).toHaveLength(0);
 });
+it("uses the Electron preload folder picker in the desktop app without calling the remote picker route", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  h.element("add-workspace-main").click(); await chooseNativeFolder(h);
+  expect(h.element("workspace-native-choice").textContent).toContain("桌面应用：本机文件夹选择器");
+  await expect.poll(() => h.desktopFolderCalls.length).toBe(1);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("C:\\Projects\\Selected");
+  expect(h.nativeCalls).toHaveLength(0);
+  expect(h.posts.some(post => post.path === "/api/v1/workspaces")).toBe(false);
+});
+it("returns to workspace selection when the desktop folder picker is canceled", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  h.setDesktopFolderResult({ canceled: true });
+  h.element("add-workspace-main").click(); await chooseNativeFolder(h);
+  await expect.poll(() => h.visible("workspace-form")).toBe(false);
+  expect(h.visible("workspace-cards")).toBe(true);
+  expect(h.desktopFolderCalls).toHaveLength(1); expect(h.nativeCalls).toHaveLength(0);
+});
 it("initializes unified preferences, persists a selected Agent and keeps per-function settings editable", async () => {
-  const h = await page({ empty: true, settings: defaultSystemSettings() });
+  const h = await page({ empty: true, settings: defaultSystemSettings(), reactSystemPolicyRouting: true });
   await expect.poll(() => h.w.location.hash).toBe("#/settings");
   expect(h.visible("system-settings-page")).toBe(true);
   const policy = h.element("system-settings-policies").querySelector<HTMLElement>('[data-function="unified"]')!;
@@ -247,7 +268,11 @@ it("loads the full task model menu, isolates Runner choices and ignores a late c
   expect(model.value).toBe(""); await expect.poll(() => [...choice.options].map(option => option.value)).toContain("deepseek-flash");
   choice.value = "deepseek-flash"; choice.dispatchEvent(new h.w.Event("change")); expect(model.value).toBe("deepseek-flash");
   runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change")); expect(model.value).toBe("custom-codex");
-  delayClaude = true; runner.value = "claude-code"; runner.dispatchEvent(new h.w.Event("change")); await expect.poll(() => !!delayed).toBe(true);
+  delayClaude = true; runner.value = "claude-code"; runner.dispatchEvent(new h.w.Event("change"));
+  await expect.poll(() => choice.disabled).toBe(false);
+  row.querySelector<HTMLButtonElement>("button")!.click();
+  await expect.poll(() => !!delayed).toBe(true);
+  expect(choice.disabled).toBe(true);
   runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change"));
   delayed!(Response.json({ models: [{ id: "stale-claude" }], customAllowed: true }));
   await expect.poll(() => [...choice.options].map(option => option.value)).toContain("gpt-6-luna");
@@ -325,8 +350,8 @@ it("distinguishes a generic web source from its MCP name and saves a name withou
 it("keeps an unsuccessful name edit and allows cancellation without changing the saved name", async () => {
   const h = await page({ ready: true });
   h.setGrants([{ grantId: "named", alias: "demo1", source: "chatgpt", workspaceIds: ["project"], expiresAt: Date.now() + 60000 }]);
-  h.element("refresh").click(); await expect.poll(() => h.element("remote-grants").children.length).toBe(1);
-  const card = h.element("remote-grants").firstElementChild!;
+  h.element("refresh").click(); await expect.poll(() => h.element("remote-grants").querySelector('[data-grant-id="named"]')).not.toBeNull();
+  const card = h.element("remote-grants").querySelector('[data-grant-id="named"]')!;
   card.querySelector<HTMLButtonElement>(".grant-rename")!.click();
   const input = card.querySelector<HTMLInputElement>(".grant-name-input")!; input.value = "new-name";
   const original = h.w.fetch;
@@ -369,19 +394,141 @@ it("updates the displayed model from native events and distinguishes SDK startup
   expect(result).toEqual({ startup: "startup-alias（SDK 启动报告）", reply: "deepseek-flash（回复模型）", rawCount: 2 });
 });
 afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 0)); for (const window of windows.splice(0)) window.window.close(); });
-async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
-  const [html, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
+it("reconciles a restarted daemon without replaying mutations or discarding local inputs", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/draft" });
+  await expect.poll(() => (h.w as any).__testState.initialized).toBe(true);
+  h.element("toggle-plan-edit").click();
+  const title = h.element("plan-text-editor").querySelector("input") as HTMLInputElement;
+  title.value = "尚未保存的标题"; title.dispatchEvent(new h.w.Event("input", { bubbles: true }));
+  const input = h.element("reply-text") as HTMLTextAreaElement; input.value = "未提交澄清";
+  const sources: any[] = [];
+  h.w.EventSource = class {
+    listeners = new Map<string, (event: any) => void>();
+    constructor(readonly url: string) { sources.push(this); }
+    addEventListener(name: string, callback: (event: any) => void) { this.listeners.set(name, callback); }
+    close() {}
+    emit(name: string, value: any) { this.listeners.get(name)?.({ data: JSON.stringify(value) }); }
+  } as any;
+  const originalFetch = h.w.fetch;
+  h.w.fetch = async (path: string, options?: RequestInit) => String(path).endsWith("/health")
+    ? Response.json({ epoch: "restarted", protocol: { major: 1, minor: 0 }, workspaceEnvironment: { currentDirectory: "/projects" }, capabilities: { executionSelection: 1 } })
+    : originalFetch(path, options);
+  const before = h.posts.length;
+  h.w.eval("__testState.lastEventId = 800; connectEvents();");
+  expect(sources[0].url).toContain("epoch=test");
+  sources[0].emit("hello", { epoch: "restarted", latestSequence: 2, resetReason: "epoch_changed" });
+  await expect.poll(() => h.element("connection-label").textContent).toContain("状态已核对");
+  expect((h.w as any).__testState.daemonEpoch).toBe("restarted");
+  expect((h.w as any).__testState.lastEventId).toBe(2);
+  expect((h.element("plan-text-editor").querySelector("input") as HTMLInputElement).value).toBe("尚未保存的标题");
+  expect(input.value).toBe("未提交澄清");
+  expect(h.posts).toHaveLength(before);
+  h.w.eval("connectEvents();");
+  expect(sources[1].url).toContain("after=2&epoch=restarted");
+});
+async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; desktopReconnect?: boolean; desktopRecovery?: string; agentComponents?: any[]; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
+  const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
-  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [];
+  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopFolderPaths: Array<string | undefined> = [], desktopNotificationCalls: any[] = [], desktopExplorerCalls: string[] = [];
+  let desktopFolderResult: { canceled: boolean; path?: string } = { canceled: false, path: "C:\\Projects\\Selected" };
+  let desktopNotificationsEnabled = false;
+  const desktopReconnectCalls: string[] = [], desktopRecoveryAcknowledged: string[] = [];
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
+  if (options.desktopPicker) Object.assign(w, { tokenCouponDesktop: {
+    getAttachment: async () => ({ origin: "http://127.0.0.1:4177", port: 4177, epoch: "desktop-test", profileId: "a".repeat(24), protocol: { major: 1, minor: 0 }, applicationVersion: "0.1.0", buildId: "test" }),
+    openWorkspaceFolder: async (path: string) => { desktopExplorerCalls.push(path); },
+    chooseWorkspaceFolder: async (path?: string) => { desktopFolderCalls.push(Date.now()); desktopFolderPaths.push(path); return desktopFolderResult; },
+    showNotification: async (input: any) => { desktopNotificationCalls.push(input); return true; },
+    getNotificationsEnabled: async () => desktopNotificationsEnabled,
+    setNotificationsEnabled: async (enabled: boolean) => { desktopNotificationsEnabled = enabled; return enabled; },
+  } });
+  if (options.desktopReconnect || options.desktopRecovery) Object.assign(w, { tokenCouponDesktop: {
+    ...w.tokenCouponDesktop,
+    getNotificationsEnabled: async () => false,
+    reconnect: async (snapshot: string) => { desktopReconnectCalls.push(snapshot); throw new Error("isolated reconnect failure"); },
+    getConnectionState: async () => ({ phase: "connected" }),
+    getRecoveryState: async () => options.desktopRecovery && !desktopRecoveryAcknowledged.length ? { id: "recovery-test", snapshot: options.desktopRecovery } : undefined,
+    acknowledgeRecovery: async (id: string) => { desktopRecoveryAcknowledged.push(id); },
+  } });
   Object.defineProperty(w.crypto, "randomUUID", { value: randomUUID });
   Object.defineProperty(w.navigator, "clipboard", { value: { writeText: async (text: string) => { copied.push(text); } } });
+  if (options.reactRunMode) Object.assign(w, { tokenCouponRunModeSelector: { render(model: { options: Array<{ id: string; title: string; description: string }>; selectedMode: string }, onChange: (mode: "default" | "custom") => void) {
+    const root = w.document.getElementById("run-mode-selector-root")!;
+    root.replaceChildren(...model.options.map(option => {
+      const label = w.document.createElement("label"); label.className = "run-config-choice";
+      const input = w.document.createElement("input"); input.type = "radio"; input.name = "run-mode-choice"; input.value = option.id; input.checked = model.selectedMode === option.id;
+      input.onchange = () => onChange(option.id as "default" | "custom");
+      const copy = w.document.createElement("span"), title = w.document.createElement("strong"), description = w.document.createElement("small"); title.textContent = option.title; description.textContent = option.description; copy.append(title, description); label.append(input, copy); return label;
+    }));
+  } } });
+  if (options.reactRunAgentMode) Object.assign(w, { tokenCouponRunAgentMode: { render(model: { options: Array<{ id: string; label: string; disabled: boolean }>; selectedMode: string }, onChange: (mode: "plan" | "unified" | "per-task") => void) {
+    const root = w.document.getElementById("run-agent-mode-root")!;
+    const select = w.document.createElement("select"); select.id = "run-agent-mode";
+    select.replaceChildren(...model.options.map(option => { const item = new w.Option(option.label, option.id); item.disabled = option.disabled; return item; }));
+    select.value = model.selectedMode; select.onchange = () => onChange(select.value as "plan" | "unified" | "per-task"); root.replaceChildren(select);
+  } } });
+  if (options.reactAgentSelection) Object.assign(w, { tokenCouponAgentSelectionControls: { render(mount: HTMLElement, model: { runners: Array<{ id: string; label: string; disabled: boolean }>; selectedRunnerId: string; modelChoices: Array<{ id: string; label: string }>; selectedModelChoice: string; modelId: string; showCustomModel: boolean; hint: string }, callbacks: { onRunnerChange: (id: string) => void; onModelChoice: (id: string) => void; onModelInput: (value: string) => void; onRefresh: () => void }) {
+    let root = mount.querySelector<HTMLElement>(".agent-selection-controls"), runner: HTMLSelectElement, choice: HTMLSelectElement, input: HTMLInputElement, refresh: HTMLButtonElement, hint: HTMLElement;
+    if (!root) {
+      root = w.document.createElement("div"); root.className = "agent-selection-controls";
+      const fields = w.document.createElement("div"); fields.className = "settings-grid task-agent-config-fields";
+      const runnerLabel = w.document.createElement("label"); runnerLabel.append(w.document.createTextNode("Runner"));
+      runner = w.document.createElement("select"); runner.dataset.field = "runner"; runner.onchange = () => callbacks.onRunnerChange(runner.value); runnerLabel.append(runner);
+      const modelLabel = w.document.createElement("label"); modelLabel.append(w.document.createTextNode("模型"));
+      choice = w.document.createElement("select"); choice.dataset.field = "model-choice"; choice.onchange = () => callbacks.onModelChoice(choice.value);
+      input = w.document.createElement("input"); input.dataset.field = "model"; input.oninput = () => callbacks.onModelInput(input.value);
+      refresh = w.document.createElement("button"); refresh.type = "button"; refresh.textContent = "刷新模型"; refresh.onclick = () => callbacks.onRefresh();
+      modelLabel.append(choice, input, refresh); fields.append(runnerLabel, modelLabel); root.append(fields);
+      hint = w.document.createElement("p"); hint.className = "hint"; root.append(hint); mount.append(root);
+    } else {
+      runner = root.querySelector('[data-field="runner"]')!; choice = root.querySelector('[data-field="model-choice"]')!; input = root.querySelector('[data-field="model"]')!; refresh = root.querySelector("button")!; hint = root.querySelector(".hint")!;
+    }
+    runner.replaceChildren(...model.runners.map(item => { const option = new w.Option(item.label, item.id); option.disabled = item.disabled; return option; })); runner.value = model.selectedRunnerId;
+    choice.replaceChildren(...model.modelChoices.map(item => new w.Option(item.label, item.id))); choice.value = model.selectedModelChoice;
+    input.value = model.modelId; input.hidden = !model.showCustomModel; hint.textContent = model.hint;
+  }, unmount(mount: HTMLElement) { mount.replaceChildren(); } } });
+  if (options.reactRuntimeModels) Object.assign(w, { tokenCouponRuntimeModelControls: { render(model: { tasks: Array<{ id: string; label: string }>; selectedTaskId: string; models: Array<{ id: string; label: string }>; selectedModelId: string; customModelId: string }, callbacks: { onTaskChange: (id: string) => void; onModelChange: (id: string) => void; onCustomModelChange: (value: string) => void }) {
+    const root = w.document.getElementById("runtime-model-controls-root")!;
+    let task = root.querySelector<HTMLSelectElement>("#runtime-model-task"), choice = root.querySelector<HTMLSelectElement>("#runtime-model-choice"), custom = root.querySelector<HTMLInputElement>("#runtime-model-custom");
+    if (!task || !choice || !custom) {
+      root.innerHTML = '<div class="settings-grid"><label>目标任务<select id="runtime-model-task"></select></label><label>模型<select id="runtime-model-choice"></select></label><label id="runtime-model-custom-wrap">自定义模型 ID<input id="runtime-model-custom"></label></div>';
+      task = root.querySelector("#runtime-model-task")!; choice = root.querySelector("#runtime-model-choice")!; custom = root.querySelector("#runtime-model-custom")!;
+    }
+    task.replaceChildren(...model.tasks.map(item => new w.Option(item.label, item.id))); task.value = model.selectedTaskId; task.onchange = () => callbacks.onTaskChange(task!.value);
+    choice.replaceChildren(...model.models.map(item => new w.Option(item.label, item.id))); choice.value = model.selectedModelId; choice.onchange = () => callbacks.onModelChange(choice!.value);
+    custom.value = model.customModelId; custom.oninput = () => callbacks.onCustomModelChange(custom!.value);
+    custom.parentElement!.classList.toggle("hidden", model.selectedModelId !== "__custom__");
+  } } });
+  if (options.reactSystemPolicyRouting) Object.assign(w, { tokenCouponSystemPolicyRouting: { render(mount: HTMLElement, model: { priority: "web" | "agent"; webSource: "chatgpt" | "claude" }, callbacks: { onPriorityChange: (priority: "web" | "agent") => void; onWebSourceChange: (source: "chatgpt" | "claude") => void }) {
+    let priority = mount.querySelector<HTMLSelectElement>('[data-field="priority"]'), source = mount.querySelector<HTMLSelectElement>('[data-field="web-source"]');
+    if (!priority || !source) {
+      mount.innerHTML = '<label>默认方式<select data-field="priority"><option value="web">网页优先</option><option value="agent">指定 Agent 优先</option></select></label><label>默认网页<select data-field="web-source"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option></select></label>';
+      priority = mount.querySelector('[data-field="priority"]')!; source = mount.querySelector('[data-field="web-source"]')!;
+    }
+    priority.value = model.priority; priority.onchange = () => callbacks.onPriorityChange(priority!.value as "web" | "agent");
+    source.value = model.webSource; source.onchange = () => callbacks.onWebSourceChange(source!.value as "chatgpt" | "claude");
+    source.parentElement!.classList.toggle("hidden", model.priority !== "web");
+  }, unmount(mount: HTMLElement) { mount.replaceChildren(); } } });
+  if (options.reactRunAdvanced) Object.assign(w, { tokenCouponRunParameters: { render(model: { parallelOptions: Array<{ id: string; label: string }>; selectedParallel: string; isolationOptions: Array<{ id: string; label: string }>; selectedIsolation: string; verificationOptions: Array<{ id: string; label: string }>; selectedVerification: string; showVerification: boolean }, onChange: (field: "parallel" | "isolation" | "verification", value: string) => void) {
+    const root = w.document.getElementById("run-advanced-options-root")!;
+    const grid = w.document.createElement("div"); grid.className = "settings-grid advanced-grid";
+    const addSelect = (id: string, labelText: string, options: Array<{ id: string; label: string }>, selected: string, field: "parallel" | "isolation" | "verification", hidden = false) => {
+      const label = w.document.createElement("label"); if (id === "run-verification") { label.id = "run-verification-wrap"; if (hidden) label.className = "hidden"; }
+      const select = w.document.createElement("select"); select.id = id; select.replaceChildren(...options.map(option => new w.Option(option.label, option.id))); select.value = selected; select.onchange = () => onChange(field, select.value);
+      label.append(w.document.createTextNode(labelText), select); grid.append(label);
+    };
+    addSelect("run-parallel", "任务并发", model.parallelOptions, model.selectedParallel, "parallel");
+    addSelect("run-isolation", "任务隔离", model.isolationOptions, model.selectedIsolation, "isolation");
+    addSelect("run-verification", "最终验证任务", model.verificationOptions, model.selectedVerification, "verification", !model.showVerification);
+    root.replaceChildren(grid);
+  } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined; w.confirm = () => true;
-  w.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); }; w.HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
+  w.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); }; w.HTMLDialogElement.prototype.close = function () { if (!this.hasAttribute("open")) return; this.removeAttribute("open"); this.dispatchEvent(new w.Event("close")); };
   const workspaces = options.empty ? [] : [{ workspaceId: "project", label: "排课后端", path: "/projects/排课后端" }];
   if (options.multiple) workspaces.push({ workspaceId: "other", label: "其他项目", path: "/projects/other" });
   const nativeCalls: any[] = [], nativeResults: any = { directory: { cancelled: false, paths: ["/projects/新项目"] }, files: { cancelled: false, paths: ["README.md"] } };
   let settings = options.settings;
+  const components = structuredClone(options.agentComponents || []);
   let pendingInteractions: any[] = [];
   let gitStatus: any = { state: options.gitState || "ready", message: options.gitState === "not_repository" ? "此文件夹还不是 Git 仓库" : "Git 已就绪", commands: ["git init"] };
   const tasks = [
@@ -399,6 +546,11 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       const body = JSON.parse(String(init.body));
       if (path === "/api/v1/native-picker") { nativeCalls.push(body); return Response.json(nativeResults[body.kind]); }
       posts.push({ path, body });
+      if (path.startsWith("/api/v1/agent-components/")) {
+        const component = components.find(item => item.id === path.split("/")[4]);
+        component.operation = { operationId: "install-test-operation", phase: path.endsWith("/cancel") ? "cancelled" : "installing", message: path.endsWith("/cancel") ? "安装已取消" : "正在下载官方组件" };
+        return Response.json(component);
+      }
       if (path === "/api/v1/settings") { settings = { ...body, revision: body.revision + 1, initialized: true }; return Response.json(settings); }
       if (path.includes("/interactions/")) { pendingInteractions = []; return Response.json({ ok: true }); }
       if (path === "/api/v1/workspaces") { const added = { workspaceId: "folder-project", path: body.path, label: body.label || "新项目" }; workspaces.push(added); return Response.json(added); }
@@ -425,7 +577,8 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
       }
       throw new Error(`unexpected POST ${path}`);
     }
-    if (path.endsWith("/health")) return Response.json({ epoch: "test", ...(options.legacyDaemon ? {} : { capabilities: { executionSelection: 1, ...(settings ? { systemSettings: 1, operationRouting: 1 } : {}) } }), workspaceEnvironment: { currentDirectory: "/projects" }, mcp: { localReady: true, url: "http://127.0.0.1:4177/mcp" } });
+    if (path.endsWith("/health")) return Response.json({ epoch: "test", ...(options.legacyDaemon ? {} : { capabilities: { executionSelection: 1, ...(options.agentComponents ? { agentComponents: 1 } : {}), ...(settings ? { systemSettings: 1, operationRouting: 1 } : {}) } }), workspaceEnvironment: { currentDirectory: "/projects" }, mcp: { localReady: true, url: "http://127.0.0.1:4177/mcp" } });
+    if (path === "/api/v1/agent-components") return Response.json(components);
     if (path === "/api/v1/settings") return Response.json(settings);
     if (path === "/api/v1/workspaces") return Response.json(workspaces);
     if (path.endsWith("/git")) return Response.json(gitStatus);
@@ -443,13 +596,296 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     if (path.endsWith("/repository")) return url.searchParams.get("tool") === "repo_read" ? Response.json({ path: "README.md", startLine: 1, content: "1: <img src=x onerror=alert(1)>\n2: 项目说明", sha256: "a".repeat(64), truncated: false }) : Response.json({ path: ".", entries: [{ name: "README.md", type: "file" }], nextOffset: null });
     throw new Error(`unexpected GET ${path}`);
   };
-  w.eval(script + "\nwindow.__testState = state;");
+  Object.assign(w, { createClient: () => createClient({ fetch: ((path, options) => w.fetch(String(path), options)) as typeof fetch, eventSource: (path) => new w.EventSource(path) }) });
+  w.eval(clientScript.replace(/^import .*;$/m, "")); w.eval(script + "\nwindow.__testState = state;");
   const element = (id: string) => w.document.getElementById(id)!;
   const visible = (id: string) => { for (let node: Element | null = element(id); node; node = node.parentElement) if (node.classList.contains("hidden")) return false; return true; };
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
-  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
+  await expect.poll(() => (w as any).__testState.initialized).toBe(true);
+  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopFolderPaths, desktopExplorerCalls, desktopNotificationCalls, desktopReconnectCalls, desktopRecoveryAcknowledged, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
+
+it("reconnects through desktop IPC and preserves drafts on failure without submitting business writes", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/draft", ready: true, desktopReconnect: true });
+  h.element("toggle-plan-edit").click();
+  const title = h.element("plan-text-editor").querySelector("input")!;
+  title.value = "未提交的计划标题"; title.dispatchEvent(new h.w.Event("input", { bubbles: true }));
+  (h.element("request-text") as HTMLTextAreaElement).value = "未提交需求";
+  (h.element("reply-text") as HTMLTextAreaElement).value = "未发送澄清";
+  h.w.localStorage.setItem("tc-run:project:first", "retained configuration");
+  h.w.localStorage.setItem("unrelated-secret", "must not transfer");
+  h.w.sessionStorage.setItem("tc-review-project", "review preference");
+  h.w.dispatchEvent(new h.w.CustomEvent("token-coupon:desktop-connection", { detail: { phase: "disconnected", error: "后台退出" } }));
+  expect(h.visible("desktop-connection-banner")).toBe(true);
+  h.element("reconnect").click();
+  await expect.poll(() => h.desktopReconnectCalls.length).toBe(1);
+  await expect.poll(() => h.element("desktop-connection-message").textContent).toContain("重连未完成");
+  expect(title.value).toBe("未提交的计划标题"); expect(h.posts).toHaveLength(0);
+  const saved = JSON.parse(h.desktopReconnectCalls[0]!);
+  expect(saved.storage.local).toContainEqual(["tc-run:project:first", "retained configuration"]);
+  expect(JSON.stringify(saved)).not.toContain("must not transfer");
+  expect(saved.requestText).toBe("未提交需求");
+  expect(saved.inputs.find((input: any) => input.kind === "reply").text).toBe("未发送澄清");
+  const plan = saved.inputs.find((input: any) => input.kind === "plan");
+  expect(JSON.parse(plan.text).title).toBe("未提交的计划标题");
+  plan.base.hash = "older-draft"; plan.base.revision = 99;
+  const restored = await page({ hash: saved.route, ready: true, desktopRecovery: JSON.stringify(saved) });
+  await expect.poll(() => restored.desktopRecoveryAcknowledged.length).toBe(1);
+  expect(restored.w.localStorage.getItem("tc-run:project:first")).toBe("retained configuration");
+  expect(restored.w.sessionStorage.getItem("tc-review-project")).toBe("review preference");
+  expect(restored.w.localStorage.getItem("unrelated-secret")).toBeNull();
+  expect((restored.element("request-text") as HTMLTextAreaElement).value).toBe("未提交需求");
+  expect((restored.element("reply-text") as HTMLTextAreaElement).value).toBe("未发送澄清");
+  expect(restored.element("plan-text-editor").querySelector("input")!.value).toBe("未提交的计划标题");
+  expect(restored.element("plan-edit-status").textContent).toContain("当前草案已更新");
+  expect((restored.w as any).__testState.editBase).toMatchObject({ hash: "older-draft", revision: 99 });
+  expect(restored.posts).toHaveLength(0);
+});
+
+it("retains recovery text for another plan until explicitly restored in the matching context", async () => {
+  const saved = JSON.stringify({ version: 1, route: "#/workspaces/project/plans/first/draft", requestText: "恢复的需求", inputs: [{ kind: "reply", workspaceId: "project", planningId: "second", text: "只属于第二个计划" }] });
+  const h = await page({ hash: "#/workspaces/project/plans/first/draft", ready: true, desktopRecovery: saved });
+  expect(h.desktopRecoveryAcknowledged).toHaveLength(0);
+  expect((h.element("reply-text") as HTMLTextAreaElement).value).not.toBe("只属于第二个计划");
+  (h.element("request-text") as HTMLTextAreaElement).value = "恢复后继续编辑的需求";
+  h.w.location.hash = "#/workspaces/project/plans/second/draft";
+  await expect.poll(() => (h.w as any).__testState.planning?.planningId).toBe("second");
+  h.element("desktop-restore-inputs").click();
+  await expect.poll(() => h.desktopRecoveryAcknowledged.length).toBe(1);
+  expect((h.element("reply-text") as HTMLTextAreaElement).value).toBe("只属于第二个计划");
+  expect((h.element("request-text") as HTMLTextAreaElement).value).toBe("恢复后继续编辑的需求");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("installs optional Agent components only after reviewing the fixed package and explicit consent, and shows cancellable progress", async () => {
+  const h = await page({ hash: "#/settings", settings: defaultSystemSettings(), agentComponents: [{ id: "claude-code", label: "Claude Code", package: "@anthropic-ai/claude-code-linux-x64", version: "2.1.308", docs: "https://code.claude.com/docs/en/setup", installDirectory: "/home/test/.token-coupon/agents/claude-code/current", available: false, canInstall: true }] });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("尚未就绪");
+  expect(h.posts).toHaveLength(0);
+  const install = h.element("agent-components-list").querySelector<HTMLButtonElement>("button")!; install.click();
+  expect(h.element("agent-component-dialog").hasAttribute("open")).toBe(true);
+  expect(h.element("agent-component-install-details").textContent).toContain("@anthropic-ai/claude-code-linux-x64");
+  expect((h.element("agent-component-install-confirm") as HTMLButtonElement).disabled).toBe(true); h.element("agent-component-install-confirm").click(); expect(h.posts).toHaveLength(0);
+  (h.element("agent-component-consent") as HTMLInputElement).checked = true; h.element("agent-component-consent").dispatchEvent(new h.w.Event("change")); h.element("agent-component-install-confirm").click();
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toEqual({ path: "/api/v1/agent-components/claude-code/install", body: { confirmed: true } });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("正在下载官方组件");
+  expect(h.element("agent-component-dialog").hasAttribute("open")).toBe(false);
+  [...h.element("agent-components-list").querySelectorAll("button")].find(button => button.textContent === "取消安装")!.click();
+  await expect.poll(() => h.posts.length).toBe(2); expect(h.posts[1]).toMatchObject({ path: "/api/v1/agent-components/claude-code/cancel", body: { operationId: "install-test-operation" } });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("安装已取消");
+});
+it("reuses local Agents without installation, offers manual instructions, and hides the component panel for older daemons", async () => {
+  const h = await page({ hash: "#/settings", settings: defaultSystemSettings(), agentComponents: [{ id: "codex", label: "Codex", package: "@openai/codex", version: "0.163.0", docs: "https://developers.openai.com/codex/cli/", installDirectory: "/home/test/.token-coupon/agents/codex/current", available: true, source: "local", executable: "/usr/local/bin/codex", canInstall: false, operation: { phase: "failed", message: "以前的安装失败提示" } }] });
+  await expect.poll(() => h.element("agent-components-list").textContent).toContain("复用本机工具");
+  expect(h.element("agent-components-list").textContent).toContain("/usr/local/bin/codex");
+  expect(h.element("agent-components-list").textContent).not.toContain("以前的安装失败提示");
+  expect([...h.element("agent-components-list").querySelectorAll("button")].some(button => button.textContent === "按需安装")).toBe(false);
+  h.element("agent-components-list").querySelector<HTMLButtonElement>("button")!.click(); await expect.poll(() => h.copied.length).toBe(1);
+  expect(h.copied[0]).toBe("'/usr/local/bin/codex'"); expect(h.posts).toHaveLength(0);
+  const older = await page({ hash: "#/settings", settings: defaultSystemSettings() });
+  expect(older.visible("agent-components")).toBe(false); expect(older.reads).not.toContain("/api/v1/agent-components");
+});
+it("keeps quick navigation usable when the compiled React entry is unavailable", async () => {
+  const h = await page({ ready: true });
+  h.element("command-palette-open").click();
+  const dialog = h.element("command-palette") as HTMLDialogElement;
+  expect(dialog.open).toBe(true);
+  expect(h.element("command-palette-results").querySelectorAll('[role="option"]').length).toBeGreaterThan(0);
+
+  const input = h.element("command-palette-query") as HTMLInputElement;
+  input.value = "连接中心";
+  input.dispatchEvent(new h.w.Event("input", { bubbles: true }));
+  const options = h.element("command-palette-results").querySelectorAll<HTMLButtonElement>('[role="option"]');
+  expect(options).toHaveLength(1);
+  options[0]!.click();
+  await expect.poll(() => h.w.location.hash).toBe("#/connect");
+  expect(dialog.open).toBe(false);
+});
+
+it("passes workspace state to the React switcher and keeps selection in the existing router", async () => {
+  const h = await page({ ready: true });
+  let received: any;
+  (h.w as any).tokenCouponWorkspaceSwitcher = {
+    render: (workspaces: any[], selectedWorkspaceId: string | undefined, onSelect: (id: string) => void) => {
+      received = { workspaces, selectedWorkspaceId, onSelect };
+    },
+  };
+  h.w.eval("renderWorkspaces()");
+  expect(received.workspaces).toMatchObject([{ workspaceId: "project", label: "排课后端", path: "/projects/排课后端" }]);
+  expect(received.selectedWorkspaceId).toBeUndefined();
+  received.onSelect("project");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project");
+  expect(received.selectedWorkspaceId).toBe("project");
+});
+
+it("passes plan summaries to the React navigation and preserves existing plan/tool routes", async () => {
+  const h = await page({ hash: "#/workspaces/project", ready: true });
+  await expect.poll(() => h.w.eval("__testState?.plannings?.length")).toBe(2);
+  let received: any;
+  (h.w as any).tokenCouponPlanningSwitcher = {
+    render: (items: any[], activeTool: string | undefined, onSelect: (id: string) => void, onOpenTool: (id: string, tab: string) => void, onToolsToggle: (id: string, expanded: boolean) => void) => {
+      received = { items, activeTool, onSelect, onOpenTool, onToolsToggle };
+    },
+  };
+  h.w.eval("renderPlanningList()");
+  expect(received.items).toHaveLength(2);
+  expect(received.items[0]).toMatchObject({ planningId: "first", title: "计划 first", taskCount: 5, selected: false });
+  received.onSelect("first");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first");
+  await expect.poll(() => received.items.find((item: any) => item.planningId === "first")?.selected).toBe(true);
+  received.onOpenTool("first", "attempts");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/attempts");
+  received.onToolsToggle("first", true);
+  h.w.eval("renderPlanningList()");
+  expect(received.items.find((item: any) => item.planningId === "first")?.toolsExpanded).toBe(true);
+});
+
+it("passes review findings to the React view and persists the chosen revision guidance", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/review", ready: true });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  h.w.eval(`__testState.planning.review.findings = [{ findingId: "F1", severity: "warning", description: "缺少错误响应测试", suggestion: "补充 400 响应测试", basis: "接口契约没有负向测试" }]; __testState.renderedReviewSignature = undefined;`);
+  let received: any;
+  (h.w as any).tokenCouponReviewView = {
+    render: (model: any, onChoiceChange: (id: string, choice: any) => void) => { received = { model, onChoiceChange }; },
+    setErrors: () => undefined,
+  };
+  h.w.eval("renderReview()");
+  expect(received.model.findings).toMatchObject([{ findingId: "F1", severity: "warning", suggestion: "补充 400 响应测试" }]);
+  expect(received.model.canChoose).toBe(true);
+  received.onChoiceChange("F1", { choice: "custom", custom: "增加错误响应断言" });
+  const storageKey = h.w.eval("`tc-review-${__testState.reviewChoiceContext.key}`");
+  expect(JSON.parse(h.w.sessionStorage.getItem(storageKey)!)).toMatchObject({ F1: { choice: "custom", custom: "增加错误响应断言" } });
+});
+
+it("passes structured and legacy task fields to the React draft view while retaining old-plan compatibility", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/draft" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  const structuredTask = {
+    schemaVersion: 2, id: "spec", title: "接口与数据库设计", objective: "定义排课接口", approach: "使用 SQLite",
+    steps: ["整理实体", "定义接口"], deliverables: ["接口文档"], acceptanceCriteria: ["CRUD 可验证"], constraints: ["不增加前端"],
+    execution: { runnerId: "codex", mode: "managed", modelId: "fast-model" },
+  };
+  h.w.eval(`__testState.planning.draft.plan.tasks[0].task = ${JSON.stringify(structuredTask)}`);
+  let received: any;
+  (h.w as any).tokenCouponPlanDraftView = { render: (model: unknown) => { received = model; } };
+  h.w.eval("renderDraft()");
+  expect(received.tasks).toHaveLength(5);
+  expect(received.tasks[0]).toMatchObject({
+    taskId: "spec", title: "接口与数据库设计", schemaLabel: "结构化任务", runnerLabel: "Codex", modelLabel: "fast-model",
+    sections: [
+      { label: "需求目标", value: "定义排课接口" },
+      { label: "设计与技术方案", value: "使用 SQLite" },
+      { label: "实施步骤", value: ["整理实体", "定义接口"] },
+      { label: "交付物", value: ["接口文档"] },
+      { label: "验收标准", value: ["CRUD 可验证"] },
+      { label: "约束", value: ["不增加前端"] },
+    ],
+  });
+  expect(received.tasks[1]).toMatchObject({ schemaLabel: "旧版正文", sections: [{ label: "任务正文", value: "代码正文按需展开" }] });
+});
+
+it("passes the current plan metrics and primary action through the React overview bridge", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  let received: any;
+  (h.w as any).tokenCouponPlanOverview = { render: (model: unknown, onPrimaryAction: () => void, onResume: () => void) => { received = { model, onPrimaryAction, onResume }; } };
+  h.w.eval("renderPlanOverview()");
+  expect(received.model).toMatchObject({ stage: "待核对与批准", taskCount: 5, completedTaskCount: 0, reviewStatus: "有效", primaryActionLabel: "核对并批准", resumeDisabled: false });
+  received.onPrimaryAction();
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/review");
+});
+
+it("uses the React plan tabs bridge for active navigation while preserving the current route actions", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/review" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  let received: any;
+  (h.w as any).tokenCouponPlanTabs = { render: (selectedTab: string, onSelect: (tab: string) => void) => { received = { selectedTab, onSelect }; } };
+  h.w.eval("renderRoute()");
+  expect(received.selectedTab).toBe("review");
+  received.onSelect("execution");
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/execution");
+  expect(received.selectedTab).toBe("execution");
+});
+
+it("passes recent conversation and pending webpage replies to the React message list", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first" });
+  await expect.poll(() => h.w.eval("__testState?.planning?.planningId")).toBe("first");
+  h.w.eval(`__testState.planning.messages = [
+    { messageId: "user-turn", role: "user", content: "确认技术默认方案" },
+    { messageId: "planner-turn", role: "assistant", content: "草案已生成" }
+  ]; __testState.planning.externalOperations = [{ operationId: "op-pending", sourceMessageId: "pending-turn", role: "plan", state: "prepared", message: "补充接口异常场景" }];`);
+  let received: any;
+  (h.w as any).tokenCouponConversationView = { render: (model: unknown) => { received = model; } };
+  h.w.eval("renderPlanning()");
+  expect(received.count).toBe(3);
+  expect(received.messages).toMatchObject([
+    { messageId: "user-turn", roleClass: "user", label: "你", content: "确认技术默认方案" },
+    { messageId: "planner-turn", roleClass: "assistant", label: "Planner", content: "草案已生成" },
+    { messageId: "pending-turn", roleClass: "user", label: "你 · 已登记，等待网页", content: "补充接口异常场景" },
+  ]);
+});
+
+it("uses native desktop copying even when the browser refuses clipboard access", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  const copied: string[] = [];
+  Object.assign(h.w, { tokenCouponDesktop: { copyText: async (text: string) => { copied.push(text); } } });
+  h.w.navigator.clipboard.writeText = async () => { throw new Error("browser denied"); };
+  await h.w.eval('copyText("本机直接复制")');
+  expect(copied).toEqual(["本机直接复制"]);
+  expect(h.visible("page-error")).toBe(false);
+});
+
+it("uses browser copy-command fallback before asking for manual copying", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  h.w.navigator.clipboard.writeText = async () => { throw new Error("browser denied"); };
+  let selected = "";
+  Object.assign(h.w.document, { execCommand: (command: string) => { selected = (h.w.document.activeElement as HTMLTextAreaElement).value; return command === "copy"; } });
+  await h.w.eval('copyText("浏览器兼容复制")');
+  expect(selected).toBe("浏览器兼容复制");
+  expect(h.w.document.querySelector('[aria-hidden="true"][style]')).toBeNull();
+});
+
+it("shows manual clipboard guidance without reporting an operation failure", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  h.w.navigator.clipboard.writeText = async () => { throw new Error("clipboard denied"); };
+  h.element("remote-copy").click();
+  await expect.poll(() => h.element("action-feedback").dataset.kind).toBe("warning");
+  expect(h.visible("page-error")).toBe(false);
+  expect(h.element("action-feedback-title").textContent).toBe("请手动复制");
+  expect(h.element("action-feedback-text").textContent).toContain("Ctrl+C");
+  const url = h.element("remote-mcp-url") as HTMLInputElement;
+  expect(url.selectionEnd! - url.selectionStart!).toBe(url.value.length);
+  h.w.eval('showCopyFallback("复制提示", "示例文本")');
+  h.element("copy-fallback-copy").click();
+  await expect.poll(() => h.element("copy-fallback-description").classList.contains("notice-warn")).toBe(true);
+  expect(h.element("copy-fallback-description").textContent).toContain("Ctrl+C");
+  expect(h.visible("page-error")).toBe(false);
+  expect((h.element("copy-fallback-dialog") as HTMLDialogElement).open).toBe(true);
+  const text = h.element("copy-fallback-text") as HTMLTextAreaElement;
+  expect(text.selectionEnd - text.selectionStart).toBe(text.value.length);
+  h.element("copy-fallback-close").click();
+  h.w.eval('showCopyFallback("再次复制", "新的文本")');
+  expect(h.element("copy-fallback-description").className).toBe("hint");
+  h.element("copy-fallback-close").click();
+  h.w.eval('showToast("构建失败", true, "execution")');
+  expect(h.visible("page-error")).toBe(true);
+});
+
+it("distinguishes ingress receipt, HTTP rejection and interrupted connections in the diagnostics view", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  h.setRemote({ gatewayTracing: { enabled: true, lastRequestAt: Date.now() }, recentCalls: [
+    { traceId: "one", at: Date.now(), stage: "ingress", requestState: "received", httpMethod: "POST", route: "/mcp", authorization: "missing" },
+    { traceId: "one", at: Date.now(), stage: "ingress", requestState: "completed", httpMethod: "POST", route: "/mcp", httpStatus: 401, code: "oauth_authorization_required" },
+    { traceId: "two", at: Date.now(), stage: "ingress", requestState: "aborted", httpMethod: "POST", route: "/mcp", code: "gateway_connection_aborted" },
+  ] });
+  h.element("refresh").click();
+  await expect.poll(() => h.element("connection-recent-calls").textContent).toContain("入口已收到");
+  expect(h.element("connection-recent-calls").textContent).toContain("响应已完成");
+  expect(h.element("connection-recent-calls").textContent).toContain("HTTP 401");
+  expect(h.element("connection-recent-calls").textContent).toContain("连接中断");
+  expect(h.element("connection-tracing-status").textContent).toContain("尚未收到工具调用");
+});
 
 it("keeps workspace authorization visible after a grant and when transport is stopped", async () => {
   const h = await page({ hash: "#/workspaces/project/settings", ready: true });
@@ -492,6 +928,25 @@ it("explains cold-start validation and scheduled recovery without claiming readi
   h.setRemote({ transport: "error", busy: false, startupReadiness: undefined, nextProbeAt: Date.now() + 30000, lastError: "remote_probe_startup_timeout", probeCheck: { state: "failed" } }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-progress").textContent).toContain("秒后自动复检");
   expect(h.visible("page-error")).toBe(true);
+});
+
+it("keeps Git run blockers visible and translates untracked-file preview codes", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  h.setGitStatus({ state: "dirty", message: "仓库还有未提交变更，请预览后确认提交。", changes: [{ path: "src/new.mjs", code: "??", runtime: false, staged: false }] });
+  h.element("git-refresh").click();
+  await expect.poll(() => h.element("run-configuration-error").textContent).toContain("未提交变更");
+  expect(h.element("run-configuration-error").classList.contains("is-git-blocked")).toBe(true);
+  expect(h.element("run-configuration-error").classList.contains("hint")).toBe(false);
+  expect((h.element("run-button") as HTMLButtonElement).disabled).toBe(true);
+  const original = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => raw.endsWith("/git/preview") ? Response.json({ mode: "selected", paths: ["src/new.mjs"], fingerprint: "a".repeat(64), head: "b".repeat(40), suggestedMessage: "feat: add module", previews: [{ path: "src/new.mjs", code: "??", text: "export const value = 1;" }] }) : original(raw, init)) as any;
+  const checkbox = h.element("git-file-list").querySelector<HTMLInputElement>('input[data-file-path]')!;
+  checkbox.checked = true; checkbox.dispatchEvent(new h.w.Event("change"));
+  h.element("git-preview-selected").click();
+  await expect.poll(() => h.element("git-preview-dialog").hasAttribute("open")).toBe(true);
+  expect(h.element("git-preview-content").querySelector("summary")?.textContent).toBe("新文件 · 尚未跟踪src/new.mjs");
+  expect(h.element("git-preview-content").textContent).not.toContain("??");
+  expect(h.posts.some(item => item.path.endsWith("/git/commit") || item.path.endsWith("/run"))).toBe(false);
 });
 
 it("continues staged runtime cleanup through preview and explicit local commit without starting execution", async () => {
@@ -766,17 +1221,18 @@ it("requires an updated backend before enabling launch model overrides", async (
 });
 
 it("launches one unified model with a task-specific exception without modifying the approved draft", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunAgentMode: true, reactAgentSelection: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const original = JSON.stringify(h.plans[0]);
   h.w.eval('__testState.runners=[{id:"codex",available:true},{id:"claude-code",available:true},{id:"mock",available:true}]');
-  const fetch = h.w.fetch;
-  h.w.fetch = (async (raw: string, init?: any) => raw.includes("/models?") ? Response.json({ models: raw.includes("/codex/") ? [{ id: "gpt-6-luna" }] : [{ id: "deepseek-flash" }], customAllowed: true }) : fetch(raw, init)) as any;
+  const fetch = h.w.fetch, modelRequests: string[] = [];
+  h.w.fetch = (async (raw: string, init?: any) => { if (raw.includes("/models?")) { modelRequests.push(raw); return Response.json({ models: raw.includes("/codex/") ? [{ id: "gpt-6-luna" }] : [{ id: "deepseek-flash" }], customAllowed: true }); } return fetch(raw, init); }) as any;
   const mode = h.element("run-agent-mode") as HTMLSelectElement; mode.value = "unified"; mode.dispatchEvent(new h.w.Event("change"));
   const defaults = h.element("run-agent-defaults"), runner = defaults.querySelector<HTMLSelectElement>('[data-field="runner"]')!;
   runner.value = "codex"; runner.dispatchEvent(new h.w.Event("change"));
   const model = defaults.querySelector<HTMLSelectElement>('[data-field="model-choice"]')!;
-  await expect.poll(() => [...model.options].map(item => item.value)).toContain("gpt-6-luna"); model.value = "gpt-6-luna"; model.dispatchEvent(new h.w.Event("change"));
+  await expect.poll(() => modelRequests).toContainEqual(expect.stringContaining("/codex/models?"));
+  await expect.poll(() => [...model.options].map(item => item.value)).toContain("gpt-6-luna"); expect(modelRequests.some(raw => raw.includes("/codex/"))).toBe(true); model.value = "gpt-6-luna"; model.dispatchEvent(new h.w.Event("change"));
   const row = h.element("run-agent-task-list").querySelector<HTMLDetailsElement>('[data-task-id="verify"]')!; row.open = true; row.dispatchEvent(new h.w.Event("toggle"));
   const override = row.querySelector<HTMLInputElement>('[data-task-override]')!; override.checked = true; override.dispatchEvent(new h.w.Event("change"));
   const taskRunner = row.querySelector<HTMLSelectElement>('[data-field="runner"]')!; taskRunner.value = "claude-code"; taskRunner.dispatchEvent(new h.w.Event("change"));
@@ -808,7 +1264,7 @@ it("remembers per-task launch choices for their own plan and keeps other tasks o
 });
 
 it("selects only the graph-valid final verifier and requires an explicit run after approval", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunAdvanced: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const options = [...h.element("run-verification").querySelectorAll("option")].map(item => (item as HTMLOptionElement).value);
   expect(options).toEqual(["verify"]);
@@ -833,11 +1289,12 @@ it("moves to execution setup after approval and never launches until the user co
 });
 
 it("preserves custom launch settings and protects them before opening a new OAuth request", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRunMode: true, reactRunAdvanced: true });
   await expect.poll(() => h.visible("run-configuration")).toBe(true);
   const custom = h.w.document.querySelector<HTMLInputElement>('input[name="run-mode-choice"][value="custom"]')!;
   custom.checked = true; custom.dispatchEvent(new h.w.Event("change", { bubbles: true }));
   (h.element("run-isolation") as HTMLSelectElement).value = "shared"; h.element("run-isolation").dispatchEvent(new h.w.Event("change"));
+  expect(h.w.eval('__testState.runConfiguration.mode')).toBe("custom");
   expect((h.element("run-parallel") as HTMLSelectElement).value).toBe("1");
   h.setApprovals([{ requestId: "auth-during-edit", clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", requestedScopes: ["planning:read"], createdAt: Date.now(), expiresAt: Date.now() + 60000 }]);
   h.element("refresh").click(); await expect.poll(() => h.element("authorization-arrival").classList.contains("hidden")).toBe(false);
@@ -1011,10 +1468,10 @@ it("distinguishes valid OAuth from actual webpage calls and retains explicit nav
   expect(h.visible("connection-repair")).toBe(false); expect(h.visible("connection-copy-current")).toBe(false);
   expect(h.visible("connection-action-description")).toBe(false);
   h.element("connection-verify-web").click(); await expect.poll(() => h.copied.length).toBe(1);
-  expect(h.copied[0]).toContain("workspace_query"); expect(h.copied[0]).toContain("planningId=second");
+  expect(h.copied[0]).toContain("workspace_query({})"); expect(h.copied[0]).not.toContain("planningId=second"); expect(h.copied[0]).toContain("不调用其他工具");
   expect(h.copied[0]).toContain("不创建 Planning"); expect(h.copied[0]).toContain("不领取或提交审查");
   const lastCall = { traceId: "safe-trace", at: Date.now(), stage: "tool", outcome: "success", tool: "workspace_query", httpStatus: 200 };
-  h.setRemote({ remoteClientVerified: true, clients: [{ ...client, lastCall }], recentCalls: [lastCall], probeCheck: { state: "succeeded", attempt: 1, maxAttempts: 3, background: true, startedAt: Date.now() } });
+  h.setRemote({ remoteClientVerified: true, clients: [{ ...client, toolVerified: true, lastCall, lastSuccess: lastCall }], recentCalls: [lastCall], probeCheck: { state: "succeeded", attempt: 1, maxAttempts: 3, background: true, startedAt: Date.now() } });
   h.element("refresh").click(); await expect.poll(() => h.visible("connection-action-needed")).toBe(false);
   await expect.poll(() => h.element("connection-current-clients").textContent).toContain("最近工具调用成功");
   expect(h.element("connection-recent-calls").textContent).toContain("safe-trace");
@@ -1059,6 +1516,23 @@ it("retests the existing quick address without recreating the connection, revoki
   expect(h.element("reuse-mcp-address").textContent).toBe("https://existing.trycloudflare.com/mcp");
   expect(h.element("connection-client-count").textContent).toContain("1 个有效");
   expect(h.w.location.hash).toBe("#/connect");
+});
+
+it("disables unsupported Windows quick connections while keeping the fixed HTTPS entry available", async () => {
+  const h = await page();
+  const reason = "原生 Windows 暂不支持快捷连接。可继续使用本机 Agent 或固定 HTTPS 网关。";
+  h.setRemote({ quickTunnel: { available: false, reason }, mode: "quick_tunnel", configured: false, enabled: false, gateway: "stopped", transport: "stopped", busy: false });
+  h.element("refresh").click();
+  await expect.poll(() => (h.element("remote-quick") as HTMLButtonElement).disabled).toBe(true);
+  expect(h.element("remote-platform-support").textContent).toBe(reason);
+  expect(h.element("remote-status").textContent).toBe("快捷连接暂不支持");
+  expect((h.element("remote-save") as HTMLButtonElement).disabled).toBe(false);
+  (h.element("quick-consent") as HTMLInputElement).checked = true;
+  h.element("remote-quick").dispatchEvent(new h.w.Event("click")); expect(h.posts).toHaveLength(0);
+  h.setRemote({ mode: "fixed_https", enabled: true, configured: true, gateway: "running", transport: "ready", publicOrigin: "https://mcp.example.test", mcpUrl: "https://mcp.example.test/mcp" });
+  h.element("refresh").click();
+  await expect.poll(() => (h.element("remote-test") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("remote-status").textContent).toContain("公网可用");
 });
 
 it("explains a recovered persistent tunnel without implying an expired grant was restored", async () => {
@@ -1294,7 +1768,7 @@ it("shows latest messages first, live summaries and dependencies without fabrica
 });
 
 it("only changes the execution model after an explicit confirmation and binds the stopped Attempt", async () => {
-  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, reactRuntimeModels: true });
   const plan: any = h.plans[0]; plan.draft.plan.tasks[0].task.execution = { runnerId: "codex", mode: "managed", modelId: "fast" };
   const id = randomUUID(); plan.session = { status: "running", models: { revision: 3, overrides: {} }, health: { state: "active", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", status: "running", execution: { runnerId: "codex" }, activeAttemptId: id, attempts: [] }] };
   const original = h.w.fetch; let calls: any[] = [];
@@ -1326,6 +1800,25 @@ it("requests notification permission only on user action and deduplicates pendin
   h.element("planning-list").querySelectorAll<HTMLButtonElement>(":scope > button")[1]!.click();
   await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/second");
   notes[0].onclick(); await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/execution");
+});
+
+it("persists Electron desktop notification preference and focuses the requested task", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/overview", ready: true, approved: true, desktopPicker: true });
+  h.element("enable-notifications").click();
+  await expect.poll(() => h.desktopNotificationCalls.length).toBe(1);
+  expect(h.desktopNotificationCalls[0]).toMatchObject({ title: "orchestrator-tokenCoupon", body: "桌面提醒已开启。" });
+  expect(h.element("enable-notifications").textContent).toBe("关闭桌面提醒");
+  (h.plans[0] as any).session = { sessionId: "desktop-session", status: "running", tasks: [{ taskId: "spec", title: "接口文档", status: "planned", attempts: [] }] };
+  h.element("refresh").click();
+  await expect.poll(() => h.w.document.querySelector('.task-row[data-task-id="spec"]')).not.toBeNull();
+  Object.defineProperty(h.w.document, "hidden", { configurable: true, value: true });
+  h.w.eval('notifyPendingApprovals([{ requestId: "desktop-request", owner: { taskId: "spec" } }])');
+  await expect.poll(() => h.desktopNotificationCalls.length).toBe(2);
+  expect(h.desktopNotificationCalls[1]).toMatchObject({ workspaceId: "project", planningId: "first", taskId: "spec" });
+  h.w.dispatchEvent(new h.w.CustomEvent("token-coupon:navigate-to-task", { detail: { workspaceId: "project", planningId: "first", taskId: "spec" } }));
+  await expect.poll(() => h.w.location.hash).toBe("#/workspaces/project/plans/first/execution");
+  const row = [...h.w.document.querySelectorAll<HTMLElement>(".task-row")].find(item => item.dataset.taskId === "spec");
+  expect(row?.classList.contains("desktop-notification-focus")).toBe(true);
 });
 
 it("infers the source while keeping workspace selection explicit and preserving manual overrides", async () => {
@@ -1692,6 +2185,387 @@ it("places decisions before tasks and execution returns after tasks, with sideba
   expect(h.element("session-progress").querySelector("progress")!.max).toBeGreaterThan(0);
 });
 
+it("sends the current DAG preview and full-view action to the React bridge", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { status: "running", tasks: [{ taskId: "spec", title: "接口设计", status: "succeeded", dependsOn: [] }, { taskId: "backend", title: "后端实现", status: "running", dependsOn: ["spec"] }] };
+  let received: any;
+  h.w.tokenCouponTaskDependencyPreview = { render(model: any) { if (model) received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  expect(received).toMatchObject({ taskCount: 2, focusLabel: "后端实现", shown: 2 });
+  expect(received.svg.querySelectorAll(".dag-node")).toHaveLength(2);
+  received.onOpen();
+  expect((h.element("dag-dialog") as HTMLDialogElement).open).toBe(true);
+});
+
+it("sends current task cards to the React board bridge while retaining existing task actions", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { status: "failed", health: { state: "exited", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", title: "接口文档", status: "failed", dependsOn: [], attempts: [{ attemptId: "attempt-1" }], currentAttempt: { attemptId: "attempt-1", runnerId: "codex", reportedModel: "gpt-6.1-sol", reason: "退出码 1", activity: "构建失败" } }] };
+  let received: any;
+  h.w.tokenCouponTaskBoard = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  const failed = received.groups.find((group: any) => group.id === "errors").tasks[0];
+  expect(failed).toMatchObject({ taskId: "spec", title: "接口文档", statusLabel: "失败", outcome: "错误结论：任务失败" });
+  expect(failed.runnerModel).toContain("codex / gpt-6.1-sol");
+  expect(failed.actions.map((action: any) => action.label)).toEqual(["查看明细", "查看回复与工具活动", "重试 spec"]);
+  failed.actions[0].onClick();
+  expect((h.element("dag-task-dialog") as HTMLDialogElement).open).toBe(true);
+});
+
+it("sends Session pause and cancel controls through the React bridge", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { status: "running", health: { state: "active", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "backend", status: "running", attempts: [] }] };
+  let received: any;
+  h.w.tokenCouponSessionControls = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received?.buttons?.length).toBe(2);
+  expect(received.buttons.map((button: any) => button.label)).toEqual(["暂停会话", "取消会话"]);
+  expect(received.buttons.every((button: any) => !button.disabled)).toBe(true);
+});
+
+it("sends the current resume decision to React and keeps the existing confirmation dialog", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  (h.plans[0] as any).session = { sessionId: "paused-session", status: "paused", health: { state: "exited", checkedAt: new Date().toISOString() }, tasks: [{ taskId: "spec", title: "接口文档", status: "planned", attempts: [] }] };
+  let received: any;
+  h.w.tokenCouponSessionContinue = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  expect(received).toMatchObject({ label: "从断点继续执行", disabled: false, message: "继续调度剩余任务，保留全部已完成任务。" });
+  received.onContinue();
+  expect((h.element("session-continue-dialog") as HTMLDialogElement).open).toBe(true);
+  expect((h.element("session-continue-target") as HTMLSelectElement).value).toBe("__resume__");
+});
+
+it("publishes pending approval counts and guidance to the React overview bridge", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/execution" });
+  h.setInteractions([
+    { requestId: "question", owner: { runnerId: "codex", taskId: "spec" }, request: { kind: "question", title: "需要确认", questions: [{ id: "scope", text: "是否包含冲突检测？" }] } },
+    { requestId: "approval", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行测试", operation: { command: "npm test" }, cwd: "/workspace" } },
+  ]);
+  let received: any;
+  h.w.tokenCouponPendingApprovalOverview = { render(model: any) { received = model; } } as any;
+  h.element("refresh").click();
+  await expect.poll(() => received?.count).toBe(2);
+  expect(received.summary).toContain("1 项任务提问、1 项工具审批");
+  expect(h.element("pending-approval-box").classList.contains("has-pending")).toBe(true);
+});
+
+it("sends approval reasons and commands to the React text bridge and releases roots before rerender", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  const rendered: any[] = [];
+  let unmounts = 0;
+  h.w.tokenCouponPendingApprovalText = {
+    render(mount: HTMLElement, model: any) { rendered.push(model); mount.textContent = model.text; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: "approval-text", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行测试", summary: "请核对该测试命令是否符合当前环境。", operation: { command: "npm test -- --runInBand" }, cwd: "/workspace" } }]);
+  h.element("refresh").click();
+  await expect.poll(() => rendered.length).toBe(2);
+  expect(rendered.map(item => item.title)).toEqual(["审批说明", "待审批命令"]);
+  expect(rendered[1]).toMatchObject({ className: "approval-command", code: true, text: "npm test -- --runInBand" });
+
+  h.setInteractions([{ requestId: "approval-text-next", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行构建", operation: { command: "npm run build" } } }]);
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+  await expect.poll(() => rendered.length).toBe(3);
+});
+
+it("routes React approval decisions through the existing interaction API", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  const original = h.w.fetch;
+  let requests: any[] = [{ requestId: "react-approval", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行测试", operation: { command: "npm test" } } }];
+  h.w.fetch = (async (raw: string, init?: any) => {
+    if (raw.includes("/interactions/")) {
+      if (init?.method === "POST") { h.posts.push({ path: raw, body: JSON.parse(init.body) }); return Response.json({ ok: true }); }
+      return Response.json(requests);
+    }
+    return original(raw, init);
+  }) as any;
+  let decision: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingApprovalDecision = {
+    render(mount: HTMLElement, model: any) { decision = model; mount.textContent = "React actions"; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.element("refresh").click();
+  await expect.poll(() => decision).toBeTruthy();
+  decision.onAllow();
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-approval", body: { kind: "approval", decision: "allow-once" } });
+
+  requests = [{ requestId: "react-approval-next", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "approval", title: "运行构建", operation: { command: "npm run build" } } }];
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+});
+
+it("routes Runner question answers from React through the existing interaction API", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingRunnerQuestions = {
+    render(mount: HTMLElement, model: any) { received = model; mount.textContent = "React question form"; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: "react-question", owner: { runnerId: "codex", taskId: "design" }, request: { kind: "question", questions: [{ id: "approval", text: "4177 是否已批准？", required: true, allowFreeText: true, options: [{ id: "yes", label: "已批准" }] }] } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received).toBeTruthy();
+  expect(received).toMatchObject({ requestId: "react-question", questions: [{ id: "approval", text: "4177 是否已批准？" }] });
+  received.onSubmit([{ questionId: "approval", text: "已批准，恢复连接后继续" }]);
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-question", body: { kind: "question", answers: [{ questionId: "approval", text: "已批准，恢复连接后继续" }] } });
+  h.setInteractions([]);
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+});
+
+it.each([
+  ["approval", { kind: "approval", decision: "deny", guidance: "重新检查命令参数" }],
+  ["elicitation", { kind: "elicitation", action: "decline", guidance: "不要提交外部表单" }],
+  ["question", { kind: "question", answers: [], guidance: "先读取已有设计文件" }],
+] as const)("maps React guidance for %s to the existing reply protocol", async (kind, expectedReply) => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingInteractionGuidance = {
+    render(mount: HTMLElement, model: any) { received = model; mount.textContent = "React guidance"; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: `guidance-${kind}`, owner: { runnerId: "codex", taskId: "backend" }, request: { kind, title: "需要调整", ...(kind === "question" ? { questions: [] } : {}) } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received?.kind).toBe(kind);
+  const guidance = kind === "approval" ? "重新检查命令参数" : kind === "elicitation" ? "不要提交外部表单" : "先读取已有设计文件";
+  received.onSubmit(guidance);
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: `/api/v1/workspaces/project/interactions/guidance-${kind}`, body: expectedReply });
+  h.setInteractions([]);
+  h.element("refresh").click();
+  await expect.poll(() => unmounts).toBe(1);
+});
+
+it("routes React elicitation forms and URL confirmation through the existing interaction API", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let unmounts = 0;
+  h.w.tokenCouponPendingElicitation = {
+    render(mount: HTMLElement, model: any) { received = model; mount.textContent = `React ${model.mode}`; },
+    unmountWithin() { unmounts++; },
+  } as any;
+  h.setInteractions([{ requestId: "react-form", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "elicitation", elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string" } } } } } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received?.mode).toBe("form");
+  received.onSubmit({ token: "local-only" });
+  await expect.poll(() => h.posts.length).toBe(1);
+  expect(h.posts[0]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-form", body: { kind: "elicitation", action: "accept", content: { token: "local-only" } } });
+
+  h.setInteractions([{ requestId: "react-url", owner: { runnerId: "codex", taskId: "backend" }, request: { kind: "elicitation", elicitation: { mode: "url", url: "https://login.example.test/" } } }]);
+  h.element("refresh").click();
+  await expect.poll(() => received?.mode).toBe("url");
+  received.onAcceptUrl();
+  await expect.poll(() => h.posts.length).toBe(2);
+  expect(h.posts[1]).toMatchObject({ path: "/api/v1/workspaces/project/interactions/react-url", body: { kind: "elicitation", action: "accept" } });
+  expect(unmounts).toBeGreaterThan(0);
+});
+
+it("publishes the current Attempt status and diagnosis callback to the React overview", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let onDiagnose: (() => void) | undefined;
+  h.w.tokenCouponAttemptOverview = { render(model: any, diagnose: () => void) { received = model; onDiagnose = diagnose; } } as any;
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-overview",
+      attempt: { runnerId: "codex", status: "failed", reason: "缺少完成标记", exitCode: 0, reportedModel: "gpt-6.1-sol", reportedModelSource: "codex" },
+      messages: new Map(), textStream: "", finalText: "", semanticMessages: false,
+      tools: [], raw: [], toolsPage: 0, rawPage: 0, notice: "历史日志尚未加载完成。", hasMore: true,
+    };
+    renderAttemptContent();
+  `);
+  expect(received).toMatchObject({
+    state: expect.stringContaining("gpt-6.1-sol"),
+    notice: expect.stringContaining("历史日志尚未加载完成"),
+    outcome: expect.stringContaining("缺少完成标记"),
+    outcomeVisible: true,
+    replyHeading: "模型回复",
+    diagnoseVisible: true,
+  });
+  onDiagnose?.();
+  await expect.poll(() => h.visible("diagnosis-choice-dialog")).toBe(true);
+});
+
+it("publishes deduplicated final replies to the React Attempt message list in newest-first order", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  h.w.tokenCouponAttemptMessages = { render(model: any) { received = model; } } as any;
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-messages",
+      attempt: { runnerId: "codex", status: "succeeded" },
+      messages: new Map([
+        ["older", { text: "先完成接口设计", completed: true }],
+        ["latest", { text: "完成结论：全部测试通过", completed: true }],
+      ]),
+      finalText: "完成结论：全部测试通过", textStream: "", semanticMessages: true,
+      tools: [], raw: [], toolsPage: 0, rawPage: 0, notice: "", hasMore: false,
+    };
+    renderAttemptContent();
+  `);
+  expect(received.messages.map((message: any) => message.messageId)).toEqual(["latest", "older"]);
+  expect(received.messages[0]).toMatchObject({ title: "2. 最新回复 · 最终结论", text: "完成结论：全部测试通过" });
+});
+
+it("publishes the current tool page and open foldout state to the React Attempt activity list", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  h.w.tokenCouponAttemptTools = { render(model: any) { received = model; } } as any;
+  h.element("attempt-tools").innerHTML = '<details data-event-key="16" open></details>';
+  h.w.eval(`
+    __testState.attemptView = {
+      workspaceId: "project", planningId: "first", attemptId: "attempt-tools",
+      attempt: { runnerId: "codex", status: "succeeded" },
+      messages: new Map(), finalText: "", textStream: "", semanticMessages: false,
+      tools: Array.from({ length: 16 }, (_, index) => ({ sequence: index + 1, type: index === 15 ? "command.completed" : "tool.completed", text: "command-" + (index + 1), output: index === 15 ? "2 tests passed" : undefined, exitCode: index === 15 ? 1 : 0, timestamp: "2026-10-20T03:00:00.000Z" })),
+      raw: [], toolsPage: 1, rawPage: 0, notice: "", hasMore: false,
+    };
+    renderAttemptContent();
+  `);
+  expect(received.tools).toHaveLength(1);
+  expect(received.tools[0]).toMatchObject({ eventKey: "16", summary: expect.stringContaining("command-16"), text: "command-16\n2 tests passed", isError: true });
+  expect(received.openEventKeys).toEqual(["16"]);
+  expect(h.element("attempt-tools-page").textContent).toContain("第 2 / 2 页");
+});
+
+it("publishes the filtered raw-event page to the React Attempt raw event view", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any, actions: any;
+  h.w.tokenCouponAttemptRawEvents = { render(_mount: HTMLElement, model: any, callbacks: any) { received = model; actions = callbacks; } } as any;
+  h.element("attempt-raw").scrollTop = 37;
+  h.w.eval(`
+    __testState.attemptView = {
+      identity: "project:first:attempt-raw", workspaceId: "project", planningId: "first", attemptId: "attempt-raw",
+      attempt: { runnerId: "codex", status: "succeeded" },
+      messages: new Map(), finalText: "", textStream: "", semanticMessages: false,
+      tools: [], raw: Array.from({ length: 16 }, (_, index) => ({ sequence: index + 1, type: index === 15 ? "runner.output" : "tool.completed", payload: index === 15 ? { stream: "stderr", text: "diagnostic" } : { summary: "event-" + (index + 1) } })),
+      toolsPage: 0, rawPage: 1, notice: "", hasMore: false,
+    };
+    renderAttemptContent();
+  `);
+  expect(received.events).toHaveLength(16);
+  expect(received.events[15]).toEqual({ line: '{"sequence":16,"type":"runner.output","payload":{"stream":"stderr","text":"diagnostic"}}', type: "runner.output", stream: "stderr" });
+  expect(received.initialPage).toBe(1);
+  expect(received.identity).toBe("project:first:attempt-raw:0");
+  expect(h.element("attempt-raw").scrollTop).toBe(37);
+
+  actions.onFilter("stderr");
+  actions.onPageChange(0);
+  expect(h.w.eval("__testState.attemptView.rawFilter")).toBe("stderr");
+  expect(h.w.eval("__testState.attemptView.rawPage")).toBe(0);
+});
+
+it("publishes selected diagnosis history, pending submission, and status to the React conversation view", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let mount: HTMLElement | undefined;
+  h.w.tokenCouponAttemptDiagnosisHistory = { render(element: HTMLElement, model: any) { mount = element; received = model; }, unmountWithin() {} } as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    const context = {
+      identity: "project:first:attempt-diagnosis", workspaceId: "project", planningId: "first", attemptId: "attempt-diagnosis",
+      runnerId: "claude-code", selectedId: "diagnostic-1", running: true,
+      pendingSubmission: { body: { message: "再解释一下恢复条件" } },
+      data: { diagnostics: [{ diagnosticId: "diagnostic-1", status: "failed", runnerId: "claude-code", error: "provider unavailable", messages: [
+        { role: "user", content: "为什么失败？" },
+        { role: "assistant", runnerId: "codex", modelId: "gpt-6.1-sol", content: "完成结论：需要补充一次验证" },
+      ] }] },
+    };
+    __testState.attemptDiagnosticContext = context;
+    renderAttemptDiagnosticHistory(context);
+  `);
+  expect(mount?.id).toBe("attempt-diagnosis-history");
+  expect(received.messages).toEqual([
+    { messageId: "diagnostic-1:0", role: "user", heading: "你", content: "为什么失败？" },
+    { messageId: "diagnostic-1:1", role: "assistant", heading: "Codex · gpt-6.1-sol", content: "完成结论：需要补充一次验证" },
+  ]);
+  expect(received).toMatchObject({ pendingMessage: "再解释一下恢复条件", errorMessage: "分析未完成：provider unavailable", running: true, showEmptyMessage: false });
+  expect(h.element("attempt-diagnosis-history-select").value).toBe("diagnostic-1");
+});
+
+it("binds the React diagnosis composer to the saved draft and existing form submit flow", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  let changed: ((value: string) => void) | undefined;
+  let submit: (() => void) | undefined;
+  let mount: HTMLElement | undefined;
+  h.w.tokenCouponAttemptDiagnosisComposer = { render(element: HTMLElement, model: any, onChange: (value: string) => void, onSubmit: () => void) { mount = element; received = model; changed = onChange; submit = onSubmit; }, setValue() {}, unmountWithin() {} } as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    const context = { identity: "project:first:composer", workspaceId: "project", planningId: "first", attemptId: "attempt-composer", unsentText: "恢复后保留的草稿", data: { diagnostics: [] } };
+    __testState.attemptDiagnosticContext = context;
+    renderAttemptDiagnosticHistory(context);
+  `);
+  expect(mount?.id).toBe("attempt-diagnosis-composer-root");
+  expect(received).toMatchObject({ initialValue: "恢复后保留的草稿", placeholder: "输入问题、补充事实，或讨论处理方案…" });
+  changed?.("追加的诊断事实");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.unsentText")).toBe("追加的诊断事实");
+  expect(submit).toBeTypeOf("function");
+});
+
+it("publishes diagnosis history and model choices from the current diagnostic context to React", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let historyModel: any;
+  let historyChange: ((id: string) => void) | undefined;
+  let controlsModel: any;
+  let controlsCallbacks: any;
+  h.w.tokenCouponAttemptDiagnosisControls = {
+    renderHistory(_mount: HTMLElement, diagnostics: any, selectedId: string, disabled: boolean, onChange: (id: string) => void) { historyModel = { diagnostics, selectedId, disabled }; historyChange = onChange; },
+    renderModels(_mount: HTMLElement, model: any, callbacks: any) { controlsModel = model; controlsCallbacks = callbacks; },
+    unmountWithin() {},
+  } as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    const context = {
+      identity: "project:first:controls", workspaceId: "project", planningId: "first", attemptId: "attempt-controls",
+      runnerId: "codex", selectedId: "diagnostic-2", running: false, pendingSubmission: null,
+      diagnosisRunnerId: "claude-code", diagnosisModelId: "deepseek-flash", diagnosisModels: [{ id: "deepseek-flash", label: "DeepSeek Flash" }],
+      data: { diagnostics: [
+        { diagnosticId: "diagnostic-1", status: "completed", runnerId: "codex", messages: [] },
+        { diagnosticId: "diagnostic-2", status: "failed", runnerId: "claude-code", messages: [] },
+      ] },
+    };
+    __testState.attemptDiagnosticContext = context;
+    renderAttemptDiagnosticHistory(context);
+  `);
+  expect(historyModel).toMatchObject({ selectedId: "diagnostic-2", disabled: false });
+  expect(historyModel.diagnostics.map((item: any) => item.label)).toEqual(["诊断 1 · 分析完成", "诊断 2 · 分析失败"]);
+  expect(controlsModel).toMatchObject({ runnerId: "claude-code", modelId: "deepseek-flash", selectedDiagnosticId: "diagnostic-2", disabled: false });
+  expect(controlsModel.models).toEqual([{ id: "deepseek-flash", label: "DeepSeek Flash" }]);
+  historyChange?.("diagnostic-1");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.selectedId")).toBe("diagnostic-1");
+  controlsCallbacks.onCustomModelChange("custom-model");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.diagnosisCustomModelId")).toBe("custom-model");
+  controlsCallbacks.onModelChange("__custom__");
+  expect(h.w.eval("__testState.attemptDiagnosticContext.diagnosisModelId")).toBe("__custom__");
+});
+
+it("publishes evidence export progress and saved path to the React diagnosis export dialog", async () => {
+  const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
+  let received: any;
+  const renderModels: any[] = [];
+  h.w.tokenCouponAttemptDiagnosisExport = { render(_mount: HTMLElement, model: any) { received = model; renderModels.push(model); }, unmountWithin() {} } as any;
+  const original = h.w.fetch;
+  h.w.fetch = (async (url: string, init?: any) => url.endsWith("/diagnostics/export") ? Response.json({ absolutePath: "/workspace/.scratch/diagnosis.md", prompt: "读取并分析证据" }) : original(url, init)) as any;
+  h.w.eval(`
+    ensureAttemptDiagnosticUI();
+    __testState.attemptDiagnosticContext = { identity: "project:first:export", workspaceId: "project", planningId: "first", attemptId: "attempt-export" };
+    void exportAttemptDiagnosis(__testState.attemptDiagnosticContext);
+  `);
+  await expect.poll(() => renderModels.some(model => model.status.includes("正在把诊断证据保存"))).toBe(true);
+  await expect.poll(() => received?.path).toBe("/workspace/.scratch/diagnosis.md");
+  await expect.poll(() => received?.copyLabel).toContain("已复制");
+  expect(received.copyDisabled).toBe(false);
+  expect(h.copied).toContain("读取并分析证据");
+});
+
 it.each(["approval", "question", "elicitation"])("sends explicit NO guidance for %s without accepting the pending request", async kind => {
   const h = await page({ ready: true, approved: true, hash: "#/workspaces/project/plans/first/execution" });
   const request = { kind, title: "确认实现", ...(kind === "question" ? { questions: [{ id: "q", text: "请选择", allowFreeText: false, options: [{ id: "a", label: "A" }] }] } : kind === "elicitation" ? { elicitation: { mode: "form", requestedSchema: { type: "object", properties: { token: { type: "string", minLength: 1 } }, required: ["token"] } } } : {}) };
@@ -1804,6 +2678,37 @@ it("offers two diagnosis routes, uses a chat composer with model controls, and c
   await expect.poll(() => h.copied.at(-1)).toBe(exported.prompt);
   expect((h.element("diagnosis-export-path") as HTMLInputElement).value).toBe(exported.absolutePath);
   expect(h.copied.at(-1)).not.toContain("完整日志"); expect(diagnosticPosts).toHaveLength(2); expect(exportCalls).toBe(1);
+});
+
+it("renders the diagnosis route selector through its React bridge and wires its callbacks", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  let callbacks: { onClose(): void; onLocal(): void; onWeb(): void } | undefined;
+  let dialogCallbacks: { onClose(): void; onSwitch(): void } | undefined;
+  h.w.tokenCouponAttemptDiagnosisChoice = {
+    render(mount: HTMLElement, next: typeof callbacks) { callbacks = next; mount.textContent = "React 选择分析方式"; },
+    unmountWithin() {},
+  } as any;
+  h.w.tokenCouponAttemptDiagnosisDialog = {
+    render(mount: HTMLElement, model: any, next: typeof dialogCallbacks) { dialogCallbacks = next; mount.innerHTML = renderToStaticMarkup(createElement(AttemptDiagnosisDialog, { model, ...next })); },
+    unmountWithin() {},
+  } as any;
+  h.w.eval('__testState.attemptView = {workspaceId:"project",planningId:"first",attemptId:"diagnostic-attempt",attempt:{runnerId:"codex"}}; void openAttemptDiagnosis()');
+  await expect.poll(() => h.visible("diagnosis-choice-dialog")).toBe(true);
+  expect(h.element("diagnosis-choice-root").textContent).toContain("React 选择分析方式");
+  expect(callbacks).toBeDefined();
+  callbacks!.onClose(); expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(false);
+
+  h.w.eval("void openAttemptDiagnosis()");
+  await expect.poll(() => h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(true);
+  callbacks!.onLocal();
+  await expect.poll(() => h.element("attempt-diagnosis-dialog").hasAttribute("open")).toBe(true);
+  expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(false);
+  expect(h.element("attempt-diagnosis-dialog-root").querySelector("#attempt-diagnosis-composer-root")).not.toBeNull();
+  expect(dialogCallbacks).toBeDefined();
+  dialogCallbacks!.onSwitch();
+  expect(h.element("attempt-diagnosis-dialog").hasAttribute("open")).toBe(false);
+  expect(h.element("diagnosis-choice-dialog").hasAttribute("open")).toBe(true);
 });
 
 it("creates a linked revision from the visible source version and opens the new planning record", async () => {
@@ -1956,16 +2861,16 @@ it("summarizes observed OAuth and tool results once, keeps old pending records c
   const h = await page({ ready: true });
   const old = { grantId: "old", clientId: "old-client", source: "claude", workspaceIds: ["project"], expiresAt: Date.now() + 60000, oauthState: "awaiting_token" };
   const ready = { ...old, grantId: "current", clientId: "current-client", oauthState: "token_issued" };
-  h.setGrants([old, ready]); h.setRemote({ validGrants: 2, pendingTokenExchanges: 1, remoteClientVerified: true, recentCalls: [] }); h.element("refresh").click();
+  h.setGrants([old, ready]); h.setRemote({ validGrants: 2, pendingTokenExchanges: 1, remoteClientVerified: true, clients: [{ ...ready, status: "active", toolVerified: true, lastSuccess: { at: Date.now() } }], recentCalls: [] }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("网页已连通");
   expect(h.element("remote-grant-count").textContent).toBe("1 个已授权 · 1 个待完成");
   expect(h.element("remote-grants").textContent).not.toContain("请在原网页连接中完成或重新连接");
   const details = h.element("remote-grant-details") as HTMLDetailsElement; expect(details.open).toBe(false); details.open = true;
   h.setRemote({ recentCalls: [{ stage: "oauth", outcome: "error", clientId: "current-client", code: "invalid_client" }] }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("最近一次网页授权失败（invalid_client）"); expect(details.open).toBe(true);
-  h.setRemote({ recentCalls: [{ stage: "oauth", outcome: "success", clientId: "current-client", code: "oauth_token_issued" }], remoteClientVerified: false }); h.element("refresh").click();
+  h.setRemote({ clients: [], recentCalls: [{ stage: "oauth", outcome: "success", clientId: "current-client", code: "oauth_token_issued" }], remoteClientVerified: false }); h.element("refresh").click();
   await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("授权成功 · 等待首次工具调用验证");
-  h.setRemote({ remoteClientVerified: true }); h.element("refresh").click(); await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("网页已连通");
+  h.setRemote({ remoteClientVerified: true, clients: [{ ...ready, status: "active", toolVerified: true, lastSuccess: { at: Date.now() } }] }); h.element("refresh").click(); await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("网页已连通");
 });
 
 it("dismisses each notification using its accessible X without changing execution state", async () => {
@@ -2102,4 +3007,351 @@ it("offers an explicit retry for a legacy local planning timeout without a new J
   h.element("retry-planning-turn").click();
   await expect.poll(() => h.posts.some(post => post.path.endsWith("/plannings/first/planner-retry"))).toBe(true);
   expect(h.posts.some(post => post.path.endsWith("/plannings"))).toBe(false);
+});
+
+it("copies a single read-only verification for the explicitly selected connector and keeps clients independent", async () => {
+  const h = await page({ ready: true, hash: "#/connect", multiple: true });
+  const base = { status: "active", source: "chatgpt", usage: "web", mcpUrl: "https://existing.trycloudflare.com/mcp", clientName: "ChatGPT", createdAt: Date.now(), expiresAt: Date.now() + 60000, oauthState: "token_issued" };
+  const old = { ...base, grantId: "old", clientId: "old-client", clientFingerprint: "123456789abc", alias: "coupontest", workspaceIds: ["other"], toolVerified: true, lastSuccess: { at: Date.now() } };
+  const current = { ...base, grantId: "new", clientId: "new-client", clientFingerprint: "abcdef123456", alias: "demo41", workspaceIds: ["project"], toolVerified: false };
+  h.setGrants([current, old]); h.setRemote({ clients: [current, old], validGrants: 2, remoteClientVerified: true }); h.element("refresh").click();
+  const select = h.element("connection-prompt-client") as HTMLSelectElement;
+  await expect.poll(() => select.options.length).toBe(3);
+  expect(select.value).toBe("");
+  select.value = "new"; select.dispatchEvent(new h.w.Event("change"));
+  expect(h.element("connection-identity-status").textContent).toContain("尚未收到此连接");
+  h.element("connection-identity-verify").click(); await expect.poll(() => h.copied.length).toBe(1);
+  const prompt = h.copied[0]!;
+  expect(prompt).toContain('网页连接名称（用户填写，请与网页设置核对）："demo41"');
+  expect(prompt).toContain("abcdef123456"); expect(prompt).toContain("从列表实际选择");
+  expect(prompt).toContain("实际调用一次 workspace_query({})，不重试，不调用其他工具");
+  expect(prompt).not.toContain("coupontest"); expect(prompt).not.toContain("planning_query");
+  expect(h.posts).toHaveLength(0);
+  // Renaming a local note changes the prompt, without modifying the webpage.
+  h.setRemote({ clients: [{ ...current, alias: "demo42" }, old] }); h.element("refresh").click();
+  await expect.poll(() => h.element("connection-identity-status").textContent).toContain("demo42");
+  expect(select.value).toBe("new");
+  h.setRemote({ clients: [{ ...current, status: "revoked" }, old] }); h.element("refresh").click();
+  await expect.poll(() => select.value).toBe(""); // Never silently select old coupontest.
+  h.element("connection-identity-verify").click(); await expect.poll(() => h.copied.length).toBe(2);
+  expect(h.copied[1]).toContain("网页连接名称尚未填写"); expect(h.copied[1]).not.toContain("coupontest");
+});
+
+it("does not apply another project's or SDK client's success to the current workspace", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project", multiple: true });
+  const base = { status: "active", source: "chatgpt", usage: "web", clientName: "ChatGPT", mcpUrl: "https://existing.trycloudflare.com/mcp", createdAt: Date.now(), expiresAt: Date.now() + 60000, oauthState: "token_issued" };
+  const current = { ...base, grantId: "current", clientId: "current-id", workspaceIds: ["project"], alias: "demo41", toolVerified: false };
+  const other = { ...base, grantId: "other", clientId: "other-id", workspaceIds: ["other"], alias: "old", toolVerified: true, lastSuccess: { at: Date.now() } };
+  const sdk = { ...current, grantId: "sdk", usage: "diagnostic", alias: "SDK 自检", toolVerified: true, lastSuccess: { at: Date.now() } };
+  h.setGrants([current, other, sdk]); h.setRemote({ clients: [current, other, sdk], validGrants: 3, remoteClientVerified: true }); h.element("refresh").click();
+  await expect.poll(() => (h.element("connection-prompt-client") as HTMLSelectElement).options.length).toBe(3);
+  expect(h.visible("connection-action-needed")).toBe(true);
+  expect(h.element("workspace-connection-summary").textContent).toContain("待实际调用验证");
+  expect(h.element("connection-prompt-client").textContent).not.toContain("SDK 自检");
+  expect(h.element("connection-current-clients").textContent).toContain("独立 SDK／诊断调用，不计作网页验证");
+  h.setRemote({ clients: [{ ...current, toolVerified: true, lastSuccess: { at: Date.now() } }, other, sdk] }); h.element("refresh").click();
+  await expect.poll(() => h.visible("connection-action-needed")).toBe(false);
+  expect(h.posts).toHaveLength(0);
+});
+
+it("labels unknown names and prefixes new, resume and review prompts without changing business state", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/new" });
+  const client = { grantId: "claude", clientId: "claude-id", status: "active", source: "claude", workspaceIds: ["project"], clientName: "Claude", mcpUrl: "https://existing.trycloudflare.com/mcp" };
+  h.setRemote({ clients: [client] }); h.element("refresh").click();
+  const select = h.element("connection-prompt-client") as HTMLSelectElement;
+  await expect.poll(() => select.options.length).toBe(2); select.value = "claude"; select.dispatchEvent(new h.w.Event("change"));
+  h.element("copy-web-planning").click(); await expect.poll(() => h.copied.length).toBe(1);
+  expect(h.copied[0]).toContain("在 Claude 当前聊天启用并选择");
+  expect(h.copied[0]).toContain("网页连接名称尚未填写");
+  await h.w.eval('navigate("/workspaces/project/plans/first/review")');
+  await h.w.eval('copyResumePrompt()');
+  expect(h.copied[1]).toContain("在 Claude 当前聊天启用并选择"); // Unknown names still require explicit selection.
+  expect(h.copied[1]).toContain("planningId：first");
+  await h.w.eval('copyHandoffPrompt("审查当前版本", "claude")');
+  expect(h.copied[2]).toContain("在 Claude 当前聊天启用并选择"); expect(h.copied[2]).toContain("审查当前版本");
+  await h.w.eval('copyHandoffPrompt("给 ChatGPT 的审查", "chatgpt")');
+  expect(h.copied).toHaveLength(3); expect(h.element("page-error-message").textContent).toContain("来源与本次交接不一致");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("shows the newest OAuth diagnostic and preserves closable errors and folded identity details", async () => {
+  const h = await page({ ready: true, hash: "#/connect" });
+  const grant = { grantId: "current", clientId: "client", alias: "demo41", clientName: "ChatGPT", source: "chatgpt", workspaceIds: ["project"], oauthState: "token_issued", expiresAt: Date.now() + 60000 };
+  h.setGrants([grant]);
+  h.setRemote({ clients: [{ ...grant, status: "active", mcpUrl: "https://existing.trycloudflare.com/mcp" }], recentCalls: [
+    { at: 200, stage: "oauth", clientId: "client", outcome: "success" },
+    { at: 100, stage: "oauth", clientId: "client", outcome: "error", code: "invalid_client" },
+  ] }); h.element("refresh").click();
+  await expect.poll(() => h.element("remote-authorization-status").textContent).toContain("授权成功");
+  expect(h.element("remote-authorization-status").textContent).not.toContain("invalid_client");
+  expect((h.element("connection-current-clients").querySelector("details") as HTMLDetailsElement).open).toBe(false);
+  expect(h.element("connection-current-clients").textContent).toContain("用户填写");
+  (h.element("connection-current-clients").querySelector("details") as HTMLDetailsElement).open = true;
+  h.element("refresh").click(); await new Promise(resolve => setTimeout(resolve, 30));
+  expect((h.element("connection-current-clients").querySelector("details") as HTMLDetailsElement).open).toBe(true);
+  h.w.eval('showToast("参数校验失败：请核对当前工具参数", true)'); h.element("page-error-dismiss").click();
+  expect(h.visible("page-error")).toBe(false); expect(h.posts).toHaveLength(0);
+});
+
+it("reports a coalesced manual refresh, keeps input and distinguishes unchanged state", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/overview" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  await expect.poll(() => h.w.eval('__testState.remoteFetching')).toBe(false);
+  const original = h.w.fetch; let finish: ((value: Response) => void) | undefined, count = 0;
+  h.w.fetch = ((raw: string, init?: any) => raw === "/api/v1/workspaces/project/plannings" ? (count++, new Promise<Response>(resolve => { finish = resolve; })) : original(raw, init)) as any;
+  (h.element("reply-text") as HTMLTextAreaElement).value = "保留尚未发送的输入";
+  h.element("refresh").click(); h.element("refresh").click();
+  await expect.poll(() => count).toBe(1);
+  expect((h.element("refresh") as HTMLButtonElement).disabled).toBe(true);
+  expect(h.element("refresh-feedback").textContent).toContain("正在更新");
+  finish!(Response.json(h.plans));
+  await expect.poll(() => h.element("refresh-feedback").textContent).toContain("刷新成功");
+  expect(h.element("refresh-feedback").textContent).toContain("状态无变化");
+  expect(h.element("refresh-last-success").textContent).toContain("最近成功");
+  expect((h.element("reply-text") as HTMLTextAreaElement).value).toBe("保留尚未发送的输入");
+  h.element("refresh-feedback-close").click(); expect(h.visible("refresh-feedback-wrap")).toBe(false);
+  expect((h.element("refresh") as HTMLButtonElement).disabled).toBe(false); expect(h.posts).toHaveLength(0);
+});
+
+it("reports partial refresh failure without discarding cached plan data or claiming success", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/overview" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  await expect.poll(() => h.w.eval('__testState.remoteFetching')).toBe(false);
+  const original = h.w.fetch;
+  h.w.fetch = ((raw: string, init?: any) => raw === "/api/v1/remote-connection" ? Promise.resolve(Response.json({ error: "后台连接暂不可用" }, { status: 503 })) : original(raw, init)) as any;
+  h.element("refresh").click();
+  await expect.poll(() => h.element("refresh-feedback").textContent).toContain("部分刷新失败");
+  expect(h.element("refresh-feedback").textContent).toContain("连接与授权");
+  expect(h.element("planning-title").textContent).toBe("计划 first");
+  expect((h.element("refresh") as HTMLButtonElement).disabled).toBe(false);
+  h.w.fetch = original; h.element("refresh").click();
+  await expect.poll(() => h.element("refresh-feedback").textContent).toContain("刷新成功");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("dismisses a blocked operation per Job without discarding requirements, and shows a new failure independently", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/review" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  const before = JSON.stringify(h.plans);
+  h.w.eval('void startJob("审查草案", async () => ({jobId:"review-1",workspaceId:"project",planningId:"first",status:"failed",error:"pending_inputs_require_plan：请先处理已登记的补充需求，再审查"}))');
+  await expect.poll(() => h.element("job-label").textContent).toContain("暂不能审查：还有补充需求待处理");
+  expect(h.element("job-bar").dataset.tone).toBe("warning"); expect(h.element("job-feedback-next").textContent).toBe("处理补充需求");
+  h.element("job-feedback-close").click(); expect(h.visible("job-bar")).toBe(false);
+  h.element("refresh").click(); await expect.poll(() => (h.element("refresh") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.visible("job-bar")).toBe(false); expect(JSON.stringify(h.plans)).toBe(before);
+  h.w.eval('void completeJob({jobId:"review-1",workspaceId:"project",planningId:"first",status:"failed",error:"pending_inputs_require_plan：请先处理已登记的补充需求，再审查"},"审查草案")');
+  await new Promise(resolve => setTimeout(resolve, 30)); expect(h.visible("job-bar")).toBe(false);
+  h.w.eval('void startJob("审查草案", async () => ({jobId:"review-2",workspaceId:"project",planningId:"first",status:"failed",error:"pending_inputs_require_plan：还有需求"}))');
+  await expect.poll(() => h.visible("job-bar")).toBe(true);
+  expect(h.element("operation-feedback-history-list").children.length).toBe(2);
+  h.element("operation-feedback-history-list").querySelector<HTMLButtonElement>("button")!.click();
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(JSON.stringify(h.plans)).toBe(before); expect(h.posts).toHaveLength(0);
+});
+
+it("uses compact AO-style directory navigation and remembers only explicitly confirmed choices", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  h.element("add-workspace-main").click();
+  await expect.poll(() => h.element("directory-status").textContent).toContain("/projects");
+  const entry = h.element("directory-list").querySelector<HTMLButtonElement>("[data-directory-path]")!;
+  expect(h.element("directory-dialog").classList.contains("workspace-directory-picker")).toBe(true);
+  expect(h.element("directory-title").textContent).toBe("选择工作区文件夹");
+  expect(entry.querySelector("svg")).not.toBeNull();
+  entry.click();
+  await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  h.element("directory-back").click(); await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects");
+  h.element("directory-forward").click(); await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  expect((h.element("directory-open-system") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-use").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  h.element("browse-workspace-path").click(); await expect.poll(() => (h.element("directory-dialog") as HTMLDialogElement).open).toBe(true);
+  (h.element("directory-path") as HTMLInputElement).value = "/cancelled"; h.element("directory-go").click();
+  await expect.poll(() => h.element("directory-status").textContent).toContain("/cancelled");
+  h.element("directory-close").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/projects/新项目");
+  expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
+});
+
+it("keeps only two operation banners, retires old repeats and counts a running Job", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/review" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  for (let n = 1; n <= 4; n++) {
+    await h.w.eval(`startJob("操作 ${n}", async () => ({jobId:"limit-${n}",workspaceId:"project",planningId:"first",status:"failed",error:"test_failure：错误 ${n}"}))`);
+  }
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(h.element("operation-feedback-list").textContent).toContain("错误 3");
+  expect(h.element("operation-feedback-list").textContent).not.toContain("错误 1");
+  expect(h.element("operation-feedback-history-list").children.length).toBe(4);
+  expect(h.visible("job-bar")).toBe(true);
+  h.w.eval('renderOperationNotices()');
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  h.w.eval('void startJob("新操作", () => new Promise(resolve => { window.finishLimitedJob = resolve; }))');
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(h.element("job-bar").dataset.state).toBe("running");
+  h.w.eval('window.finishLimitedJob({jobId:"limit-5",workspaceId:"project",planningId:"first",status:"succeeded"})');
+  await expect.poll(() => h.element("job-bar").dataset.state).toBe("succeeded");
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(h.posts).toHaveLength(0);
+});
+
+it("explains missing Git identity before committing and reuses an already configured author", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  h.setGitStatus({ state: "no_commit", message: "等待首次提交", identity: { configured: false }, changes: [] });
+  h.element("git-refresh").click();
+  await expect.poll(() => (h.element("git-identity") as HTMLDetailsElement).open).toBe(true);
+  expect((h.element("git-readiness-actions").querySelector('[data-git-action="initial-commit"]') as HTMLButtonElement).disabled).toBe(true);
+  expect(h.element("git-identity-status").textContent).toContain("不修改全局配置");
+  h.element("git-save-identity").click(); expect(h.element("git-identity-error").textContent).toContain("请填写");
+  expect(h.posts.some(item => item.path.endsWith("/git/identity"))).toBe(false);
+  (h.element("git-name") as HTMLInputElement).value = "正在编辑的姓名";
+  h.element("git-refresh").click(); await new Promise(resolve => setTimeout(resolve, 50));
+  expect((h.element("git-name") as HTMLInputElement).value).toBe("正在编辑的姓名");
+  h.setGitStatus({ state: "ready", message: "已就绪", identity: { configured: true, name: "Existing Author", email: "author@example.invalid" }, changes: [] });
+  h.element("git-refresh").click();
+  await expect.poll(() => h.element("git-identity-status").textContent).toContain("无需重复填写");
+  expect((h.element("git-identity") as HTMLDetailsElement).open).toBe(false);
+  expect((h.element("git-name") as HTMLInputElement).value).toBe("Existing Author");
+});
+
+it("browses compact Git changes without losing selections across searches, and restores them on cancel", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const changes = ["src/one.mjs", "src/two.mjs", "README.md"].map(path => ({ path, code: "??", runtime: false, staged: false }));
+  h.setGitStatus({ state: "no_commit", message: "等待首次提交", changes }); h.element("git-refresh").click();
+  await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("3 个");
+  const open = () => h.element("git-browse-files").click();
+  const filter = (value: string) => { (h.element("git-files-filter") as HTMLInputElement).value = value; h.element("git-files-filter").dispatchEvent(new h.w.Event("input")); };
+  const selectAll = () => { const all = h.element("git-file-list").querySelector<HTMLInputElement>('[data-all-files]')!; all.checked = true; all.dispatchEvent(new h.w.Event("change")); };
+  open(); filter("src/"); selectAll();
+  expect(h.element("git-files-count").textContent).toContain("已选 2 / 3");
+  filter("README"); selectAll(); expect(h.element("git-files-count").textContent).toContain("已选 3 / 3");
+  filter("not-found"); expect(h.element("git-file-list").textContent).toContain("没有匹配");
+  expect(h.element("git-files-count").textContent).toContain("已选 3 / 3");
+  h.element("git-files-apply").click(); await expect.poll(() => (h.element("git-files-dialog") as HTMLDialogElement).open).toBe(false);
+  open(); h.element("git-files-dialog").dispatchEvent(new h.w.Event("close")); filter("src/");
+  const all = h.element("git-file-list").querySelector<HTMLInputElement>('[data-all-files]')!; all.checked = false; all.dispatchEvent(new h.w.Event("change"));
+  h.element("git-files-close").click();
+  await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("已选 3 个");
+  const calls: any[] = [], original = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => {
+    if (raw.endsWith("/git/preview")) { calls.push(JSON.parse(init.body)); return Response.json({ mode: "selected", paths: changes.map(item => item.path), head: "unborn", fingerprint: "a".repeat(64), suggestedMessage: "initial", previews: [] }); }
+    return original(raw, init);
+  }) as any;
+  h.element("git-preview-selected").click();
+  await expect.poll(() => calls.length).toBe(1);
+  expect(calls[0].paths.sort()).toEqual(changes.map(item => item.path).sort());
+  expect(h.posts.some(item => item.path.endsWith("/git/commit") || item.path.endsWith("/run"))).toBe(false);
+  expect((h.element("git-open-system") as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("offers Explorer for an empty native workspace and opens only its current registered path", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, desktopPicker: true });
+  h.setGitStatus({ state: "no_commit", message: "等待首次提交", changes: [] }); h.element("git-refresh").click();
+  await expect.poll(() => h.visible("git-file-selection")).toBe(true);
+  expect((h.element("git-open-system") as HTMLButtonElement).disabled).toBe(false);
+  h.element("git-open-system").click();
+  await expect.poll(() => h.desktopExplorerCalls.length).toBe(1);
+  expect(h.desktopExplorerCalls[0]).toBe(h.workspaces[0].path);
+  expect(h.element("git-system-status").textContent).toContain("已请求打开");
+  h.element("git-browse-files").click(); expect(h.element("git-file-list").textContent).toContain("没有可提交");
+  expect((h.element("git-preview-selected") as HTMLButtonElement).disabled).toBe(true);
+  expect(h.posts).toHaveLength(0);
+});
+
+it("closes the Git picker on workspace switches and browses project files without creating a commit", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, multiple: true });
+  h.setGitStatus({ state: "dirty", message: "待提交", changes: [{ path: "README.md", code: "??", runtime: false, staged: false }] });
+  h.element("git-refresh").click(); await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("1 个");
+  h.element("git-browse-project").click();
+  await expect.poll(() => h.element("file-list").textContent).toContain("README.md");
+  h.element("file-close").click(); h.element("git-browse-files").click();
+  const all = h.element("git-file-list").querySelector<HTMLInputElement>('[data-all-files]')!; all.checked = true; all.dispatchEvent(new h.w.Event("change"));
+  h.w.location.hash = "#/workspaces/other/plans/first/execution";
+  await expect.poll(() => h.w.eval('__testState.workspace?.workspaceId')).toBe("other");
+  expect((h.element("git-files-dialog") as HTMLDialogElement).open).toBe(false);
+  await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("已选 0 个");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("shows loading and recoverable directory errors and prevents confirming an unvalidated edited path", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  const original = h.w.fetch; let release: ((value: Response) => void) | undefined, fail = true;
+  h.w.fetch = (async (raw: string, init?: any) => {
+    if (raw.includes("/api/v1/directories")) {
+      const path = new URL(raw, "http://local").searchParams.get("path");
+      if (path === "/locked" && fail) return Response.json({ error: "permission denied" }, { status: 403 });
+      if (!path) return new Promise<Response>(resolve => { release = resolve; });
+    }
+    return original(raw, init);
+  }) as any;
+  h.element("add-workspace-main").click();
+  await expect.poll(() => !!release).toBe(true);
+  expect(h.element("directory-list").getAttribute("aria-busy")).toBe("true");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  release!(Response.json({ path: "/projects", parent: "/", entries: [], totalMatches: 0, nextOffset: null }));
+  await expect.poll(() => (h.element("directory-use") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("directory-list").textContent).toContain("没有子目录");
+  (h.element("directory-path") as HTMLInputElement).value = "/locked"; h.element("directory-path").dispatchEvent(new h.w.Event("input"));
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-go").click(); await expect.poll(() => h.visible("directory-error-box")).toBe(true);
+  expect(h.element("directory-error").textContent).toContain("permission denied");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  fail = false; h.element("directory-retry").click();
+  await expect.poll(() => (h.element("directory-use") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.visible("directory-error-box")).toBe(false);
+  h.element("directory-use").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("/locked");
+  expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
+});
+
+it("keeps a newly typed directory path when an older request finishes and ignores queued close events after reopening", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  const original = h.w.fetch; let release: ((value: Response) => void) | undefined;
+  h.w.fetch = (async (raw: string, init?: any) => raw.includes("/api/v1/directories") && !new URL(raw, "http://local").searchParams.get("path") ? new Promise<Response>(resolve => { release = resolve; }) : original(raw, init)) as any;
+  h.element("add-workspace-main").click(); await expect.poll(() => !!release).toBe(true);
+  (h.element("directory-path") as HTMLInputElement).value = "/new-path"; h.element("directory-path").dispatchEvent(new h.w.Event("input"));
+  release!(Response.json({ path: "/projects", parent: "/", entries: [], nextOffset: null }));
+  await expect.poll(() => h.element("directory-list").getAttribute("aria-busy")).toBe("false");
+  expect((h.element("directory-path") as HTMLInputElement).value).toBe("/new-path");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-go").click(); await expect.poll(() => h.element("directory-status").textContent).toContain("/new-path");
+  h.element("directory-cancel").click(); expect((h.element("workspace-path") as HTMLInputElement).value).toBe("");
+  (h.element("workspace-path") as HTMLInputElement).value = "/reopened";
+  h.element("browse-workspace-path").click(); h.element("directory-dialog").dispatchEvent(new h.w.Event("close"));
+  await expect.poll(() => h.element("directory-status").textContent).toContain("/reopened");
+  expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("directory-shortcuts").textContent).toContain("排课后端");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("starts a fresh workspace picker in the backend user home instead of the packaged daemon directory", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces" });
+  h.w.eval('__testState.environment.home = "/users/current"; __testState.environment.currentDirectory = "/application/runtime/daemon/dist"');
+  h.element("add-workspace-main").click();
+  await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/users/current");
+  expect(h.element("directory-shortcuts").textContent).toContain("主目录");
+  expect(h.posts).toHaveLength(0);
+});
+
+it("opens a confirmable system folder picker directly and keeps cancel separate from plain Explorer", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  h.element("add-workspace-main").click();
+  await expect.poll(() => (h.element("directory-open-system") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("directory-open-system").closest("details")).toBeNull();
+  h.setDesktopFolderResult({ canceled: true }); h.element("directory-open-system").click();
+  await expect.poll(() => h.element("directory-status").textContent).toContain("已取消系统选择");
+  expect((h.element("directory-dialog") as HTMLDialogElement).open).toBe(true);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("");
+  expect(h.desktopFolderPaths[0]).toBe("/projects"); expect(h.desktopExplorerCalls).toHaveLength(0);
+  h.setDesktopFolderResult({ canceled: false, path: "C:\\Projects\\Chosen" }); h.element("directory-open-system").click();
+  await expect.poll(() => (h.element("directory-dialog") as HTMLDialogElement).open).toBe(false);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("C:\\Projects\\Chosen");
+  expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
+});
+
+it("ignores late system folder choices when the workspace form has been left", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  let finish: ((result: { canceled: boolean; path: string }) => void) | undefined;
+  h.w.tokenCouponDesktop.chooseWorkspaceFolder = () => new Promise(resolve => { finish = resolve; });
+  h.element("add-workspace-main").click(); await expect.poll(() => (h.element("directory-open-system") as HTMLButtonElement).disabled).toBe(false);
+  h.element("directory-open-system").click(); expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-close").click(); h.element("workspace-form-back").click();
+  finish!({ canceled: false, path: "C:\\late" }); await new Promise(resolve => setTimeout(resolve, 20));
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe(""); expect(h.posts).toHaveLength(0);
 });

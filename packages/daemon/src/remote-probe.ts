@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { extractWWWAuthenticateParams } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -58,7 +59,7 @@ export async function probeRemoteMcp(origin: string, token: string, parentSignal
   const challenge = await inspect("MCP 认证保护检查", () => fetcher(`${origin}/mcp`, { signal, redirect: "error", cache: "no-store", headers: { "X-Token-Coupon-Probe": token } }));
   await challenge.body?.cancel();
   if (TRANSIENT_HTTP.has(challenge.status)) throw new ProbeError(`remote_probe_network：MCP 认证保护检查失败（HTTP ${challenge.status}），可重试当前地址`, true, retryAfterMs(challenge));
-  if (challenge.status !== 401 || !challenge.headers.get("www-authenticate")?.includes(`${origin}/.well-known/oauth-protected-resource/mcp`)) throw new Error("remote_probe_auth：公网 MCP 必须要求 OAuth，未通过认证保护检查");
+  if (challenge.status !== 401 || extractWWWAuthenticateParams(challenge).resourceMetadataUrl?.href !== `${origin}/.well-known/oauth-protected-resource/mcp`) throw new Error("remote_probe_auth：公网 MCP 必须要求 OAuth 并返回可解析且匹配当前地址的认证提示，未通过认证保护检查");
   const client = new Client({ name: "token-coupon-connection-probe", version: "1" });
   const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` }, redirect: "error", signal },
