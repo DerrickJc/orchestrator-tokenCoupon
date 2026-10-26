@@ -1626,6 +1626,8 @@ Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json
 
 ### 15.4 需要用户验收的内容与步骤
 
+安装器验收改用第 15.7 节 `build-connection-fixed` 中的新包。第 15.2 节旧包的大小与 SHA-256 仅保留为历史测量，不作为许可资源修复后的安装器。
+
 | 项目 | 操作 | 通过标准 |
 | --- | --- | --- |
 | 刷新反馈 | 在两个 Mock 计划间切换，点左下角刷新，重复点击；编辑未保存内容后刷新，关闭提示 | 开始/完成反馈清晰，无变化也有回执；保留最近成功时间、编辑、焦点和阅读位置，不串计划。断网/后台失联及部分失败已经由自动化覆盖，可在独立 profile 中另测 |
@@ -1673,4 +1675,32 @@ node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacke
 
 验收入口生成脚本现在读取用户已启用的 Windows 静态 HTTP/HTTPS 代理，作为这个 `.cmd` 的缺省配置；已显式配置的进程代理优先，不修改系统/用户全局代理。没有启用代理、PAC-only、SOCKS-only 或含认证信息的值不写入脚本；本机控制链保持 loopback 直连。当前验收入口已补充代理并在无执行 Session 的前提下重启，保留两个 Mock 草案。代理方案仅覆盖此维护者验收启动脚本，不表示标准 EXE 已自动支持全部 Windows/PAC/SOCKS 代理。
 
-新增代理解析、禁用/PAC/SOCKS、认证信息与命令字符拒绝回归，并加入 Windows 原生测试入口。5 文件 14 项定向测试通过；首次沙箱因禁止 loopback 监听而 EPERM，沙箱外同组重跑通过。真实 Windows 通过官方下载与 SHA-256 校验后，又暴露包内 cloudflared 许可证漏装导致的 ENOENT，需继续按下一节修复；本节不把下载成功当作公网连接成功。
+新增代理解析、禁用/PAC/SOCKS、认证信息与命令字符拒绝回归，并加入 Windows 原生测试入口。5 文件 14 项定向测试通过；首次沙箱因禁止 loopback 监听而 EPERM，沙箱外同组重跑通过。真实 Windows 通过官方下载与 SHA-256 校验后，又暴露包内 cloudflared 许可证漏装导致的 ENOENT，后续已按第 15.7 节修复；本节保留故障先后关系，不把下载成功当作公网连接成功。
+
+
+### 15.7 cloudflared 包内许可资源与公网连接验证（2026-10-26）
+
+**第二处缺陷：** 代理生效后，官方组件下载及固定 SHA-256 校验通过，但随后返回 `component_install_failed（ENOENT）`。资源暂存脚本只复制 daemon 的 `dist/package.json`，遗漏代码在运行时读取的 `THIRD_PARTY_LICENSES/cloudflared-LICENSE`。此前源码目录具备该文件，Mock 业务闭环没有执行包内首次组件安装，因而没有发现。旧安装流程又在复制许可文件前写入 `installed.json`，导致安装报错后仍可能留下看似完成的缓存。
+
+修复包括：
+
+- `scripts/stage-desktop-runtime.mjs` 复制 daemon 的许可资源，缺失时构建失败，不能继续生成不完整的包。
+- 组件安装先准备许可资源，完成二进制/许可/NOTICE 后最后写完成标记；应用包缺少许可资源时返回明确的 `component_license_missing`，不重复下载同一文件。
+- 旧缓存通过固定二进制哈希后，核对并按需修复缺失/错误的 LICENSE；修复使用临时文件替换，不沿目标链接写入。
+- 回归同时覆盖“源码资源过滤”与“从物理暂存包实际调用安装模块”，避免源码中的文件掩盖漏装。覆盖许可修复、安装未完成不发布 marker、包内首次安装及后台 Mock 闭环。
+
+已提交：代理入口 `26e5034`；许可资源与安装完成标记 `0249638`。daemon build/typecheck、脚本语法、差异检查通过；打包/安装/网络/快捷连接 **5 文件 48 项通过**。其中既有“换地址后恢复审查”的短时轮询用例首次失败，未修改断言，单独及完整同组重跑均通过。Windows 从新包实际模块验证官方二进制版本与缺失许可缓存修复通过；测试仅执行校验后的官方 `--version`，没有执行测试伪二进制或付费模型。
+
+**当前本机状态：** 验收入口已使用系统静态代理，当前解包目录及实际组件缓存已经补齐许可资源。官方 cloudflared 2026.10.0 的二进制 SHA-256 匹配固定值。公网首次自检超时后，没有重建隧道；确认本机与公网元数据均为 HTTP 200，再重测相同地址，完整 OAuth metadata、MCP 认证保护、initialize、tools/list 与内部 connection_probe 全部通过，`transport=ready`、`gateway=running`。应用与后台保留运行，计划没有执行，原业务应用和全局代理未修改。
+
+当次验证的 MCP 地址：`https://goat-arrives-regular-citation.trycloudflare.com/mcp`。它是本机 Quick Tunnel 地址，仍以连接中心当前值为准；隧道显式停止或退出后可能变化。此时 `remoteClientVerified=false`、`validGrants=0`：这证明公网入口与内部 MCP 自检可用，**没有证明 ChatGPT/Claude 已完成 OAuth 或成功读取业务工作区**。下一步在对应网页添加当前地址，回本机明确批准工作区/权限，再返回原网页完成授权，实际调用一次 workspace_query 核实。
+
+**重新生成的新安装器：**
+
+- 位置：`%TEMP%\tc-desktop-20261026-5wPoUV\build-connection-fixed\Token-Coupon-0.1.0-x64-preview-setup.exe`。
+- 大小：**124,660,484 字节（约 118.9 MiB）**；SHA-256：**`e52d5714e5c93ab1d5553b4a2511253140d27bb4dbd65fa1a1282331a57a15c4`**。
+- Windows 原生构建 ID：`0249638b9f0a-dirty`；修复源码已提交，保留的用户既有 `.gitignore` 改动使构建身份带 dirty。安装器未签名、未发布，也没有覆盖旧安装器或当前运行目录。
+- 包内身份发现、鉴权、Mock 规划→审查→批准→执行、重启、过期写入拒绝及记录恢复通过；非 Node 运行资源 **18,580,981 字节**，保持不打入可选 Agent 执行器。新包实际模块的官方组件缓存修复也通过；成品安装器内的真实压缩负载完整性检查通过，确认包含 cloudflared 许可文件。
+- 新 `.exe` 资源含许可文件，不代表正常快捷方式已自动继承所有系统代理；当前自动补充静态代理的是验收 `.cmd`。正式入口仍需可达的进程 HTTP_PROXY/HTTPS_PROXY/NO_PROXY；PAC、SOCKS 或代理认证支持未在本批扩展。
+
+相关证据在本次临时根目录：`acceptance-proxy-verification.json`、`fixed-package-component-verification.json`、新包的 `build-connection-fixed/desktop-build.json`、`payload-connection-fixed-verification.json`。需要验证安装/升级/卸载时使用新包，先结束活跃任务并备份 profile；本次没有实际安装或卸载产品，不据此标记人工验收完成。当前应用已可继续使用，不需要为了消除该下载错误立即重装。
