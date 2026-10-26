@@ -859,7 +859,7 @@ function renderRoute() {
   for (const panel of document.querySelectorAll("[data-plan-panel]")) show(panel, panel.dataset.planPanel === route.tab);
   if (globalThis.tokenCouponPlanTabs) globalThis.tokenCouponPlanTabs.render(route.tab || "overview", tab => void planTab(tab));
   else for (const button of document.querySelectorAll("[data-plan-tab]")) { const selected = button.dataset.planTab === route.tab || button.dataset.planTab === "execution" && ["models", "attempts"].includes(route.tab); button.classList.toggle("active", selected); button.setAttribute("aria-current", selected ? "page" : "false"); }
-  document.title = route.page === "plan" ? `${state.planning?.draft?.plan?.title || "Plan"} · Token Coupon` : `${$("#project-title").textContent} · Token Coupon`;
+  document.title = route.page === "plan" ? `${state.planning?.draft?.plan?.title || "Plan"} · orchestrator-tokenCoupon` : `${$("#project-title").textContent} · orchestrator-tokenCoupon`;
   closeNavigation();
   renderExecutionFloatingStatus();
   renderPlanningProgress();
@@ -4620,18 +4620,18 @@ function notifyPendingApprovals(items) {
   state.notifiedRequests ??= new Set();
   const fresh = items.filter(item => !state.notifiedRequests.has(item.requestId));
   for (const item of fresh) state.notifiedRequests.add(item.requestId);
-  const base = `${state.planning?.draft?.plan.title || "Token Coupon"} · Token Coupon`;
+  const base = `${state.planning?.draft?.plan.title || "orchestrator-tokenCoupon"} · orchestrator-tokenCoupon`;
   document.title = items.length ? `【${items.length} 项待审批】${base}` : base;
   if (fresh.length && (document.hidden || !document.hasFocus())) {
     const workspaceId = state.workspace?.workspaceId, planningId = state.planning?.planningId;
     const requestedTaskId = fresh.length === 1 ? fresh[0].owner?.taskId ?? fresh[0].taskId : undefined;
     const taskId = typeof requestedTaskId === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(requestedTaskId) ? requestedTaskId : undefined;
     if (window.tokenCouponDesktop && state.desktopNotificationsEnabled) {
-      void window.tokenCouponDesktop.showNotification({ title: "Token Coupon · 需要你的决定", body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, ...(workspaceId && planningId ? { workspaceId, planningId, ...(taskId ? { taskId } : {}) } : {}) })
+      void window.tokenCouponDesktop.showNotification({ title: "orchestrator-tokenCoupon · 需要你的决定", body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, ...(workspaceId && planningId ? { workspaceId, planningId, ...(taskId ? { taskId } : {}) } : {}) })
         .then(shown => { if (!shown) $("#notification-status").textContent = "系统通知不可用，页面内仍会显示待审批。"; })
         .catch(() => { $("#notification-status").textContent = "系统通知不可用，页面内仍会显示待审批。"; });
     } else if (!window.tokenCouponDesktop && typeof Notification !== "undefined" && Notification.permission === "granted") {
-      try { const note = new Notification("Token Coupon · 需要你的决定", { body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, tag: `tc-${state.workspace?.workspaceId}-${state.planning?.planningId}` }); note.onclick = () => { window.focus(); if (workspaceId && planningId) void navigate(`/workspaces/${encodeURIComponent(workspaceId)}/plans/${encodeURIComponent(planningId)}/execution`); note.close(); }; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
+      try { const note = new Notification("orchestrator-tokenCoupon · 需要你的决定", { body: `${fresh.length} 个新请求，打开本机页面核对后允许或拒绝。`, tag: `tc-${state.workspace?.workspaceId}-${state.planning?.planningId}` }); note.onclick = () => { window.focus(); if (workspaceId && planningId) void navigate(`/workspaces/${encodeURIComponent(workspaceId)}/plans/${encodeURIComponent(planningId)}/execution`); note.close(); }; } catch { $("#notification-status").textContent = "系统通知不可用，仍保留页签和页面提醒。"; }
     }
   }
   while (state.notifiedRequests.size > 500) state.notifiedRequests.delete(state.notifiedRequests.values().next().value);
@@ -5604,7 +5604,7 @@ $("#enable-notifications").addEventListener("click", async () => {
       $("#enable-notifications").textContent = state.desktopNotificationsEnabled ? "关闭桌面提醒" : "开启桌面提醒";
       $("#notification-status").textContent = state.desktopNotificationsEnabled ? "已开启：新审批到达且页面在后台时发送系统通知。" : "桌面提醒已关闭，页面内仍会显示待审批。";
       if (state.desktopNotificationsEnabled) {
-        const shown = await window.tokenCouponDesktop.showNotification({ title: "Token Coupon", body: "桌面提醒已开启。" });
+        const shown = await window.tokenCouponDesktop.showNotification({ title: "orchestrator-tokenCoupon", body: "桌面提醒已开启。" });
         if (!shown) $("#notification-status").textContent = "桌面提醒设置已保存，但当前系统不支持弹出通知；页面内仍会显示待审批。";
       }
     } catch { $("#notification-status").textContent = "桌面提醒设置未保存；请检查本机应用状态。"; }

@@ -15,10 +15,14 @@ import { existingDesktopDirectory } from "./desktop-folders.js";
 import { DesktopReconnector } from "./desktop-reconnect.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+// Display branding must not move the established Chromium/preferences profile.
+const displayName = "orchestrator-tokenCoupon";
+if (app.isPackaged) app.setName("Token Coupon");
 const desktopUserData = resolveDesktopUserData(app.getPath("userData"), app.isPackaged);
 mkdirSync(join(desktopUserData, "chromium"), { recursive: true, mode: 0o700 });
 app.setPath("userData", desktopUserData);
 app.setPath("sessionData", join(desktopUserData, "chromium"));
+app.setName(displayName);
 const defaultHome = app.getPath("home") || homedir();
 const profileDirectory = resolveDaemonProfileDirectory(process.argv, process.env, defaultHome);
 let window: BrowserWindow | undefined;
@@ -169,7 +173,7 @@ async function connectOrExplain(): Promise<DesktopAttachment | undefined> {
     try { return await connectDaemon(); }
     catch (error) {
       const result = await dialog.showMessageBox({
-        type: "warning", title: "Token Coupon 后台尚未就绪",
+        type: "warning", title: `${displayName} 后台尚未就绪`,
         message: "没有找到可复用的后台，应用也未能启动随包 daemon。",
         detail: `${describeAttachmentFailure(error)}\n\n桌面应用只连接通过 owner 身份和 HMAC 挑战验证的后台。查看日志后可选择重试；日志位于 ${join(app.getPath("userData"), "logs", "daemon.log")}。`,
         buttons: ["重试", "退出应用"], defaultId: 0, cancelId: 1, noLink: true,
@@ -211,7 +215,7 @@ function showMainWindow(): void {
 function refreshTrayMenu(): void {
   if (!tray) return;
   const items: Electron.MenuItemConstructorOptions[] = [
-    { label: "打开 Token Coupon", click: showMainWindow },
+    { label: `打开 ${displayName}`, click: showMainWindow },
     { label: reconnector.connectionState.phase === "reconnecting" ? "正在重新连接后台…" : "重新连接后台", enabled: reconnector.connectionState.phase !== "reconnecting", click: requestTrayReconnect },
     { type: "separator" },
     { label: managedDaemon ? "退出应用（后台继续运行）" : "退出应用（不停止已连接后台）", click: () => { quitting = true; app.quit(); } },
@@ -273,7 +277,7 @@ function installTray(): void {
   try {
     const icon = join(here, process.platform === "win32" ? "token-coupon.ico" : "token-coupon.png");
     tray = new Tray(icon);
-    tray.setToolTip("Token Coupon");
+    tray.setToolTip(displayName);
     refreshTrayMenu();
     tray.on("click", showMainWindow);
     tray.on("double-click", showMainWindow);
@@ -333,7 +337,7 @@ else {
       installTray();
     }
   }).catch(error => {
-    dialog.showErrorBox("Token Coupon 启动失败", describeAttachmentFailure(error));
+    dialog.showErrorBox(`${displayName} 启动失败`, describeAttachmentFailure(error));
     quitting = true;
     app.quit();
   });

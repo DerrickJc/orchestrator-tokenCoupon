@@ -39,7 +39,7 @@ export async function prepareDesktopApp(source, destination) {
   await mkdir(clientRoot, { recursive: true });
   await copyBuiltFiles(join(source, "packages/client/dist"), join(clientRoot, "dist"));
   await writeFile(join(clientRoot, "package.json"), JSON.stringify({ name: client.name, version: client.version, type: client.type, exports: client.exports }, null, 2));
-  const manifest = { name: "token-coupon-desktop", productName: "Token Coupon", version: desktop.version,
+  const manifest = { name: "token-coupon-desktop", productName: "orchestrator-tokenCoupon", version: desktop.version,
     description: "Local task planning, execution and review desktop preview", type: "module", main: "dist/main.js", private: true,
     license: "UNLICENSED", dependencies: { "@token-coupon/client": client.version } };
   await writeFile(join(destination, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -48,14 +48,14 @@ export async function prepareDesktopApp(source, destination) {
 
 export function desktopBuilderConfiguration({ appDirectory, outputDirectory, electronVersion, electronDist }) {
   return {
-    appId: "org.token-coupon.desktop", productName: "Token Coupon", electronVersion,
+    appId: "org.token-coupon.desktop", productName: "orchestrator-tokenCoupon", electronVersion,
     directories: { app: appDirectory, output: outputDirectory },
     files: ["dist/**/*", "node_modules/@token-coupon/client/**/*", "package.json"],
     asar: true, npmRebuild: false, nodeGypRebuild: false, forceCodeSigning: false, publish: null,
     electronLanguages: ["en-US", "zh-CN"],
     ...(electronDist ? { electronDist } : {}),
     win: { icon: join(appDirectory, "dist/token-coupon.ico"), requestedExecutionLevel: "asInvoker", signAndEditExecutable: false },
-    nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
+    nsis: { shortcutName: "orchestrator-tokenCoupon", uninstallDisplayName: "orchestrator-tokenCoupon", oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
       deleteAppDataOnUninstall: false, runAfterFinish: false, artifactName: "Token-Coupon-${version}-${arch}-preview-setup.${ext}" },
     linux: { executableName: "token-coupon", category: "Development", icon: join(appDirectory, "dist/token-coupon.png") },
   };

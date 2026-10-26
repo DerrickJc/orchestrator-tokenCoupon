@@ -1805,7 +1805,7 @@ it("persists Electron desktop notification preference and focuses the requested 
   const h = await page({ hash: "#/workspaces/project/plans/first/overview", ready: true, approved: true, desktopPicker: true });
   h.element("enable-notifications").click();
   await expect.poll(() => h.desktopNotificationCalls.length).toBe(1);
-  expect(h.desktopNotificationCalls[0]).toMatchObject({ title: "Token Coupon", body: "桌面提醒已开启。" });
+  expect(h.desktopNotificationCalls[0]).toMatchObject({ title: "orchestrator-tokenCoupon", body: "桌面提醒已开启。" });
   expect(h.element("enable-notifications").textContent).toBe("关闭桌面提醒");
   (h.plans[0] as any).session = { sessionId: "desktop-session", status: "running", tasks: [{ taskId: "spec", title: "接口文档", status: "planned", attempts: [] }] };
   h.element("refresh").click();

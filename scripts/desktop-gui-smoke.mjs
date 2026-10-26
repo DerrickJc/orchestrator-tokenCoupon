@@ -50,7 +50,7 @@ async function launch() {
   console.log("GUI smoke：已取得窗口，等待页面与 preload…");
   page.setDefaultTimeout(20_000);
   page.on("pageerror", error => pageErrors.push(error.message));
-  await page.waitForFunction(() => !!window.tokenCouponDesktop && document.title.includes("Token Coupon"));
+  await page.waitForFunction(() => !!window.tokenCouponDesktop && /orchestrator-tokenCoupon|Token Coupon/.test(document.title));
   const attachment = await page.evaluate(() => window.tokenCouponDesktop.getAttachment());
   console.log("GUI smoke：本机 IPC 与后台身份已核实…");
   lastOrigin = attachment.origin;
