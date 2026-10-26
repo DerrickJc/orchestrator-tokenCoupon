@@ -744,8 +744,7 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 .workspace-directory-picker .directory-footer { display:block; padding:12px 18px; margin:0; border-top:1px solid var(--line); }
 .workspace-directory-picker #directory-selection { display:block; padding:0; background:transparent; margin-bottom:10px; color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .workspace-directory-picker .directory-footer > div { display:flex; justify-content:flex-end; align-items:center; gap:8px; }
-.workspace-directory-picker .directory-extra { margin-right:auto; font-size:11px; color:var(--muted); }
-.workspace-directory-picker .directory-extra[open] { display:flex; }
+.workspace-directory-picker #directory-open-system { margin-right:auto; }
 .workspace-directory-picker .button { padding:8px 12px; font-size:12px; margin:0; }
 @media(max-width:540px) { .workspace-directory-picker .directory-location-bar { flex-wrap:wrap; } #directory-query { flex:1 1 100%; width:100%; } .workspace-directory-picker .directory-footer > div { flex-wrap:wrap; } }
 #directory-dialog.workspace-directory-picker input { background:var(--paper); color:var(--ink); border:1px solid var(--line); border-radius:7px; font-size:12px; }

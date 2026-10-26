@@ -429,7 +429,7 @@ it("reconciles a restarted daemon without replaying mutations or discarding loca
 async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; desktopReconnect?: boolean; desktopRecovery?: string; agentComponents?: any[]; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
-  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopNotificationCalls: any[] = [], desktopExplorerCalls: string[] = [];
+  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopFolderPaths: Array<string | undefined> = [], desktopNotificationCalls: any[] = [], desktopExplorerCalls: string[] = [];
   let desktopFolderResult: { canceled: boolean; path?: string } = { canceled: false, path: "C:\\Projects\\Selected" };
   let desktopNotificationsEnabled = false;
   const desktopReconnectCalls: string[] = [], desktopRecoveryAcknowledged: string[] = [];
@@ -437,7 +437,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   if (options.desktopPicker) Object.assign(w, { tokenCouponDesktop: {
     getAttachment: async () => ({ origin: "http://127.0.0.1:4177", port: 4177, epoch: "desktop-test", profileId: "a".repeat(24), protocol: { major: 1, minor: 0 }, applicationVersion: "0.1.0", buildId: "test" }),
     openWorkspaceFolder: async (path: string) => { desktopExplorerCalls.push(path); },
-    chooseWorkspaceFolder: async () => { desktopFolderCalls.push(Date.now()); return desktopFolderResult; },
+    chooseWorkspaceFolder: async (path?: string) => { desktopFolderCalls.push(Date.now()); desktopFolderPaths.push(path); return desktopFolderResult; },
     showNotification: async (input: any) => { desktopNotificationCalls.push(input); return true; },
     getNotificationsEnabled: async () => desktopNotificationsEnabled,
     setNotificationsEnabled: async (enabled: boolean) => { desktopNotificationsEnabled = enabled; return enabled; },
@@ -603,7 +603,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
   await expect.poll(() => (w as any).__testState.initialized).toBe(true);
-  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopExplorerCalls, desktopNotificationCalls, desktopReconnectCalls, desktopRecoveryAcknowledged, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
+  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopFolderPaths, desktopExplorerCalls, desktopNotificationCalls, desktopReconnectCalls, desktopRecoveryAcknowledged, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
 
 it("reconnects through desktop IPC and preserves drafts on failure without submitting business writes", async () => {
@@ -3327,4 +3327,31 @@ it("starts a fresh workspace picker in the backend user home instead of the pack
   await expect.poll(() => (h.element("directory-path") as HTMLInputElement).value).toBe("/users/current");
   expect(h.element("directory-shortcuts").textContent).toContain("主目录");
   expect(h.posts).toHaveLength(0);
+});
+
+it("opens a confirmable system folder picker directly and keeps cancel separate from plain Explorer", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  h.element("add-workspace-main").click();
+  await expect.poll(() => (h.element("directory-open-system") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.element("directory-open-system").closest("details")).toBeNull();
+  h.setDesktopFolderResult({ canceled: true }); h.element("directory-open-system").click();
+  await expect.poll(() => h.element("directory-status").textContent).toContain("已取消系统选择");
+  expect((h.element("directory-dialog") as HTMLDialogElement).open).toBe(true);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("");
+  expect(h.desktopFolderPaths[0]).toBe("/projects"); expect(h.desktopExplorerCalls).toHaveLength(0);
+  h.setDesktopFolderResult({ canceled: false, path: "C:\\Projects\\Chosen" }); h.element("directory-open-system").click();
+  await expect.poll(() => (h.element("directory-dialog") as HTMLDialogElement).open).toBe(false);
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe("C:\\Projects\\Chosen");
+  expect(h.posts).toHaveLength(0); expect(h.nativeCalls).toHaveLength(0);
+});
+
+it("ignores late system folder choices when the workspace form has been left", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces", desktopPicker: true });
+  let finish: ((result: { canceled: boolean; path: string }) => void) | undefined;
+  h.w.tokenCouponDesktop.chooseWorkspaceFolder = () => new Promise(resolve => { finish = resolve; });
+  h.element("add-workspace-main").click(); await expect.poll(() => (h.element("directory-open-system") as HTMLButtonElement).disabled).toBe(false);
+  h.element("directory-open-system").click(); expect((h.element("directory-use") as HTMLButtonElement).disabled).toBe(true);
+  h.element("directory-close").click(); h.element("workspace-form-back").click();
+  finish!({ canceled: false, path: "C:\\late" }); await new Promise(resolve => setTimeout(resolve, 20));
+  expect((h.element("workspace-path") as HTMLInputElement).value).toBe(""); expect(h.posts).toHaveLength(0);
 });

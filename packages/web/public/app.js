@@ -5348,11 +5348,12 @@ function renderDirectoryLocations(shortcuts = []) {
 }
 function renderDirectorySelection() {
   const data = state.directoryBrowser, dirty = $("#directory-path").value.trim() !== data?.path;
-  const usable = !!data?.validated && !data.loading && !dirty;
+  const usable = !!data?.validated && !data.loading && !data.systemPicking && !dirty;
   $("#directory-selection").textContent = usable ? `选择：${data.selectedPath}` : dirty ? "路径已修改，请先定位后再选择。" : "请先打开一个有效文件夹。";
   $("#directory-selection").title = usable ? data.selectedPath : "";
   $("#directory-use").disabled = !usable;
-  $("#directory-open-system").disabled = !window.tokenCouponDesktop?.openWorkspaceFolder || !usable;
+  $("#directory-open-system").disabled = !window.tokenCouponDesktop?.chooseWorkspaceFolder || !!data?.loading || !!data?.systemPicking || !!state.nativePicking;
+  $("#directory-open-system").title = window.tokenCouponDesktop?.chooseWorkspaceFolder ? "打开系统文件夹选择窗口，可确认选择或取消返回" : "此入口需使用桌面应用；远程浏览器请在本弹窗选择文件夹";
 }
 async function openDirectoryBrowser() {
   if (!state.creatingWorkspace) return;
@@ -5360,7 +5361,7 @@ async function openDirectoryBrowser() {
   if (!dialog) {
     dialog = document.createElement("dialog"); dialog.id = "directory-dialog"; dialog.className = "workspace-directory-picker";
     dialog.setAttribute("aria-labelledby", "directory-title"); dialog.setAttribute("aria-describedby", "directory-description");
-    dialog.innerHTML = `<header class="directory-header"><div><h3 id="directory-title">选择工作区文件夹</h3><span id="directory-environment"></span></div><button id="directory-close" type="button" class="directory-icon-button" aria-label="关闭文件夹选择">×</button></header><p id="directory-description" class="sr-only">读取后台电脑的目录，远程电脑也可使用。单击文件夹进入，确认后回填路径；不自动登记或授权。搜索仅查当前目录。</p><div class="directory-path-bar"><label class="sr-only" for="directory-path">文件夹路径</label><input id="directory-path" autocomplete="off" placeholder="输入路径，例如 D:\\项目 或 /home/…"><button id="directory-go" type="button" class="button button-quiet">定位</button></div><nav class="directory-location-bar" aria-label="文件夹导航"><div class="directory-navigation"><button id="directory-back" type="button" class="directory-icon-button" aria-label="后退" title="后退">←</button><button id="directory-forward" type="button" class="directory-icon-button" aria-label="前进" title="前进">→</button><button id="directory-parent" type="button" class="directory-icon-button" aria-label="上一级" title="上一级">↑</button></div><div id="directory-breadcrumbs" aria-label="目录位置"></div><label class="sr-only" for="directory-query">搜索当前目录名称</label><input id="directory-query" type="search" autocomplete="off" placeholder="搜索当前目录"></nav><details id="directory-locations" class="directory-locations"><summary>常用位置与已有工作区</summary><nav id="directory-shortcuts" aria-label="常用位置与工作区"></nav></details><div class="directory-list-heading"><span>文件夹</span><span id="directory-status" role="status"></span></div><div id="directory-error-box" class="directory-error-box hidden"><span id="directory-error" role="status"></span><button id="directory-retry" type="button" class="button button-quiet">重试</button></div><div class="directory-content"><div id="directory-list" class="directory-folder-list" aria-label="当前目录的文件夹"></div><button id="directory-more" type="button" class="button button-quiet hidden">加载更多</button></div><footer class="directory-footer"><span id="directory-selection" role="status"></span><div><details class="directory-extra"><summary>更多</summary><button id="directory-open-system" type="button" class="button button-quiet">在文件资源管理器中打开</button></details><button id="directory-cancel" type="button" class="button button-quiet">取消</button><button id="directory-use" type="button" class="button button-primary">选择此文件夹</button></div></footer>`;
+    dialog.innerHTML = `<header class="directory-header"><div><h3 id="directory-title">选择工作区文件夹</h3><span id="directory-environment"></span></div><button id="directory-close" type="button" class="directory-icon-button" aria-label="关闭文件夹选择">×</button></header><p id="directory-description" class="sr-only">读取后台电脑的目录，远程电脑也可使用。单击文件夹进入，确认后回填路径；不自动登记或授权。搜索仅查当前目录。</p><div class="directory-path-bar"><label class="sr-only" for="directory-path">文件夹路径</label><input id="directory-path" autocomplete="off" placeholder="输入路径，例如 D:\\项目 或 /home/…"><button id="directory-go" type="button" class="button button-quiet">定位</button></div><nav class="directory-location-bar" aria-label="文件夹导航"><div class="directory-navigation"><button id="directory-back" type="button" class="directory-icon-button" aria-label="后退" title="后退">←</button><button id="directory-forward" type="button" class="directory-icon-button" aria-label="前进" title="前进">→</button><button id="directory-parent" type="button" class="directory-icon-button" aria-label="上一级" title="上一级">↑</button></div><div id="directory-breadcrumbs" aria-label="目录位置"></div><label class="sr-only" for="directory-query">搜索当前目录名称</label><input id="directory-query" type="search" autocomplete="off" placeholder="搜索当前目录"></nav><details id="directory-locations" class="directory-locations"><summary>常用位置与已有工作区</summary><nav id="directory-shortcuts" aria-label="常用位置与工作区"></nav></details><div class="directory-list-heading"><span>文件夹</span><span id="directory-status" role="status"></span></div><div id="directory-error-box" class="directory-error-box hidden"><span id="directory-error" role="status"></span><button id="directory-retry" type="button" class="button button-quiet">重试</button></div><div class="directory-content"><div id="directory-list" class="directory-folder-list" aria-label="当前目录的文件夹"></div><button id="directory-more" type="button" class="button button-quiet hidden">加载更多</button></div><footer class="directory-footer"><span id="directory-selection" role="status"></span><div><button id="directory-open-system" type="button" class="button button-quiet">在文件资源管理器中打开</button><button id="directory-cancel" type="button" class="button button-quiet">取消</button><button id="directory-use" type="button" class="button button-primary">选择此文件夹</button></div></footer>`;
     document.body.append(dialog);
     const close = () => { state.directoryRequest = (state.directoryRequest || 0) + 1; clearTimeout(state.directorySearchTimer); dialog.close(); };
     $("#directory-close").onclick = close; $("#directory-cancel").onclick = close;
@@ -5381,17 +5382,35 @@ async function openDirectoryBrowser() {
     };
     $("#directory-more").onclick = () => void loadDirectoryBrowser(state.directoryBrowser.path, state.directoryBrowser.nextOffset, state.directoryBrowser.query);
     $("#directory-retry").onclick = () => void loadDirectoryBrowser(state.directoryBrowser.requestedPath, 0, $("#directory-query").value);
+    const applyDirectory = (path, view) => {
+      if (view !== state.directoryBrowser || !dialog.open || !workspaceFormIsCurrent(view.formGeneration)) return;
+      $("#workspace-path").value = path; $("#workspace-selected-path").textContent = path; show($("#workspace-path-error"), false);
+      try { localStorage.setItem(directoryRecentKey(), path); } catch { /* Selection works without persistence. */ }
+      $("#workspace-path").dispatchEvent(new Event("input", { bubbles: true })); close();
+    };
     $("#directory-open-system").onclick = async () => {
       if ($("#directory-open-system").disabled) return;
-      try { await window.tokenCouponDesktop.openWorkspaceFolder(state.directoryBrowser.selectedPath); $("#directory-status").textContent = "已请求打开资源管理器"; }
-      catch (error) { $("#directory-error").textContent = error.message; show($("#directory-error-box")); }
+      const view = state.directoryBrowser, button = $("#directory-open-system");
+      view.systemPicking = true; state.nativePicking = true; button.textContent = "正在选择文件夹…"; button.setAttribute("aria-busy", "true");
+      $("#directory-status").textContent = "请在系统窗口选择文件夹，或取消返回"; renderDirectorySelection();
+      try {
+        const initialPath = view.validated && $("#directory-path").value.trim() === view.path ? view.selectedPath : undefined;
+        const result = await window.tokenCouponDesktop.chooseWorkspaceFolder(initialPath);
+        if (view !== state.directoryBrowser || !dialog.open || !workspaceFormIsCurrent(view.formGeneration)) return;
+        if (result.canceled) { $("#directory-status").textContent = "已取消系统选择，原路径保留"; return; }
+        if (typeof result.path !== "string" || !result.path) throw new Error("系统选择器未返回文件夹路径，请重试。");
+        applyDirectory(result.path, view);
+      } catch (error) {
+        if (view === state.directoryBrowser && dialog.open) { $("#directory-error").textContent = `系统选择未完成：${error.message}`; show($("#directory-error-box")); }
+      } finally {
+        state.nativePicking = false; view.systemPicking = false; button.textContent = "在文件资源管理器中打开"; button.removeAttribute("aria-busy");
+        if (dialog.open) renderDirectorySelection();
+      }
     };
     $("#directory-use").onclick = () => {
       const value = state.directoryBrowser;
-      if (!value?.validated || value.loading || $("#directory-path").value.trim() !== value.path || !workspaceFormIsCurrent(value.formGeneration)) return;
-      $("#workspace-path").value = value.selectedPath; $("#workspace-selected-path").textContent = value.selectedPath; show($("#workspace-path-error"), false);
-      try { localStorage.setItem(directoryRecentKey(), value.selectedPath); } catch { /* Selection works without persistence. */ }
-      $("#workspace-path").dispatchEvent(new Event("input", { bubbles: true })); close();
+      if (!value?.validated || value.loading || value.systemPicking || $("#directory-path").value.trim() !== value.path) return;
+      applyDirectory(value.selectedPath, value);
     };
   }
   state.directoryBrowser = { formGeneration: state.folderSelectionGeneration, history: [], historyIndex: -1, validated: false };

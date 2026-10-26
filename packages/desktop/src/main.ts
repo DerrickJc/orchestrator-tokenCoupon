@@ -98,12 +98,13 @@ function registerIpc(): void {
     writeNotificationPreference(enabled);
     return enabled;
   });
-  ipcMain.handle(DESKTOP_IPC.chooseFolder, async event => {
+  ipcMain.handle(DESKTOP_IPC.chooseFolder, async (event, input?: unknown) => {
     assertTrustedSender(event);
     const preference = join(desktopUserData, "last-folder.json");
     let defaultPath = app.getPath("home");
     try { defaultPath = await existingDesktopDirectory(JSON.parse(readFileSync(preference, "utf8")).path); } catch { /* A removed directory does not prevent selection. */ }
-    const result = await dialog.showOpenDialog(window!, { title: "选择工作区文件夹", defaultPath, properties: ["openDirectory"] });
+    if (input !== undefined) defaultPath = await existingDesktopDirectory(input);
+    const result = await dialog.showOpenDialog(window!, { title: "选择工作区文件夹", buttonLabel: "选择此文件夹", defaultPath, properties: ["openDirectory"] });
     const path = result.canceled || !result.filePaths[0] ? undefined : await existingDesktopDirectory(result.filePaths[0]);
     if (path) { try { writeFileSync(preference, JSON.stringify({ path }) + "\n", { mode: 0o600 }); } catch { /* Remembering a location is optional. */ } }
     return { canceled: result.canceled, path };

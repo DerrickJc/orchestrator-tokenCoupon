@@ -15,7 +15,7 @@ interface Window {
       buildId: string;
     }>;
     openWorkspaceFolder(path: string): Promise<{ opened: boolean }>;
-    chooseWorkspaceFolder(): Promise<{ canceled: boolean; path?: string }>;
+    chooseWorkspaceFolder(defaultPath?: string): Promise<{ canceled: boolean; path?: string }>;
     showNotification(input: { title: string; body: string; workspaceId?: string; planningId?: string; taskId?: string }): Promise<boolean>;
     getNotificationsEnabled(): Promise<boolean>;
     setNotificationsEnabled(enabled: boolean): Promise<boolean>;

@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld("tokenCouponDesktop", Object.freeze({
   getConnectionState: () => ipcRenderer.invoke(channels.connectionState),
   getRecoveryState: () => ipcRenderer.invoke(channels.recoveryState),
   acknowledgeRecovery: id => ipcRenderer.invoke(channels.acknowledgeRecovery, id),
-  chooseWorkspaceFolder: () => ipcRenderer.invoke(channels.chooseFolder),
+  chooseWorkspaceFolder: defaultPath => ipcRenderer.invoke(channels.chooseFolder, defaultPath),
   openWorkspaceFolder: path => ipcRenderer.invoke(channels.openFolder, path),
   copyText: text => ipcRenderer.invoke(channels.copyText, text),
   showNotification: input => ipcRenderer.invoke(channels.notification, input),
