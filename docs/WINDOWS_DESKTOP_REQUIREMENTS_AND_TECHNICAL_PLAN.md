@@ -1619,7 +1619,7 @@ Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json
 ### 15.3 启动本次新版验收入口
 
 1. 在运行后台的这台 Windows 文件资源管理器地址栏粘贴 `%TEMP%\tc-desktop-20261026-5wPoUV\build`。
-2. 双击 **`Launch Acceptance Preview.cmd`**。它启动该目录下的 `win-unpacked\orchestrator-tokenCoupon.exe`，使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
+2. 双击 **`Launch Acceptance Preview.cmd`**。它启动脚本指定的预览 EXE（当前为第 15.9 节的新目录），使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
 3. 打开左侧 **桌面交互验收** 工作区，已有两个离线 Mock 草案和含中文/空格的示例目录，用于切换与编辑验收；准备过程未调用付费模型。第一次出现系统默认方式设置时明确选择所需方式，未准备真实 Agent 时不要启动新的 Agent 规划。
 4. 快捷连接初始关闭，预留 MCP 网关端口 **4188**，避免抢用原预览的 4178；需要真实网页验证时在连接中心明确建立独立验收连接。此入口不会自动继承原业务授权或使旧 MCP 地址指向新 profile。
 5. 验收后如需停止测试后台，先确认测试任务不在执行，再使用托盘的安全停止后台入口。只关闭窗口会保留后台，这是现有生命周期设计。安装器另行按下一节验收，不必为检查界面立即覆盖原安装。
@@ -1720,10 +1720,24 @@ node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacke
 
 另使用真实 Chromium 配合隔离 Mock HTTP 进行 57 文件交互验收：保存身份、筛选后累计勾选、取消恢复及快速重新打开通过；1100/760/540 像素窗口中提示保持两条、正常滚动、无重叠和页面横向溢出，没有浏览器脚本错误。报告与截图位于 `/tmp/tc-git-ui-browser-check/`。这是实际浏览器布局验证，HTTP 与身份保存为 Mock；没有修改用户业务仓库、调用付费模型或据此宣称 Windows 文件资源管理器原生弹窗已人工验收。
 
-**更新与验收：** 源码与 `packages/web/dist`、`packages/daemon/dist` 已更新。已安装或解包的旧 EXE 不会自动读取源码构建；需要使用更新后的运行资源/安装包，单独刷新旧包只能重新加载旧资源。本次未中断运行中的 Windows 应用、后台或公网隧道，也未重建安装器。
+**更新与验收：** 源码与 `packages/web/dist`、`packages/daemon/dist` 已更新。已安装或解包的旧 EXE 不会自动读取源码构建；需要使用更新后的运行资源/安装包，单独刷新旧包只能重新加载旧资源。本节源码验证完成时尚未更新 Windows 应用，也未重建安装器；后续 Windows 更新与启动结果见第 15.9 节。
 
 1. 更新后的应用打开已批准计划 → 执行结果 → 运行前准备 · Git。
 2. 在无首次提交的测试仓库，核对姓名/邮箱缺失时有明确提示；填写并确认保存，应显示身份已就绪。已有配置无需重填。
 3. 点击“浏览项目文件”，确认可搜索和预览；点击“选择提交文件”，按路径搜索、选择并取消，核对数量恢复；重新选择后预览提交。
 4. 在 Windows 桌面应用点击“在文件资源管理器中打开”，应打开当前工作区。此项仍需用户在实际桌面确认。
 5. 连续触发多次操作，核对可见操作提示不超过两条、旧记录折叠保留、滚动不遮挡内容。
+
+
+### 15.9 本机 Windows 预览更新（2026-10-26）
+
+已将第 15.8 节修复构建为本机 Windows x64 预览并实际启动。构建 ID 为 `41b69c1d3fbf`，使用原生 Windows Node v22.12.0 与 Electron 44.9.1 进行打包及包内验证；未修改安装器或远程 Release。
+
+- 新 EXE：`%TEMP%\tc-desktop-20261026-5wPoUV\build-git-ui-41b69c1d3fbf\win-unpacked\orchestrator-tokenCoupon.exe`。
+- **日常仍双击原入口：** `%TEMP%\tc-desktop-20261026-5wPoUV\build\Launch Acceptance Preview.cmd`，已改为启动上述新版。不要直接打开旧 `build\win-unpacked` 的 EXE。
+- 保留原 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827` 中 desktop/daemon 数据目录及代理配置，没有因新 EXE 路径生成另一套空白 profile。启动前原后台 owner 已不存在，也没有关闭活跃任务；启动后工作区登记文件逐字节保持一致，两个工作区、三条规划可读取，原 OAuth 记录保留。
+- 原 `build` 与 `build-connection-fixed` 文件保留；原启动脚本另备份为 `Launch Acceptance Preview.cmd.before-41b69c1d3fbf`。这是本机预览更新，不是已实现自动更新系统。
+
+**验证：** 新包内真实后台完成身份发现/HMAC、鉴权、Mock 规划→审查→批准→执行、重启、过期写入拒绝和历史 Attempt 读取。原生 Windows GUI 验证启动、preload 隔离、原生剪贴板、后台复用、安全停止与重启、实时失联重连、未保存草稿恢复且不重放写操作、第二实例隔离、任务页深浅色与键盘导航通过。测试使用独立临时 profile，不调用付费模型或复用业务任务。最终使用原验收 profile 启动新版，后台构建 ID 为 `41b69c1d3fbf`，新版 Git 控件随实际页面返回；应用保持运行。最终只读复查公网连接为 `transport=ready`、`gateway=running`，保留 1 条有效授权、无待审批，地址仍为 `https://goat-arrives-regular-citation.trycloudflare.com/mcp`；这不是一次新的网页工具调用证明。
+
+报告位于本机临时根目录：`build-git-ui-41b69c1d3fbf/desktop-build.json`、`gui-git-ui-41b69c1d3fbf/desktop-gui-smoke.json` 和 `windows-git-ui-update.json`。本次更新没有代替真实 GPT/Claude 网页调用验收，也没有声称已完成 Windows 原生文件夹弹窗、安装/升级/卸载的人工验收。
