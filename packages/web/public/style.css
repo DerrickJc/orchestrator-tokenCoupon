@@ -687,3 +687,19 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 #git-identity input { width:100%; box-sizing:border-box; }
 #git-readiness-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 #git-readiness-actions .field-error { flex-basis:100%; }
+
+.git-file-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.git-files-dialog[open] { display:flex; flex-direction:column; width:min(720px,calc(100vw - 24px)); max-height:calc(100dvh - 32px); overflow:hidden; box-sizing:border-box; }
+.git-files-dialog .section-title { margin:0; flex-shrink:0; gap:12px; }
+.git-files-dialog > label { margin:8px 0 4px; font-size:12px; }
+.git-files-dialog > input { flex-shrink:0; width:100%; box-sizing:border-box; }
+.git-files-dialog .git-file-list { flex:1 1 auto; min-height:80px; max-height:46vh; margin:12px 0; overflow:auto; }
+.git-files-dialog .git-tree-file,.git-files-dialog .git-tree-folder-label,.git-files-dialog .git-tree-select-all { margin:0; line-height:1.4; min-height:28px; font-size:12px; }
+.git-files-dialog .git-tree-file input,.git-files-dialog .git-tree-folder-label input,.git-files-dialog .git-tree-select-all input { margin:0; width:14px; height:14px; }
+.git-files-dialog .git-tree-folder > summary { min-height:28px; }
+.git-files-dialog .git-tree-children { margin-left:14px; }
+.git-files-footer { display:flex; flex-shrink:0; align-items:center; justify-content:space-between; gap:12px; padding-top:12px; border-top:1px solid var(--line); }
+.git-files-dialog .git-tree-file:hover,.git-files-dialog .git-tree-folder > summary:hover { background:var(--soft); }
+.git-files-dialog { border:1px solid var(--line); border-radius:12px; padding:20px; background:var(--paper); color:var(--ink); box-shadow:0 20px 80px #17201735; }
+.git-files-dialog::backdrop { background:#17201755; }
+#git-file-selection { margin-top:16px; padding-top:12px; border-top:1px solid var(--line); }

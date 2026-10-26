@@ -800,8 +800,9 @@ async function applyRoute(path, replace = false) {
     if (route.workspaceId && !state.workspaces.some(item => item.workspaceId === route.workspaceId)) throw new Error("该工作区未登记，请重新选择。");
     state.route = route;
     if (previous?.workspaceId !== route.workspaceId || previous?.planningId !== route.planningId) {
-      for (const id of ["dag-dialog", "dag-task-dialog", "task-results-dialog", "session-continue-dialog"]) if ($("#" + id).open) $("#" + id).close();
-      state.dagView = null; state.taskResultView = null; state.continueContext = null;
+      finishGitFileSelection();
+      for (const id of ["dag-dialog", "dag-task-dialog", "task-results-dialog", "session-continue-dialog", "git-preview-dialog"]) if ($("#" + id).open) $("#" + id).close();
+      state.dagView = null; state.taskResultView = null; state.continueContext = null; state.gitPreview = null;
     }
     if (route.page !== "connect") state.connectionFlow = null;
     if (!route.workspaceId && route.page !== "settings") {
@@ -1901,7 +1902,7 @@ async function refreshGitReadiness(force = false) {
 }
 function renderGitReadiness(needed) {
   show($("#git-readiness"), needed);
-  if (!needed) return true;
+  if (!needed) { if ($("#git-files-dialog").open) finishGitFileSelection(); return true; }
   const data = state.gitReadiness?.workspaceId === state.workspace?.workspaceId ? state.gitReadiness : null;
   if (state.gitResultWorkspace !== state.workspace?.workspaceId) $("#git-commit-result").textContent = "";
   $("#git-workspace-path").textContent = `工作区：${state.workspace?.path || ""}`;
@@ -1928,10 +1929,21 @@ function renderGitReadiness(needed) {
   $("#git-steps").textContent = `检查仓库 → 检查基线 → 处理变更 → 就绪 · 当前：${({ not_repository: "等待初始化", no_commit: "等待首次提交", metadata_tracked: "修复运行记录跟踪", dirty: "等待确认提交", ready: "全部完成" })[data?.state] || "检查中／需处理"}`;
   const selection = $("#git-file-selection"), files = $("#git-file-list");
   const signature = JSON.stringify([state.workspace?.workspaceId, data?.changes]);
-  show(selection, ["dirty", "no_commit"].includes(data?.state) && data?.changes?.some(item => !item.runtime));
+  show(selection, !!data && !["wrong_root", "error"].includes(data.state));
+  const nativeExplorer = !!window.tokenCouponDesktop?.openWorkspaceFolder;
+  $("#git-open-system").disabled = !nativeExplorer;
+  if (state.gitExplorerWorkspace !== state.workspace?.workspaceId) { state.gitExplorerWorkspace = state.workspace?.workspaceId; $("#git-system-status").textContent = ""; }
+  $("#git-open-system").title = nativeExplorer ? "打开后台电脑上的工作区文件夹" : "文件资源管理器入口仅在桌面应用中可用；浏览器中仍可浏览和选择变更文件";
   if (state.gitFilesSignature !== signature) {
     state.gitFilesSignature = signature; files.replaceChildren();
-    renderGitFileTree((data?.changes || []).filter(item => !item.runtime), files);
+    state.gitFileChanges = (data?.changes || []).filter(item => !item.runtime);
+    const available = new Set(state.gitFileChanges.map(item => item.path));
+    if (state.gitSelectionWorkspace !== state.workspace?.workspaceId) {
+      if ($("#git-files-dialog").open) finishGitFileSelection();
+      state.gitSelectionWorkspace = state.workspace?.workspaceId; state.gitSelectedPaths = new Set(); $("#git-files-filter").value = "";
+    }
+    state.gitSelectedPaths = new Set([...(state.gitSelectedPaths || [])].filter(path => available.has(path)));
+    renderGitFileTree(state.gitFileChanges, files);
   }
   if (data?.state === "dirty" && data.changes?.some(item => item.runtime && item.code === "D ")) {
     const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = "查看运行记录变更并提交";
@@ -1959,6 +1971,9 @@ function renderGitReadiness(needed) {
   return data?.state === "ready";
 }
 function renderGitFileTree(changes, root) {
+  root.replaceChildren();
+  const query = $("#git-files-filter").value.trim().normalize("NFKC").toLocaleLowerCase();
+  changes = changes.filter(item => !query || item.path.normalize("NFKC").toLocaleLowerCase().includes(query));
   if (state.gitSelectionWorkspace !== state.workspace?.workspaceId) { state.gitSelectionWorkspace = state.workspace?.workspaceId; state.gitSelectedPaths = new Set(); }
   const tree = { dirs: new Map(), files: [] }, allPaths = changes.map(item => item.path);
   for (const change of changes) {
@@ -1968,8 +1983,8 @@ function renderGitFileTree(changes, root) {
   }
   const selectAll = document.createElement("label"); selectAll.className = "git-tree-select-all";
   const all = document.createElement("input"); all.type = "checkbox"; all.dataset.allFiles = "true"; all.checked = allPaths.length > 0 && allPaths.every(path => state.gitSelectedPaths.has(path));
-  all.addEventListener("change", () => { state.gitSelectedPaths = new Set(all.checked ? allPaths : []); for (const input of root.querySelectorAll("input[data-file-path]")) input.checked = all.checked; updateGitFolderChecks(root); });
-  selectAll.append(all, document.createTextNode(`全选本次变更（${allPaths.length} 个文件）`)); root.append(selectAll);
+  all.addEventListener("change", () => { for (const path of allPaths) all.checked ? state.gitSelectedPaths.add(path) : state.gitSelectedPaths.delete(path); for (const input of root.querySelectorAll("input[data-file-path]")) input.checked = all.checked; updateGitFolderChecks(root); });
+  selectAll.append(all, document.createTextNode(`${query ? "全选搜索结果" : "全选本次变更"}（${allPaths.length} 个文件）`)); root.append(selectAll);
   const makeFile = change => {
     const label = document.createElement("label"); label.className = "git-tree-file";
     const input = document.createElement("input"); input.type = "checkbox"; input.dataset.filePath = change.path; input.checked = state.gitSelectedPaths.has(change.path);
@@ -1982,7 +1997,7 @@ function renderGitFileTree(changes, root) {
   const renderNode = (node, parent, prefix = "") => {
     for (const [name, child] of [...node.dirs].sort(([a], [b]) => a.localeCompare(b))) {
       const path = prefix ? `${prefix}/${name}` : name, details = document.createElement("details"), summary = document.createElement("summary"), label = document.createElement("label");
-      details.className = "git-tree-folder"; label.className = "git-tree-folder-label";
+      details.className = "git-tree-folder"; details.open = !!query; label.className = "git-tree-folder-label";
       const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.dataset.folderPath = path;
       checkbox.addEventListener("click", event => event.stopPropagation());
       checkbox.addEventListener("change", () => { const matches = allPaths.filter(file => file.startsWith(`${path}/`)); for (const file of matches) checkbox.checked ? state.gitSelectedPaths.add(file) : state.gitSelectedPaths.delete(file); details.querySelectorAll("input[data-file-path]").forEach(input => input.checked = checkbox.checked); updateGitFolderChecks(root); });
@@ -1995,6 +2010,7 @@ function renderGitFileTree(changes, root) {
     for (const file of node.files) parent.append(makeFile(file));
   };
   renderNode(tree, root);
+  if (!changes.length) { const empty = document.createElement("p"); empty.className = "hint"; empty.textContent = query ? "没有匹配的变更文件。已选文件仍会保留。" : "当前没有可提交的项目文件变更；可使用文件资源管理器查看目录。"; root.append(empty); }
   updateGitFolderChecks(root);
 }
 function gitChangeLabel(code) {
@@ -2005,6 +2021,10 @@ function gitChangeLabel(code) {
   return labels.filter(([flag]) => code?.includes(flag)).map(([, label]) => label).join("、") || "文件变更";
 }
 function updateGitFolderChecks(root) {
+  const count = state.gitSelectedPaths?.size || 0, total = state.gitFileChanges?.length || 0;
+  $("#git-file-selection-summary").textContent = `${total} 个项目文件有变更 · 已选 ${count} 个`;
+  $("#git-files-count").textContent = `已选 ${count} / ${total} 个文件`;
+  $("#git-preview-selected").disabled = count === 0 || !!state.activeJob;
   const files = [...root.querySelectorAll("input[data-file-path]")], selected = files.filter(input => input.checked).length, all = root.querySelector("input[data-all-files]");
   if (all) { all.checked = files.length > 0 && selected === files.length; all.indeterminate = selected > 0 && selected < files.length; }
   for (const folder of root.querySelectorAll(".git-tree-folder")) {
@@ -2023,7 +2043,7 @@ async function previewGitFromUI(mode) {
   if (!state.workspace || state.activeJob) return;
   const workspaceId = state.workspace.workspaceId;
   try {
-    const paths = [...document.querySelectorAll('#git-file-list input[data-file-path]:checked')].map(input => input.dataset.filePath);
+    const paths = [...(state.gitSelectedPaths || [])];
     const preview = await api(`/api/v1/workspaces/${workspaceId}/git/preview`, { method: "POST", body: JSON.stringify({ mode, paths }) });
     if (workspaceId !== state.workspace?.workspaceId) return;
     state.gitPreview = { ...preview, workspaceId };
@@ -5513,6 +5533,41 @@ async function openWorkspaceAuthorization() {
 $("#workspace-manage-access").addEventListener("click", openWorkspaceAuthorization);
 $("#workspace-enable-access").addEventListener("click", openWorkspaceAuthorization);
 $("#plan-workspace-access").addEventListener("click", openWorkspaceAuthorization);
+$("#git-browse-project").addEventListener("click", async () => { await openReferenceDialog(); await browseWorkspaceFiles(); });
+$("#git-browse-files").addEventListener("click", () => {
+  if (!state.workspace) return;
+  state.gitFilesDialog = { workspaceId: state.workspace.workspaceId, selection: new Set(state.gitSelectedPaths || []) };
+  $("#git-files-workspace").textContent = state.workspace.path;
+  $("#git-files-filter").value = "";
+  renderGitFileTree(state.gitFileChanges || [], $("#git-file-list"));
+  $("#git-files-dialog").showModal();
+});
+$("#git-files-filter").addEventListener("input", () => renderGitFileTree(state.gitFileChanges || [], $("#git-file-list")));
+function finishGitFileSelection(applied = false) {
+  const snapshot = state.gitFilesDialog; state.gitFilesDialog = null;
+  if (snapshot && snapshot.workspaceId === state.workspace?.workspaceId) {
+    if (!applied) { const valid = new Set((state.gitFileChanges || []).map(item => item.path)); state.gitSelectedPaths = new Set([...snapshot.selection].filter(path => valid.has(path))); }
+    $("#git-files-filter").value = ""; renderGitFileTree(state.gitFileChanges || [], $("#git-file-list"));
+  }
+  if ($("#git-files-dialog").open) $("#git-files-dialog").close();
+}
+$("#git-files-close").addEventListener("click", () => finishGitFileSelection());
+$("#git-files-apply").addEventListener("click", () => finishGitFileSelection(state.gitFilesDialog?.workspaceId === state.workspace?.workspaceId));
+$("#git-files-dialog").addEventListener("cancel", event => { event.preventDefault(); finishGitFileSelection(); });
+$("#git-files-dialog").addEventListener("close", () => {
+  // Native close events are queued. An event from the preceding dialog must not
+  // cancel a newly opened selection, or change another workspace’s selection.
+  if (!$("#git-files-dialog").open) finishGitFileSelection();
+});
+$("#git-open-system").addEventListener("click", async () => {
+  const workspace = state.workspace;
+  if (!workspace || !window.tokenCouponDesktop?.openWorkspaceFolder) return;
+  $("#git-system-status").textContent = "正在打开文件资源管理器…";
+  try {
+    await window.tokenCouponDesktop.openWorkspaceFolder(workspace.path);
+    if (state.workspace?.workspaceId === workspace.workspaceId) $("#git-system-status").textContent = "已请求打开此工作区。外部修改文件后，请点击“重新检查”。";
+  } catch (error) { if (state.workspace?.workspaceId === workspace.workspaceId) $("#git-system-status").textContent = `未能打开文件资源管理器：${error.message}`; }
+});
 $("#git-preview-selected").addEventListener("click", () => previewGitFromUI("selected"));
 $("#git-preview-close").addEventListener("click", () => { $("#git-preview-dialog").close(); state.gitPreview = null; });
 $("#git-confirm-commit").addEventListener("click", confirmGitCommit);

@@ -429,13 +429,14 @@ it("reconciles a restarted daemon without replaying mutations or discarding loca
 async function page(options: { hash?: string; ready?: boolean; empty?: boolean; approved?: boolean; pendingAuth?: boolean; gitState?: string; multiple?: boolean; legacyDaemon?: boolean; desktopPicker?: boolean; desktopReconnect?: boolean; desktopRecovery?: string; agentComponents?: any[]; reactRunMode?: boolean; reactRunAdvanced?: boolean; reactRunAgentMode?: boolean; reactAgentSelection?: boolean; reactRuntimeModels?: boolean; reactSystemPolicyRouting?: boolean; settings?: ReturnType<typeof defaultSystemSettings> } = {}) {
   const [html, clientScript, script] = await Promise.all([readFile(new URL("../public/index.html", import.meta.url), "utf8"), readFile(new URL("../public/api-client.js", import.meta.url), "utf8"), readFile(new URL("../public/app.js", import.meta.url), "utf8")]);
   const dom = new JSDOM(html, { url: `http://127.0.0.1:4177/${options.hash || ""}`, runScripts: "outside-only", pretendToBeVisual: true }); windows.push(dom);
-  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopNotificationCalls: any[] = [];
+  const w = dom.window, posts: Array<{ path: string; body: any }> = [], copied: string[] = [], reads: string[] = [], desktopFolderCalls: number[] = [], desktopNotificationCalls: any[] = [], desktopExplorerCalls: string[] = [];
   let desktopFolderResult: { canceled: boolean; path?: string } = { canceled: false, path: "C:\\Projects\\Selected" };
   let desktopNotificationsEnabled = false;
   const desktopReconnectCalls: string[] = [], desktopRecoveryAcknowledged: string[] = [];
   Object.assign(w, { Headers, structuredClone, EventSource: class { addEventListener() {} close() {} } });
   if (options.desktopPicker) Object.assign(w, { tokenCouponDesktop: {
     getAttachment: async () => ({ origin: "http://127.0.0.1:4177", port: 4177, epoch: "desktop-test", profileId: "a".repeat(24), protocol: { major: 1, minor: 0 }, applicationVersion: "0.1.0", buildId: "test" }),
+    openWorkspaceFolder: async (path: string) => { desktopExplorerCalls.push(path); },
     chooseWorkspaceFolder: async () => { desktopFolderCalls.push(Date.now()); return desktopFolderResult; },
     showNotification: async (input: any) => { desktopNotificationCalls.push(input); return true; },
     getNotificationsEnabled: async () => desktopNotificationsEnabled,
@@ -522,7 +523,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
     root.replaceChildren(grid);
   } } });
   w.HTMLElement.prototype.scrollIntoView = () => undefined; w.confirm = () => true;
-  w.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); }; w.HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
+  w.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); }; w.HTMLDialogElement.prototype.close = function () { if (!this.hasAttribute("open")) return; this.removeAttribute("open"); this.dispatchEvent(new w.Event("close")); };
   const workspaces = options.empty ? [] : [{ workspaceId: "project", label: "排课后端", path: "/projects/排课后端" }];
   if (options.multiple) workspaces.push({ workspaceId: "other", label: "其他项目", path: "/projects/other" });
   const nativeCalls: any[] = [], nativeResults: any = { directory: { cancelled: false, paths: ["/projects/新项目"] }, files: { cancelled: false, paths: ["README.md"] } };
@@ -602,7 +603,7 @@ async function page(options: { hash?: string; ready?: boolean; empty?: boolean; 
   await expect.poll(() => w.location.hash || element("toast").textContent).not.toBe("");
   await expect.poll(() => element("connection-label").textContent).toContain("已连接");
   await expect.poll(() => (w as any).__testState.initialized).toBe(true);
-  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopNotificationCalls, desktopReconnectCalls, desktopRecoveryAcknowledged, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
+  return { w, element, visible, posts, copied, plans, reads, workspaces, nativeCalls, desktopFolderCalls, desktopExplorerCalls, desktopNotificationCalls, desktopReconnectCalls, desktopRecoveryAcknowledged, setDesktopFolderResult: (value: { canceled: boolean; path?: string }) => { desktopFolderResult = value; }, setInteractions: (items: any[]) => { pendingInteractions = items; }, setNativePicker: (kind: string, result: any) => { nativeResults[kind] = result; }, setGitStatus: (value: any) => { gitStatus = value; }, setGrants: (items: any[]) => { grants = items.map(item => ({ clientId: "gpt-client", clientName: "ChatGPT", redirectHost: "https://chatgpt.com", scopes: ["planning:read"], createdAt: Date.now(), ...item })); }, setApprovals: (items: any[]) => { approvalRequests = items; remote.pendingApprovals = items.length; remote.authorizationRequests = items.map((item: any) => ({ requestId: item.requestId, clientId: item.clientId, clientName: item.clientName, createdAt: item.createdAt, expiresAt: item.expiresAt, status: "pending" })); }, setRemote: (patch: any) => { remote = { ...remote, ...patch }; } };
 }
 
 it("reconnects through desktop IPC and preserves drafts on failure without submitting business writes", async () => {
@@ -3207,4 +3208,63 @@ it("explains missing Git identity before committing and reuses an already config
   await expect.poll(() => h.element("git-identity-status").textContent).toContain("无需重复填写");
   expect((h.element("git-identity") as HTMLDetailsElement).open).toBe(false);
   expect((h.element("git-name") as HTMLInputElement).value).toBe("Existing Author");
+});
+
+it("browses compact Git changes without losing selections across searches, and restores them on cancel", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true });
+  const changes = ["src/one.mjs", "src/two.mjs", "README.md"].map(path => ({ path, code: "??", runtime: false, staged: false }));
+  h.setGitStatus({ state: "no_commit", message: "等待首次提交", changes }); h.element("git-refresh").click();
+  await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("3 个");
+  const open = () => h.element("git-browse-files").click();
+  const filter = (value: string) => { (h.element("git-files-filter") as HTMLInputElement).value = value; h.element("git-files-filter").dispatchEvent(new h.w.Event("input")); };
+  const selectAll = () => { const all = h.element("git-file-list").querySelector<HTMLInputElement>('[data-all-files]')!; all.checked = true; all.dispatchEvent(new h.w.Event("change")); };
+  open(); filter("src/"); selectAll();
+  expect(h.element("git-files-count").textContent).toContain("已选 2 / 3");
+  filter("README"); selectAll(); expect(h.element("git-files-count").textContent).toContain("已选 3 / 3");
+  filter("not-found"); expect(h.element("git-file-list").textContent).toContain("没有匹配");
+  expect(h.element("git-files-count").textContent).toContain("已选 3 / 3");
+  h.element("git-files-apply").click(); await expect.poll(() => (h.element("git-files-dialog") as HTMLDialogElement).open).toBe(false);
+  open(); h.element("git-files-dialog").dispatchEvent(new h.w.Event("close")); filter("src/");
+  const all = h.element("git-file-list").querySelector<HTMLInputElement>('[data-all-files]')!; all.checked = false; all.dispatchEvent(new h.w.Event("change"));
+  h.element("git-files-close").click();
+  await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("已选 3 个");
+  const calls: any[] = [], original = h.w.fetch;
+  h.w.fetch = (async (raw: string, init?: any) => {
+    if (raw.endsWith("/git/preview")) { calls.push(JSON.parse(init.body)); return Response.json({ mode: "selected", paths: changes.map(item => item.path), head: "unborn", fingerprint: "a".repeat(64), suggestedMessage: "initial", previews: [] }); }
+    return original(raw, init);
+  }) as any;
+  h.element("git-preview-selected").click();
+  await expect.poll(() => calls.length).toBe(1);
+  expect(calls[0].paths.sort()).toEqual(changes.map(item => item.path).sort());
+  expect(h.posts.some(item => item.path.endsWith("/git/commit") || item.path.endsWith("/run"))).toBe(false);
+  expect((h.element("git-open-system") as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("offers Explorer for an empty native workspace and opens only its current registered path", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, desktopPicker: true });
+  h.setGitStatus({ state: "no_commit", message: "等待首次提交", changes: [] }); h.element("git-refresh").click();
+  await expect.poll(() => h.visible("git-file-selection")).toBe(true);
+  expect((h.element("git-open-system") as HTMLButtonElement).disabled).toBe(false);
+  h.element("git-open-system").click();
+  await expect.poll(() => h.desktopExplorerCalls.length).toBe(1);
+  expect(h.desktopExplorerCalls[0]).toBe(h.workspaces[0].path);
+  expect(h.element("git-system-status").textContent).toContain("已请求打开");
+  h.element("git-browse-files").click(); expect(h.element("git-file-list").textContent).toContain("没有可提交");
+  expect((h.element("git-preview-selected") as HTMLButtonElement).disabled).toBe(true);
+  expect(h.posts).toHaveLength(0);
+});
+
+it("closes the Git picker on workspace switches and browses project files without creating a commit", async () => {
+  const h = await page({ hash: "#/workspaces/project/plans/first/execution", ready: true, approved: true, multiple: true });
+  h.setGitStatus({ state: "dirty", message: "待提交", changes: [{ path: "README.md", code: "??", runtime: false, staged: false }] });
+  h.element("git-refresh").click(); await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("1 个");
+  h.element("git-browse-project").click();
+  await expect.poll(() => h.element("file-list").textContent).toContain("README.md");
+  h.element("file-close").click(); h.element("git-browse-files").click();
+  const all = h.element("git-file-list").querySelector<HTMLInputElement>('[data-all-files]')!; all.checked = true; all.dispatchEvent(new h.w.Event("change"));
+  h.w.location.hash = "#/workspaces/other/plans/first/execution";
+  await expect.poll(() => h.w.eval('__testState.workspace?.workspaceId')).toBe("other");
+  expect((h.element("git-files-dialog") as HTMLDialogElement).open).toBe(false);
+  await expect.poll(() => h.element("git-file-selection-summary").textContent).toContain("已选 0 个");
+  expect(h.posts).toHaveLength(0);
 });
