@@ -1619,7 +1619,7 @@ Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json
 ### 15.3 启动本次新版验收入口
 
 1. 在运行后台的这台 Windows 文件资源管理器地址栏粘贴 `%TEMP%\tc-desktop-20261026-5wPoUV\build`。
-2. 双击 **`Launch Acceptance Preview.cmd`**。它启动脚本指定的预览 EXE（当前为第 15.10 节的新目录），使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
+2. 双击 **`Launch Acceptance Preview.cmd`**。它启动脚本指定的预览 EXE（当前为第 15.11 节的新目录），使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
 3. 打开左侧 **桌面交互验收** 工作区，已有两个离线 Mock 草案和含中文/空格的示例目录，用于切换与编辑验收；准备过程未调用付费模型。第一次出现系统默认方式设置时明确选择所需方式，未准备真实 Agent 时不要启动新的 Agent 规划。
 4. 快捷连接初始关闭，预留 MCP 网关端口 **4188**，避免抢用原预览的 4178；需要真实网页验证时在连接中心明确建立独立验收连接。此入口不会自动继承原业务授权或使旧 MCP 地址指向新 profile。
 5. 验收后如需停止测试后台，先确认测试任务不在执行，再使用托盘的安全停止后台入口。只关闭窗口会保留后台，这是现有生命周期设计。安装器另行按下一节验收，不必为检查界面立即覆盖原安装。
@@ -1772,3 +1772,10 @@ node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacke
 确认后直接回填工作区表单并关闭应用内目录弹窗，不自动登记、授权或执行。取消系统窗口保留原路径，返回应用内浏览；打开中显示状态且防止重复打开。离开表单后迟到的选择结果忽略。普通浏览器无法使用桌面 IPC 时仍使用应用内目录浏览。Git 准备中的“打开资源管理器”继续负责查看文件，不改变为提交或选择操作。
 
 主进程同时校验可选初始路径与最终返回路径为真实绝对目录，继续核验 IPC 来源。Windows 同步与验证结果在本节后续记录。
+
+
+**验证与同步：** Web 类型检查、桌面/Web 构建、脚本语法与差异检查通过；页面、桌面路径边界与安全策略共 **184 项回归通过**，另单独复查两项系统选择回归通过。原生 Windows 在隔离 profile 中通过真实 renderer → preload → 主进程 IPC 验证初始目录、选择按钮参数、取消保留、确认回填及登记流程；该组使用模拟系统窗口回执，不计作真实 OS 按钮点击验收。另实际打开 Windows 系统窗口，通过 Windows-MCP 的 UI 树读到“选择此文件夹”“取消”两个按钮和当前测试目录；自动点击被 `USER_CONTROL` 桌面保护阻止、探测超时，未计为实际点击通过。随后无桌面输入的 IPC 完整回归正常退出。
+
+本机 Windows 构建 ID 为 `ab369d27c595`，位于 `%TEMP%\tc-desktop-20261026-5wPoUV\build-system-chooser-ab369d27c595\win-unpacked`。原 `build\Launch Acceptance Preview.cmd` 已切换到此版，保留验收 profile、工作区与 OAuth 记录；继续使用这个启动脚本，无需安装下载。新版实际提供的前端 bundle 已核对直接入口与选择器调用。
+
+Windows 回归截图与报告：本次临时根目录 `gui-system-chooser-ab369d27c595/workspace-picker-native.json`、`workspace-picker-light.png`、`workspace-picker-dark.png`；部署回执：`windows-system-chooser-update.json`。用户可在新建工作区弹窗直接点击“在文件资源管理器中打开”，在系统窗口选择目录后点“选择此文件夹”，或点“取消”返回；确认不会自动添加项目。
