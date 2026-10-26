@@ -1619,7 +1619,7 @@ Windows 使用可写报告路径，例如 `--output "$env:TEMP\quick-public.json
 ### 15.3 启动本次新版验收入口
 
 1. 在运行后台的这台 Windows 文件资源管理器地址栏粘贴 `%TEMP%\tc-desktop-20261026-5wPoUV\build`。
-2. 双击 **`Launch Acceptance Preview.cmd`**。它启动脚本指定的预览 EXE（当前为第 15.9 节的新目录），使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
+2. 双击 **`Launch Acceptance Preview.cmd`**。它启动脚本指定的预览 EXE（当前为第 15.10 节的新目录），使用 Windows 用户目录下独立且经过 ACL 校验的 `%USERPROFILE%\.token-coupon-desktop-acceptance\c782ca2d6827\desktop` 和 `daemon`；不会自动把当前正式 profile 迁入或覆盖原预览目录。原 `build\acceptance-state` 启动方式已因继承过宽权限弃用，修复记录见 15.5。
 3. 打开左侧 **桌面交互验收** 工作区，已有两个离线 Mock 草案和含中文/空格的示例目录，用于切换与编辑验收；准备过程未调用付费模型。第一次出现系统默认方式设置时明确选择所需方式，未准备真实 Agent 时不要启动新的 Agent 规划。
 4. 快捷连接初始关闭，预留 MCP 网关端口 **4188**，避免抢用原预览的 4178；需要真实网页验证时在连接中心明确建立独立验收连接。此入口不会自动继承原业务授权或使旧 MCP 地址指向新 profile。
 5. 验收后如需停止测试后台，先确认测试任务不在执行，再使用托盘的安全停止后台入口。只关闭窗口会保留后台，这是现有生命周期设计。安装器另行按下一节验收，不必为检查界面立即覆盖原安装。
@@ -1754,3 +1754,13 @@ node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacke
 - 深浅色均使用应用主题色，长目录名截断并保留完整路径提示；540/760/1100 像素窗口中均不横向溢出。
 
 浏览器验收使用实际 Chromium、隔离 Mock HTTP，覆盖路径定位、单击进入、名称搜索、取消、无效路径和确认回填；6 种主题/宽度组合检查均通过，无额外写请求。截图及报告：`/tmp/tc-workspace-picker-browser-check/`。Windows 实际入口另使用独立测试 profile 和真实后台目录读取验证，结果与部署位置在本节后续记录，不用 Git 文件选择的测试替代本入口验收。
+
+
+**最终验证与 Windows 同步：** Web 构建、类型检查、JavaScript 语法和差异检查通过；页面回归 **177 项通过**。首次全量中一个既有 Explorer 用例发生超时，单独及完整重跑均通过，未放宽断言。原生 Windows 已针对本节准确入口完成真实后台目录读取、中文与空格路径、单击进入、搜索、取消、无效路径禁用、确认仅回填、用户明确提交后登记的完整验证；测试没有调用模型，也没有修改业务 profile。测试最初清理遇到临时目录占用，补充后台正常停止后的等待和有限清理重试后，完整重跑正常退出。
+
+- 本机新版构建 ID：`5fb95864f7c0`；位置：`%TEMP%\tc-desktop-20261026-5wPoUV\build-workspace-picker-5fb95864f7c0\win-unpacked`。
+- 原 `%TEMP%\tc-desktop-20261026-5wPoUV\build\Launch Acceptance Preview.cmd` 已改为启动本版；继续使用既有验收数据目录，两个工作区、三条规划及原 OAuth 记录均保留。旧版与启动脚本备份保留，不覆盖安装器。
+- 启动后 HMAC/构建版本核验通过，并检查实际提供的前端 bundle 包含 `workspace-directory-picker` 与新标题。不要再用 Git 文件选择入口或源码构建成功代替本入口的运行验证。
+- Windows 实机截图与报告：本次临时根目录中的 `gui-workspace-picker-5fb95864f7c0/workspace-picker-light.png`、`workspace-picker-dark.png`、`workspace-picker-native.json`；部署回执：`windows-workspace-picker-update.json`。
+
+**用户验收：** 使用原启动脚本，进入“工作区与计划 → 新建工作区”。应直接看到标题为“选择工作区文件夹”的紧凑弹窗；输入路径定位，单击文件夹进入，搜索，再点“选择此文件夹”回填。取消应保留原表单值。Windows 系统文件夹选择器仍是表单中的单独入口，本节没有把远程浏览错误地改为只在后台桌面弹出的系统窗口。
