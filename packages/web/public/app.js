@@ -867,7 +867,7 @@ function renderRoute() {
   if ($("#page-error").dataset.context && !["global", `${state.workspace?.workspaceId || ""}:${state.planning?.planningId || ""}`].includes($("#page-error").dataset.context)) show($("#page-error"), false);
   if (route.page !== "plan") show($("#selection-feedback"), false);
   if (!state.planning) show($("#pending-action-banner"), false);
-  renderWorkspaceAccess(); renderReference(); renderConnectionSummary();
+  renderWorkspaceAccess(); renderReference(); renderConnectionSummary(); renderOperationNotices();
   if (state.planning) renderRunConfiguration();
 }
 function renderConnectionEntry() {
@@ -4736,21 +4736,71 @@ async function restorePlanningProgress(workspaceId, sequence = state.navigationS
   }
 }
 
+function operationNoticeMatches(context) {
+  return context.workspaceId === state.workspace?.workspaceId && (!context.planningId || context.planningId === state.planning?.planningId && state.route?.page === "plan");
+}
+function operationFailureMessage(label, error) {
+  if (String(error).includes("pending_inputs_require_plan")) return { text: `${label} · 暂不能审查：还有补充需求待处理`, tone: "warning", action: "处理补充需求" };
+  if (/review_required|review_stale|review_missing|draft_missing|pending_inputs/.test(String(error))) return { text: `${label} · 前置条件待处理`, tone: "warning", action: "查看计划状态" };
+  return { text: `${label} · 操作未完成${error ? `：${String(error).replace(/^[a-z][a-z0-9_]*[：:]\s*/, "").slice(0, 160)}` : ""}`, tone: "error", action: "查看计划与处理方法" };
+}
+function rememberOperationNotice(job, label, context) {
+  if (!context) return;
+  context.planningId ||= job.planningId || job.result?.planningId;
+  const id = `${context.workspaceId}:${context.planningId || ""}:${job.jobId || context.feedbackId}`;
+  const failure = job.status !== "succeeded" ? operationFailureMessage(label, job.error) : null;
+  const notice = { id, job, context: { ...context }, label, text: failure?.text || $("#job-label").textContent, tone: failure?.tone || "info", action: failure?.action };
+  state.operationNotices ??= new Map(); state.operationNotices.set(id, notice);
+  while (state.operationNotices.size > 50) state.operationNotices.delete(state.operationNotices.keys().next().value);
+  $("#job-bar").dataset.noticeId = id;
+  $("#job-bar").dataset.tone = notice.tone;
+  if (failure) $("#job-label").textContent = failure.text;
+  $("#job-feedback-diagnostic").textContent = job.error || ""; show($("#job-feedback-details"), !!job.error);
+  $("#job-feedback-details").open = false;
+  $("#job-feedback-next").textContent = notice.action || ""; show($("#job-feedback-next"), !!notice.action && !!context.planningId);
+  $("#job-feedback-next").onclick = () => void planTab(String(job.error).includes("pending_inputs_require_plan") ? "overview" : "review");
+  renderOperationNotices();
+}
+function dismissOperationNotice(id) {
+  state.dismissedOperationNotices ??= new Set(); state.dismissedOperationNotices.add(id); renderOperationNotices();
+}
+function renderOperationNotices() {
+  const root = $("#operation-feedback-list"), history = $("#operation-feedback-history-list"); if (!root || !history) return;
+  root.replaceChildren(); history.replaceChildren();
+  const latest = $("#job-bar").dataset.noticeId;
+  const rows = [...(state.operationNotices?.values() || [])].filter(row => operationNoticeMatches(row.context));
+  const dismissed = state.dismissedOperationNotices || new Set();
+  for (const row of rows) {
+    if (row.id === latest) { show($("#job-bar"), !dismissed.has(row.id)); show($("#job-feedback-close")); }
+    const restore = document.createElement("button"); restore.type = "button"; restore.className = "text-button";
+    restore.textContent = `${row.text}${dismissed.has(row.id) ? " · 提示已关闭，点击查看" : ""}`;
+    restore.onclick = () => { state.dismissedOperationNotices?.delete(row.id); renderOperationNotices(); };
+    history.append(restore);
+    if (row.id === latest || dismissed.has(row.id)) continue;
+    const card = document.createElement("section"); card.className = `operation-notice notice notice-${row.tone === "error" ? "error" : "warn"}`;
+    const title = document.createElement("strong"); title.textContent = row.text;
+    const close = document.createElement("button"); close.type = "button"; close.className = "notification-dismiss"; close.textContent = "×"; close.setAttribute("aria-label", "关闭本次操作提示"); close.onclick = () => dismissOperationNotice(row.id);
+    const details = document.createElement("details"), summary = document.createElement("summary"), diagnostic = document.createElement("pre"); summary.textContent = "查看操作诊断"; diagnostic.textContent = row.job.error || row.text; details.append(summary, diagnostic);
+    card.append(title, close, details); root.append(card);
+  }
+  if (!rows.some(row => row.id === latest) && $("#job-bar").dataset.state !== "running") show($("#job-bar"), false);
+  show($("#operation-feedback-history"), !!rows.length);
+}
 async function startJob(label, submit, waitForCompletion = false, allowDuringExecution = false) {
   if (!state.workspace) return;
   if (state.submittingJob || state.activeJob?.status === "running" && !allowDuringExecution) { showToast("当前已有操作正在运行，完成后再提交下一步。", true); return; }
-  state.submittingJob = true; const context = { workspaceId: state.workspace.workspaceId, workspaceLabel: state.workspace.label, planningId: state.planning?.planningId, planTitle: state.planning?.draft?.plan?.title || state.planning?.title, sessionId: state.planning?.session?.sessionId, submittedAt: Date.now(), label };
-  state.jobContext = context; show($("#job-bar")); $("#job-bar").dataset.state = "running"; $("#job-label").textContent = `${label} · 正在提交…`; show($("#job-bar .spinner")); show($("#job-view-result"), false); show($("#cancel-job"), false);
+  state.submittingJob = true; const context = { feedbackId: key(), workspaceId: state.workspace.workspaceId, workspaceLabel: state.workspace.label, planningId: state.planning?.planningId, planTitle: state.planning?.draft?.plan?.title || state.planning?.title, sessionId: state.planning?.session?.sessionId, submittedAt: Date.now(), label };
+  state.jobContext = context; delete $("#job-bar").dataset.noticeId; delete $("#job-bar").dataset.tone; show($("#job-feedback-close"), false); show($("#job-feedback-details"), false); show($("#job-feedback-next"), false); show($("#job-bar")); $("#job-bar").dataset.state = "running"; $("#job-label").textContent = `${label} · 正在提交…`; show($("#job-bar .spinner")); show($("#job-view-result"), false); show($("#cancel-job"), false);
   renderJobPlanLink(context);
   try {
-    const job = await submit(key()); context.jobId = job.jobId; state.activeJob = job; state.jobContexts ??= new Map(); state.jobContexts.set(job.jobId, context); rememberExecutionJob(job, context); acceptPlanningJob(job); state.submittingJob = false; show($("#cancel-job"), job.status === "running"); show($("#job-bar")); $("#job-label").textContent = `${label} · ${job.status === "running" ? "处理中" : statuses[job.status] || job.status}`; renderJobPlanLink(context);
+    const job = await submit(context.feedbackId); context.jobId = job.jobId; state.activeJob = job; state.jobContexts ??= new Map(); state.jobContexts.set(job.jobId, context); rememberExecutionJob(job, context); acceptPlanningJob(job); state.submittingJob = false; show($("#cancel-job"), job.status === "running"); show($("#job-bar")); $("#job-label").textContent = `${label} · ${job.status === "running" ? "处理中" : statuses[job.status] || job.status}`; renderJobPlanLink(context);
     if (job.status === "running") {
       acknowledgeResumedSession();
       const completion = pollJob(job.jobId, label);
       if (waitForCompletion) return await completion;
     } else await completeJob(job, label);
     return job;
-  } catch (error) { state.submittingJob = false; $("#job-bar").dataset.state = "failed"; $("#job-label").textContent = `${label} · 提交未完成：${error.message}`; show($("#job-bar .spinner"), false); show($("#cancel-job"), false); showToast(error.message, true); return undefined; }
+  } catch (error) { state.submittingJob = false; $("#job-bar").dataset.state = "failed"; $("#job-label").textContent = `${label} · 提交未完成：${error.message}`; show($("#job-bar .spinner"), false); show($("#cancel-job"), false); rememberOperationNotice({ status: "failed", error: error.message }, label, context); return undefined; }
 }
 function rememberExecutionJob(job, context) {
   if (context && (["planning.run", "session.resume", "session.retry"].includes(job.kind) || state.executionNotice?.jobId === job.jobId)) {
@@ -4772,6 +4822,7 @@ function renderExecutionFloatingStatus() {
   root.title = "返回该计划的执行进度"; root.onclick = event => { event.preventDefault(); void navigate(root.getAttribute("href").slice(1)); };
   if (state.activeJob?.jobId === notice.jobId && !samePlan) show($("#job-bar"), false);
   else if (state.activeJob?.jobId === notice.jobId && state.resumedJobAcknowledged !== notice.jobId) show($("#job-bar"));
+  renderOperationNotices();
 }
 function renderJobPlanLink(context) {
   const link = $("#job-plan-link"), planningId = context?.planningId, workspaceId = context?.workspaceId;
@@ -4819,7 +4870,7 @@ async function completeJob(job, label) {
   show($("#job-bar")); show($("#job-bar .spinner"), false); show($("#cancel-job"), false); show($("#job-view-result"), !!context?.planningId);
   $("#job-view-result").textContent = job.kind === "session.recover" ? "查看恢复状态" : awaitingUser ? "查看阻塞与处理方法" : "查看任务结果";
   $("#job-view-result").onclick = () => void openOperationResult(context, job);
-  state.activeJob = null; renderExecutionFloatingStatus();
+  state.activeJob = null; rememberOperationNotice(job, label, context); renderExecutionFloatingStatus();
   if (job.kind === "planning.run") { state.runRequestKey = null; state.runInFlight = false; }
   if (job.status === "succeeded") {
     showToast(awaitingUser ? "任务已按计划停在决策门禁处；查看最新 Attempt 回复并处理后，再继续相关规划。" : executionFailed ? `${label}已结束，任务${statuses[domainStatus] || domainStatus}；详情与恢复入口见执行页。` : ["external_context", "handoff_claim"].includes(job.result?.nextAction) ? "输入已登记，等待网页通过 MCP 读取并提交结果。" : `${label}已完成。`);
@@ -4829,7 +4880,7 @@ async function completeJob(job, label) {
     await refreshAll();
     if (job.kind === "planning.approve" && state.planning?.planningId === job.result?.planningId && state.planning?.status === "approved") await planTab("execution");
     if (state.planning) renderReviewContinuation();
-  } else { showToast(job.error || `操作状态：${statuses[job.status] || job.status}`, job.status !== "interrupted", job.progress ? "planning" : "execution"); if (job.planningId) await refreshAll(); }
+  } else { if (job.planningId) await refreshAll(); }
 }
 async function openOperationResult(context, job) {
   if (!context?.workspaceId || !context?.planningId) { showToast("该操作未关联计划，请从工作区选择规划记录。", true); return; }
@@ -5527,3 +5578,5 @@ $("#connection-prompt-client").addEventListener("change", event => {
   state.promptGrantId = event.target.value; renderConnectionIdentity();
 });
 $("#connection-identity-verify").addEventListener("click", () => $("#connection-verify-web").click());
+
+$("#job-feedback-close").addEventListener("click", () => { const id = $("#job-bar").dataset.noticeId; if (id) dismissOperationNotice(id); });

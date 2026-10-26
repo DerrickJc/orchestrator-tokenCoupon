@@ -645,3 +645,11 @@ input:disabled, select:disabled { opacity:.6; cursor:default; }
 #refresh-last-success { flex-basis:100%; color:var(--muted); }
 .refresh-feedback [data-kind="warning"] { color:#986126; }
 .refresh-feedback .notification-dismiss { top:2px; right:2px; }
+
+.job-bar,.operation-notice { position:relative; padding-right:34px; }
+.job-bar[data-tone="warning"] { border-color:#cda365; background:#fffbef; }
+.job-bar[data-tone="error"] { border-color:#c89188; background:#fff4f0; }
+#job-feedback-details { flex-basis:100%; }
+#job-feedback-diagnostic,.operation-notice pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+#operation-feedback-history-list { display:grid; gap:6px; }
+.operation-notice { margin:8px 0; }

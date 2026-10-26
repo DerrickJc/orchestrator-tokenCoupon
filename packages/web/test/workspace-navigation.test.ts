@@ -3127,3 +3127,23 @@ it("reports partial refresh failure without discarding cached plan data or claim
   await expect.poll(() => h.element("refresh-feedback").textContent).toContain("刷新成功");
   expect(h.posts).toHaveLength(0);
 });
+
+it("dismisses a blocked operation per Job without discarding requirements, and shows a new failure independently", async () => {
+  const h = await page({ ready: true, hash: "#/workspaces/project/plans/first/review" });
+  await expect.poll(() => h.w.eval('__testState.planning?.planningId')).toBe("first");
+  const before = JSON.stringify(h.plans);
+  h.w.eval('void startJob("审查草案", async () => ({jobId:"review-1",workspaceId:"project",planningId:"first",status:"failed",error:"pending_inputs_require_plan：请先处理已登记的补充需求，再审查"}))');
+  await expect.poll(() => h.element("job-label").textContent).toContain("暂不能审查：还有补充需求待处理");
+  expect(h.element("job-bar").dataset.tone).toBe("warning"); expect(h.element("job-feedback-next").textContent).toBe("处理补充需求");
+  h.element("job-feedback-close").click(); expect(h.visible("job-bar")).toBe(false);
+  h.element("refresh").click(); await expect.poll(() => (h.element("refresh") as HTMLButtonElement).disabled).toBe(false);
+  expect(h.visible("job-bar")).toBe(false); expect(JSON.stringify(h.plans)).toBe(before);
+  h.w.eval('void completeJob({jobId:"review-1",workspaceId:"project",planningId:"first",status:"failed",error:"pending_inputs_require_plan：请先处理已登记的补充需求，再审查"},"审查草案")');
+  await new Promise(resolve => setTimeout(resolve, 30)); expect(h.visible("job-bar")).toBe(false);
+  h.w.eval('void startJob("审查草案", async () => ({jobId:"review-2",workspaceId:"project",planningId:"first",status:"failed",error:"pending_inputs_require_plan：还有需求"}))');
+  await expect.poll(() => h.visible("job-bar")).toBe(true);
+  expect(h.element("operation-feedback-history-list").children.length).toBe(2);
+  h.element("operation-feedback-history-list").querySelector<HTMLButtonElement>("button")!.click();
+  expect(h.element("operation-feedback-list").children.length).toBe(1);
+  expect(JSON.stringify(h.plans)).toBe(before); expect(h.posts).toHaveLength(0);
+});
