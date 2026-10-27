@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">网页模型、本地编排与 Coding Agent 协作机制</title>
+  <desc id="desc">ChatGPT 或 Claude 网页通过 MCP 与 OAuth 访问本地统一计划。本地控制台负责编辑、批准和观测，DAG 调度器将批准后的任务交给 Codex 或 Claude Code。执行进度和工具审批返回本地，计划与执行记录持续保存。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#53677f"/></marker>
+    <marker id="feedback" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#75608f"/></marker>
+  </defs>
+  <rect width="1200" height="520" rx="20" fill="#f6f8f6"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" text-anchor="middle" fill="#24342d">
+    <rect x="455" y="18" width="290" height="58" rx="13" fill="#e8eee5" stroke="#91a586"/>
+    <text x="600" y="43" font-size="17" font-weight="700">桌面应用 / 本地 Web</text>
+    <text x="600" y="64" font-size="13" fill="#52624a">编辑 · 批准 · 配置 · 观测 · 恢复</text>
+    <path d="M600 77 V109" fill="none" stroke="#53677f" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <rect x="28" y="116" width="290" height="222" rx="16" fill="#eef4fd" stroke="#96afd2"/>
+    <text x="173" y="148" font-size="20" font-weight="700" fill="#2d537c">网页模型</text>
+    <text x="173" y="173" font-size="14" fill="#405e7e">规划 · 审查 · 修订 · 交接</text>
+    <rect x="48" y="195" width="119" height="35" rx="9" fill="#fff" stroke="#c2d1e5"/>
+    <rect x="179" y="195" width="119" height="35" rx="9" fill="#fff" stroke="#c2d1e5"/>
+    <text x="108" y="218" font-size="16" font-weight="600">ChatGPT</text>
+    <text x="239" y="218" font-size="16" font-weight="600">Claude</text>
+    <text x="173" y="264" font-size="15">按授权读取项目上下文</text>
+    <text x="173" y="291" font-size="15">提交结构化草案与审查结果</text>
+    <text x="173" y="318" font-size="13" fill="#405e7e">可切换网页，继续同一 Planning</text>
+
+    <rect x="455" y="116" width="290" height="222" rx="16" fill="#eef4e9" stroke="#90a87e"/>
+    <text x="600" y="148" font-size="20" font-weight="700" fill="#405d34">本地统一计划与编排</text>
+    <text x="600" y="173" font-size="14" fill="#506348">有效需求 · 草案版本 · 审查记录</text>
+    <text x="600" y="218" font-size="16">结构校验与审查状态核对</text>
+    <text x="600" y="248" font-size="16" font-weight="700">人工批准与执行参数</text>
+    <text x="600" y="278" font-size="16">DAG 依赖调度与并发控制</text>
+    <rect x="509" y="298" width="182" height="26" rx="13" fill="#dfe9d7"/>
+    <text x="600" y="316" font-size="13">任务状态 · 重试 · 断点继续</text>
+
+    <rect x="882" y="116" width="290" height="222" rx="16" fill="#f4eff9" stroke="#b19ac7"/>
+    <text x="1027" y="148" font-size="20" font-weight="700" fill="#604578">Coding Agent</text>
+    <text x="1027" y="173" font-size="14" fill="#6c567d">逐任务选择 Runner 与模型</text>
+    <rect x="902" y="195" width="111" height="35" rx="9" fill="#fff" stroke="#d1c3df"/>
+    <rect x="1025" y="195" width="127" height="35" rx="9" fill="#fff" stroke="#d1c3df"/>
+    <text x="957" y="218" font-size="16" font-weight="600">Codex</text>
+    <text x="1088" y="218" font-size="15" font-weight="600">Claude Code</text>
+    <text x="1027" y="264" font-size="15">在本地修改代码、执行测试</text>
+    <rect x="928" y="286" width="198" height="32" rx="9" fill="#e8dff0"/>
+    <text x="1027" y="307" font-size="14">Git worktree / 共享工作区</text>
+
+    <path d="M325 207 H447" stroke="#53677f" stroke-width="2" fill="none" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <text x="386" y="187" font-size="13" fill="#40546d">MCP + OAuth</text>
+    <text x="386" y="232" font-size="11" fill="#40546d">读取上下文 / 提交结果</text>
+    <path d="M748 207 H874" stroke="#53677f" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <text x="812" y="187" font-size="13" fill="#40546d">已批准的任务</text>
+    <path d="M881 291 H754" stroke="#75608f" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#feedback)"/>
+    <text x="812" y="273" font-size="12" fill="#6c567d">进度 / 工具审批</text>
+
+    <path d="M600 339 V385" stroke="#53677f" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="455" y="394" width="290" height="70" rx="12" fill="#fff" stroke="#a7b69f"/>
+    <text x="600" y="423" font-size="16" font-weight="700">Planning · Session · Attempt</text>
+    <text x="600" y="447" font-size="13" fill="#52624a">统一版本 · 任务状态 · 持久化执行证据</text>
+    <text x="173" y="419" font-size="14" fill="#52624a">网页负责提出和审查方案</text>
+    <text x="173" y="444" font-size="13" fill="#52624a">Agent 优先时也可在本地规划与审查</text>
+    <text x="1027" y="419" font-size="14" fill="#52624a">结果核对 · Git 差异 · 交付证据</text>
+    <text x="1027" y="444" font-size="13" fill="#52624a">失败任务可单独分析与重试</text>
+    <text x="600" y="501" font-size="12" fill="#52624a">实线：任务与数据往来　 ·　 虚线：执行反馈与需人工处理的请求</text>
+  </g>
+</svg>

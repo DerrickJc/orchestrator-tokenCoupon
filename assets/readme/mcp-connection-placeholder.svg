@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="200" viewBox="0 0 1080 200" role="img" aria-labelledby="title desc">
+  <title id="title">网页 MCP 连接示例占位</title>
+  <desc id="desc">此处预留给维护者添加 ChatGPT 或 Claude 的 MCP 连接与授权截图，当前不是实际操作截图。</desc>
+  <rect x="2" y="2" width="1076" height="196" rx="16" fill="#f6f8f6" stroke="#9cae95" stroke-width="2" stroke-dasharray="8 6"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" text-anchor="middle">
+    <text x="540" y="77" font-size="24" fill="#405d34" font-weight="600">网页 MCP 连接示例</text>
+    <text x="540" y="116" font-size="17" fill="#52624a">预留图片位置 · ChatGPT / Claude 连接与授权步骤</text>
+    <text x="540" y="150" font-size="14" fill="#677560">可替换为单张截图或完整步骤拼图</text>
+  </g>
+</svg>
