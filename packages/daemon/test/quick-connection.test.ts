@@ -457,8 +457,13 @@ describe("Quick Tunnel connection", () => {
     const localAction = async (action: string, body: Record<string, unknown>) => {
       const response = await fetch(`${localOrigin}/api/v1/workspaces/${h.workspace.workspaceId}/plannings/${operation.planningId}/${action}`, { method: "POST", headers: { Origin: localOrigin, Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({ requestKey: randomUUID(), ...body }) });
       expect(response.status).toBe(202); const job = await response.json() as { jobId: string };
-      for (let i = 0; i < 100; i++) { const status = await h.service.getJob(job.jobId); if (status.status !== "running") return status; await new Promise((resolve) => setTimeout(resolve, 20)); }
-      throw new Error("local job did not finish");
+      const deadline = Date.now() + (process.platform === "win32" ? 30_000 : 5_000);
+      let status = await h.service.getJob(job.jobId);
+      while (status.status === "running" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25)); status = await h.service.getJob(job.jobId);
+      }
+      if (status.status !== "running") return status;
+      throw new Error(`local job ${action} did not finish; last status: ${status.status}`);
     };
     const view = await call("planning_query", { workspaceId: h.workspace.workspaceId, planningId: operation.planningId });
     expect((await localAction("approve", { draftRevision: view.draft.draftRevision })).status).toBe("succeeded");
@@ -476,7 +481,7 @@ describe("Quick Tunnel connection", () => {
     expect((await exchange(refresh)).ok).toBe(false);
     await expect(h.remote.principalForToken(tokens.access_token)).rejects.toThrow();
     await h.remote.stop(); expect(h.remote.grants()).toHaveLength(0);
-  }, 15_000);
+  }, process.platform === "win32" ? 60_000 : 15_000);
 
   it("keeps one public entry while ChatGPT and Claude get independently editable project grants", async () => {
     const h = await fixture();

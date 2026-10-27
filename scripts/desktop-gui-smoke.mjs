@@ -143,6 +143,9 @@ async function verifyClipboard(page) {
     // payload before changing the clipboard, then construct writable entries.
     const snapshot = [];
     for (const entry of entries) {
+      // Xvfb can return an empty platform entry for an initially empty
+      // clipboard. It has no payload to restore and is not a ClipboardItem.
+      if (entry.types.length === 0) continue;
       const payloads = {};
       for (const type of entry.types) payloads[type] = await entry.getType(type);
       snapshot.push(new ClipboardItem(payloads));

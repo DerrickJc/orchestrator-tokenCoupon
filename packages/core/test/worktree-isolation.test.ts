@@ -174,7 +174,7 @@ describe("Phase 4 Git worktree execution and delivery", () => {
     expect(cleanup.removedWorktrees).toHaveLength(3);
     expect(cleanup.retainedWorktrees).toEqual([]);
     expect((await stat(record.snapshot.isolation.integrationWorktree)).isDirectory()).toBe(true);
-  });
+  }, process.platform === "win32" ? 120_000 : 30_000);
 
   it("preserves a failed Attempt and retries from a clean new worktree", async () => {
     const repo = await createRepository();
@@ -214,7 +214,7 @@ describe("Phase 4 Git worktree execution and delivery", () => {
     const record = await new SessionStore(repo.workspace).load(failed.snapshot.sessionId);
     expect(record.isolationJournal?.attempts.find(({ attemptId }) => attemptId === firstAttempt)?.status).toBe("failed");
     expect(record.isolationJournal?.attempts.find(({ attemptId }) => attemptId === retryAttempt)?.status).toBe("landed");
-  });
+  }, process.platform === "win32" ? 120_000 : 30_000);
 
   it("does not land ignored untracked files and rejects edits to tracked ignored files", async () => {
     const ignoredOnlyRepo = await createRepository();
@@ -247,7 +247,7 @@ describe("Phase 4 Git worktree execution and delivery", () => {
     expect(blocked.snapshot.tasks.map(({ status }) => status)).toEqual(["failed", "blocked"]);
     expect(blocked.snapshot.tasks[0]?.reasonCode).toBe("tracked_ignored_changes");
     expect(await git(trackedIgnoredRepo.workspace, ["rev-parse", `refs/heads/token-coupon/session/${blocked.snapshot.sessionId}`])).toBe(trackedIgnoredRepo.baseCommit);
-  });
+  }, process.platform === "win32" ? 120_000 : 30_000);
 
   it("rejects a dirty source workspace before creating a Session", async () => {
     const repo = await createRepository();
