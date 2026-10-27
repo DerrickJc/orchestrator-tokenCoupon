@@ -32,13 +32,14 @@ export async function prepareDesktopRelease({ inputDirectory, outputDirectory, e
   try {
     await copyFile(source, join(outputDirectory, filename));
     await writeFile(join(outputDirectory, "SHA256SUMS"), `${artifact.sha256}  ${filename}\n`);
-    await writeFile(join(outputDirectory, "RELEASE_NOTES.md"), `Windows x64 desktop preview\n\n` +
+    await writeFile(join(outputDirectory, "RELEASE_NOTES.md"), `orchestrator-tokenCoupon · Windows x64 desktop preview\n\n` +
       `Build commit: \`${expectedBuildId}\`\n\n` +
       `Download **${filename}** below; you do not need the source archives or the Actions artifact ZIP.\n\n` +
       `SHA-256: \`${artifact.sha256}\` (${artifact.bytes} bytes).\n\n` +
       `This is an unsigned preview, not a stable release. Native Windows/Linux CI, packaged-runtime smoke and GUI checks must pass before publication. Clean-machine installation/upgrades and real business Runner acceptance remain pending.\n\n` +
       `Electron and Node are included. Codex/Claude Code are optional: reuse local tools, or open System Settings > Agent components. Optional automatic installation requires npm; login is separate.\n\n` +
-      `Native Windows quick tunnels are not supported in this preview. User workspaces are retained on uninstall.\n\n` +
+      `Native Windows quick connections are supported via the official cloudflared component. First use requires a working download/network path; proxy settings can be configured when needed.\n\n` +
+      `Includes the updated workspace folder picker, Git preparation guidance and compact operation feedback. Project code is licensed under Apache-2.0; third-party components retain their own licenses. User workspaces are retained on uninstall.\n\n` +
       `PowerShell checksum check:\n\n\`\`\`powershell\nGet-FileHash .\\${filename} -Algorithm SHA256\n\`\`\`\n`);
     return { filename, sha256: artifact.sha256, bytes: artifact.bytes, buildId: expectedBuildId };
   } catch (error) {

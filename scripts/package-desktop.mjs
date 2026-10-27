@@ -27,10 +27,13 @@ async function copyBuiltFiles(source, destination) {
 
 /** Prepare a small application tree with physical client dependencies, never the workspace root. */
 export async function prepareDesktopApp(source, destination) {
+  const project = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
   const desktop = JSON.parse(await readFile(join(source, "packages/desktop/package.json"), "utf8"));
   const client = JSON.parse(await readFile(join(source, "packages/client/package.json"), "utf8"));
   if (desktop.version !== client.version) throw new Error("desktop_package_version_mismatch：桌面与共享客户端版本不一致");
+  if (!project.license || project.license === "UNLICENSED") throw new Error("desktop_package_license_missing：请先确定项目许可证");
   await mkdir(destination);
+  for (const file of ["LICENSE", "NOTICE"]) await cp(join(source, file), join(destination, file));
   await copyBuiltFiles(join(source, "packages/desktop/dist"), join(destination, "dist"));
   for (const required of ["main.js", "preload.cjs", "token-coupon.ico", "token-coupon.png"]) {
     if (!(await stat(join(destination, "dist", required))).isFile()) throw new Error(`desktop_package_file_missing：缺少 ${required}`);
@@ -38,10 +41,11 @@ export async function prepareDesktopApp(source, destination) {
   const clientRoot = join(destination, "node_modules/@token-coupon/client");
   await mkdir(clientRoot, { recursive: true });
   await copyBuiltFiles(join(source, "packages/client/dist"), join(clientRoot, "dist"));
-  await writeFile(join(clientRoot, "package.json"), JSON.stringify({ name: client.name, version: client.version, type: client.type, exports: client.exports }, null, 2));
+  for (const file of ["LICENSE", "NOTICE"]) await cp(join(source, file), join(clientRoot, file));
+  await writeFile(join(clientRoot, "package.json"), JSON.stringify({ name: client.name, version: client.version, type: client.type, exports: client.exports, license: project.license }, null, 2));
   const manifest = { name: "token-coupon-desktop", productName: "orchestrator-tokenCoupon", version: desktop.version,
     description: "Local task planning, execution and review desktop preview", type: "module", main: "dist/main.js", private: true,
-    license: "UNLICENSED", dependencies: { "@token-coupon/client": client.version } };
+    license: project.license, dependencies: { "@token-coupon/client": client.version } };
   await writeFile(join(destination, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return { manifest, electronVersion: desktop.devDependencies.electron };
 }
@@ -50,14 +54,14 @@ export function desktopBuilderConfiguration({ appDirectory, outputDirectory, ele
   return {
     appId: "org.token-coupon.desktop", productName: "orchestrator-tokenCoupon", electronVersion,
     directories: { app: appDirectory, output: outputDirectory },
-    files: ["dist/**/*", "node_modules/@token-coupon/client/**/*", "package.json"],
+    files: ["dist/**/*", "node_modules/@token-coupon/client/**/*", "package.json", "LICENSE", "NOTICE"],
     // No automatic updater is shipped: optimize the full NSIS payload rather than a differential block map.
     compression: "maximum",
     asar: true, npmRebuild: false, nodeGypRebuild: false, forceCodeSigning: false, publish: null,
     electronLanguages: ["en-US", "zh-CN"],
     ...(electronDist ? { electronDist } : {}),
     win: { icon: join(appDirectory, "dist/token-coupon.ico"), requestedExecutionLevel: "asInvoker", signAndEditExecutable: false },
-    nsis: { differentialPackage: false, shortcutName: "orchestrator-tokenCoupon", uninstallDisplayName: "orchestrator-tokenCoupon", oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
+    nsis: { license: join(appDirectory, "LICENSE"), differentialPackage: false, shortcutName: "orchestrator-tokenCoupon", uninstallDisplayName: "orchestrator-tokenCoupon", oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true,
       deleteAppDataOnUninstall: false, runAfterFinish: false, artifactName: "Token-Coupon-${version}-${arch}-preview-setup.${ext}" },
     linux: { executableName: "token-coupon", category: "Development", icon: join(appDirectory, "dist/token-coupon.png") },
   };

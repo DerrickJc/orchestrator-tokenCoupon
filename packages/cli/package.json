@@ -13,5 +13,6 @@
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --project tsconfig.json --noEmit"
-  }
+  },
+  "license": "Apache-2.0"
 }

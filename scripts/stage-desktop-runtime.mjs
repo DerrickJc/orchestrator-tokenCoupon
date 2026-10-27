@@ -46,6 +46,7 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
     } });
   }
   try {
+    for (const file of ["LICENSE", "NOTICE"]) await copy(join(source, file), join(root, file));
     const closure = await runtimeDependencies(source);
     for (const dependency of closure.dependencies) {
       await copy(dependency.path, join(root, dependency.destination)); copied.push(dependency.destination);
@@ -54,6 +55,7 @@ export async function stageDesktopRuntime(source = fileURLToPath(new URL("../", 
       const from = join(source, "packages", name), destination = join(root, "node_modules", "@token-coupon", name);
       await mkdir(destination, { recursive: true });
       await copy(join(from, "package.json"), join(destination, "package.json"));
+      for (const file of ["LICENSE", "NOTICE"]) await copy(join(source, file), join(destination, file));
       await copy(join(from, "dist"), join(destination, "dist"));
       if (name === "core") await copy(join(from, "resources"), join(destination, "resources"));
       if (name === "daemon") await copy(join(from, "THIRD_PARTY_LICENSES"), join(destination, "THIRD_PARTY_LICENSES"));
