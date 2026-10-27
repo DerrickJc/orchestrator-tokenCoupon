@@ -8,9 +8,9 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 目标是减少重复规划、重复传递上下文和失败后的重复执行，让已有的网页模型额度与本机 Coding Agent 各司其职。
 
-[Windows 下载](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261022-1/Token-Coupon-0.1.0-x64-preview-setup.exe) · [快速开始](#快速开始) · [网页连接](guides/mcp.md) · [规划与执行](guides/workflow.md) · [跨网页交接](guides/handoff.md) · [开发](guides/development.md)
+[Windows 下载](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/Token-Coupon-0.1.0-x64-preview-setup.exe) · [快速开始](#快速开始) · [网页连接](guides/mcp.md) · [规划与执行](guides/workflow.md) · [跨网页交接](guides/handoff.md) · [开发](guides/development.md)
 
-> 当前为预览版本，本文对应 `main` 源码。公开的 `desktop-preview-0.1.0-20261022-1` 安装包早于后续 Windows 快捷连接与界面修复；体验本文完整流程，请先使用源码启动。后续安装包以 [Releases](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases) 的版本说明为准。
+> Windows 当前预览版：`desktop-preview-0.1.0-20261027-2`，包含普通后台启动权限修复。版本说明与校验值见 [Releases](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/tag/desktop-preview-0.1.0-20261027-2)。
 
 ![任务执行进度与依赖图](assets/readme/execution-board.png)
 
@@ -60,7 +60,7 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 | 使用方式 | 入口 | 操作说明 |
 | --- | --- | --- |
-| **Windows 桌面版** | [直接下载 Windows x64 安装器](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261022-1/Token-Coupon-0.1.0-x64-preview-setup.exe) | [安装与首次使用](guides/windows.md) |
+| **Windows 桌面版** | [直接下载 Windows x64 安装器](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/Token-Coupon-0.1.0-x64-preview-setup.exe) | [安装与首次使用](guides/windows.md) |
 | **浏览器工作台** | [启动并打开本地网页](guides/browser.md) | [源码启动、环境准备](guides/browser.md#从源码启动) |
 
 [连接 ChatGPT / Claude](guides/mcp.md) · [创建计划与执行任务](guides/workflow.md) · [跨网页继续已有计划](guides/handoff.md)

@@ -4,9 +4,9 @@
 
 ## 下载与安装
 
-[直接下载安装器（Windows x64）](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261022-1/Token-Coupon-0.1.0-x64-preview-setup.exe) · [下载 SHA256SUMS](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261022-1/SHA256SUMS)
+[直接下载安装器（Windows x64）](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/Token-Coupon-0.1.0-x64-preview-setup.exe) · [下载 SHA256SUMS](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/SHA256SUMS)
 
-公开预览版：`desktop-preview-0.1.0-20261022-1`。该安装包早于后续 Windows 快捷连接与界面修复，功能以[该版本说明](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/tag/desktop-preview-0.1.0-20261022-1)为准；体验当前 `main` 的完整流程，请使用[浏览器源码启动方式](browser.md)。
+公开预览版：`desktop-preview-0.1.0-20261027-2`。本版包含 Windows 普通后台启动 ACL 修复、快捷连接及工作区界面更新。构建版本、校验值与验证范围见[版本说明](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/tag/desktop-preview-0.1.0-20261027-2)。
 
 1. 双击下载的 `Token-Coupon-0.1.0-x64-preview-setup.exe`，按向导选择安装位置。
 2. 启动 **orchestrator-tokenCoupon**，在 **工作区与计划** 中打开项目文件夹。需要 Git worktree 时，预先安装 Git。
