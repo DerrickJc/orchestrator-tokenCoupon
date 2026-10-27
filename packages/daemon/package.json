@@ -16,5 +16,6 @@
     "undici": "^7.30.0",
     "zod": "^4.6.5",
     "@token-coupon/client": "*"
-  }
+  },
+  "license": "Apache-2.0"
 }

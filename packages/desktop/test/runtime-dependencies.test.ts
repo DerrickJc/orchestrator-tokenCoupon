@@ -10,6 +10,8 @@ const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-runtime-closure-")); roots.push(root);
+  await writeFile(join(root, "LICENSE"), "Project Apache-2.0 fixture");
+  await writeFile(join(root, "NOTICE"), "Project copyright fixture");
   vi.stubEnv("TOKEN_COUPON_BUILD_ID", "fixture");
   for (const name of ["client", "core", "daemon", "web", "cli"]) {
     const dir = join(root, "packages", name); await mkdir(join(dir, "dist"), { recursive: true });
@@ -45,6 +47,8 @@ it("ships only the runtime closure, retaining nested dependencies and licenses w
   expect(await readFile(join(stage.root, "node_modules/transport/node_modules/leaf/index.js"), "utf8")).toContain("nested");
   expect((await readdir(join(stage.root, "node_modules/@token-coupon/core/dist"))).sort()).toEqual(["index.js", "main.js"]);
   expect(await readFile(join(stage.root, "node_modules/@token-coupon/daemon/THIRD_PARTY_LICENSES/cloudflared-LICENSE"), "utf8")).toBe("cloudflared Apache-2.0 fixture");
+  expect(await readFile(join(stage.root, "LICENSE"), "utf8")).toBe("Project Apache-2.0 fixture");
+  expect(await readFile(join(stage.root, "node_modules/@token-coupon/core/NOTICE"), "utf8")).toBe("Project copyright fixture");
 });
 it("rejects a missing required dependency instead of emitting a broken package", async () => {
   const h = await fixture(); await expect(runtimeDependencies(h.root)).rejects.toThrow("runtime_dependency_missing");

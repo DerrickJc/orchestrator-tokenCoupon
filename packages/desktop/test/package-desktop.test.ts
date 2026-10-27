@@ -10,6 +10,9 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, {
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "token-coupon-shell-package-")); roots.push(root);
+  await writeFile(join(root, "package.json"), JSON.stringify({ license: "Apache-2.0" }));
+  await writeFile(join(root, "LICENSE"), "Apache License fixture");
+  await writeFile(join(root, "NOTICE"), "Project copyright fixture");
   for (const name of ["desktop", "client"]) {
     await mkdir(join(root, `packages/${name}/dist`), { recursive: true });
     await writeFile(join(root, `packages/${name}/package.json`), JSON.stringify({ name: `@token-coupon/${name}`, version: "0.1.0", type: "module",
@@ -27,11 +30,14 @@ describe("desktop preview packaging", () => {
   it("stages only the built shell and a physical client package", async () => {
     const root = await fixture(), app = join(root, "staged-app");
     const result = await prepareDesktopApp(root, app);
-    expect((await readdir(app)).sort()).toEqual(["dist", "node_modules", "package.json"]);
+    expect((await readdir(app)).sort()).toEqual(["LICENSE", "NOTICE", "dist", "node_modules", "package.json"]);
     expect((await readdir(join(app, "dist"))).sort()).toEqual(["main.js", "preload.cjs", "token-coupon.ico", "token-coupon.png"]);
-    expect(JSON.parse(await readFile(join(app, "package.json"), "utf8"))).toMatchObject({ type: "module", main: "dist/main.js", dependencies: { "@token-coupon/client": "0.1.0" } });
+    expect(JSON.parse(await readFile(join(app, "package.json"), "utf8"))).toMatchObject({ license: "Apache-2.0", type: "module", main: "dist/main.js", dependencies: { "@token-coupon/client": "0.1.0" } });
     const client = JSON.parse(await readFile(join(app, "node_modules/@token-coupon/client/package.json"), "utf8"));
     expect(client).not.toHaveProperty("scripts");
+    expect(client.license).toBe("Apache-2.0");
+    expect(await readFile(join(app, "LICENSE"), "utf8")).toBe("Apache License fixture");
+    expect(await readFile(join(app, "node_modules/@token-coupon/client/NOTICE"), "utf8")).toBe("Project copyright fixture");
     expect(await readFile(join(app, "node_modules/@token-coupon/client/dist/index.js"), "utf8")).toContain("protocol");
     expect(result.electronVersion).toBe("44.9.1");
     await expect(prepareDesktopApp(root, app)).rejects.toThrow();
@@ -46,6 +52,15 @@ describe("desktop preview packaging", () => {
     expect(() => validatePackageOptions({ outputDirectory: root, platform: "win32", mode: "installer", arch: "x64" })).not.toThrow();
   });
 
+  it("refuses to package an unlicensed project or omit its license text", async () => {
+    const root = await fixture();
+    await writeFile(join(root, "package.json"), JSON.stringify({ license: "UNLICENSED" }));
+    await expect(prepareDesktopApp(root, join(root, "unlicensed"))).rejects.toThrow("desktop_package_license_missing");
+    await writeFile(join(root, "package.json"), JSON.stringify({ license: "Apache-2.0" }));
+    await rm(join(root, "LICENSE"));
+    await expect(prepareDesktopApp(root, join(root, "missing-text"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.skipIf(process.platform === "win32")("rejects symlinks in shell output", async () => {
     const root = await fixture();
     await symlink(join(root, ".env"), join(root, "packages/desktop/dist/leaked.json"));
@@ -55,6 +70,9 @@ describe("desktop preview packaging", () => {
   it("keeps runtime resources outside ASAR, disables publication and preserves user data", () => {
     const config = desktopBuilderConfiguration({ appDirectory: "/app", outputDirectory: "/out", resourcesDirectory: "/stage", electronVersion: "44.9.1" });
     expect(config.asar).toBe(true);
+    expect(config.files).toContain("LICENSE");
+    expect(config.files).toContain("NOTICE");
+    expect(config.nsis.license).toBe(join("/app", "LICENSE"));
     expect(config.compression).toBe("maximum");
     expect(config.nsis.differentialPackage).toBe(false);
     expect(config.productName).toBe("orchestrator-tokenCoupon");

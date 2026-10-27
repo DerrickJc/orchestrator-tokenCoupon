@@ -9,5 +9,6 @@
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./node": { "types": "./dist/node.d.ts", "import": "./dist/node.js" }
   },
-  "scripts": { "build": "tsc --project tsconfig.json", "typecheck": "tsc --project tsconfig.json --noEmit" }
+  "scripts": { "build": "tsc --project tsconfig.json", "typecheck": "tsc --project tsconfig.json --noEmit" },
+  "license": "Apache-2.0"
 }

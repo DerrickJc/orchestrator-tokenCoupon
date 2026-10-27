@@ -25,7 +25,11 @@ describe("desktop prerelease staging", () => {
     expect(await prepareDesktopRelease(f)).toMatchObject({ filename: f.filename, sha256: f.sha256 });
     expect((await readdir(f.outputDirectory)).sort()).toEqual(["RELEASE_NOTES.md", "SHA256SUMS", f.filename].sort());
     expect(await readFile(join(f.outputDirectory, "SHA256SUMS"), "utf8")).toBe(`${f.sha256}  ${f.filename}\n`);
-    expect(await readFile(join(f.outputDirectory, "RELEASE_NOTES.md"), "utf8")).toContain("unsigned preview");
+    const notes = await readFile(join(f.outputDirectory, "RELEASE_NOTES.md"), "utf8");
+    expect(notes).toContain("unsigned preview");
+    expect(notes).toContain("Native Windows quick connections are supported");
+    expect(notes).toContain("Apache-2.0");
+    expect(notes).not.toContain("not supported in this preview");
     await expect(prepareDesktopRelease(f)).rejects.toThrow();
   });
   it("rejects another commit, invalid paths, missing checks and corrupt installer bytes", async () => {
