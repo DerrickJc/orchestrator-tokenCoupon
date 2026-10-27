@@ -1,10 +1,10 @@
 // Real Electron GUI acceptance in an isolated profile. No Runner or paid model calls.
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
 import { createClient } from "../packages/client/dist/index.js";
@@ -38,6 +38,22 @@ const pageErrors = [];
 let lastOrigin;
 let acceptanceFailure;
 const startupSamples = [];
+let legacyOwnerToken;
+
+async function prepareStandardWindowsStartupRegression() {
+  if (!acceptanceProfile) return;
+  // The outer container is private, but deliberately undo the launcher's safe
+  // daemon ACL. Normal EXE startup must repair this legacy profile itself.
+  const encoded = Buffer.from(profile, "utf8").toString("base64");
+  const script = `$ErrorActionPreference='Stop';$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));$a=[IO.Directory]::GetAccessControl($p);$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'ReadAndExecute','ContainerInherit,ObjectInherit','None','Allow'));[IO.Directory]::SetAccessControl($p,$a)`;
+  execFileSync(join(process.env.SystemRoot || "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true, timeout: 15_000 });
+  legacyOwnerToken = randomUUID();
+  await writeFile(join(profile, "daemon-owner.json"), JSON.stringify({ pid: 2147483647, platform: "win32", hostname: hostname(),
+    processStart: "1", token: legacyOwnerToken, sessionId: null, acquiredAt: new Date().toISOString() }));
+  await assert.rejects(readDaemonOwnerCredential(profile), /daemon_discovery_profile_unprotected/);
+  console.log("GUI smoke：普通 EXE 启动前，已复现旧 owner 的宽松 ACL…");
+}
 
 async function bounded(promise, label, timeoutMs = 20_000) {
   let timer;
@@ -375,7 +391,9 @@ async function stopDaemon() {
 }
 
 try {
+  await prepareStandardWindowsStartupRegression();
   let { page, attachment } = await launch();
+  if (legacyOwnerToken) assert.notEqual((await readDaemonOwnerCredential(profile)).token, legacyOwnerToken, "ordinary startup must replace a stopped legacy owner's exposed key");
   const isolation = await page.evaluate(() => ({ require: typeof window.require, process: typeof window.process }));
   assert.deepEqual(isolation, { require: "undefined", process: "undefined" });
   const preferences = await bounded(application.browserWindow(page).then(window => window.evaluate(instance => instance.webContents.getLastWebPreferences())), "inspect renderer isolation");
@@ -414,6 +432,7 @@ try {
     liveDaemonReconnect: "passed", draftRecoveryNoReplay: "passed", secondInstanceProfileGuard: "passed",
     optionalAgentConsentNoImplicitInstall: "passed",
     systemAppearanceContrast: "passed", keyboardSkipNavigation: "passed", reducedMotion: "passed", mockTaskView: "passed", globalPendingEmptyAndStaleRead: "passed", planningTodoNavigation: "passed",
+    standardWindowsOwnerAclRepair: legacyOwnerToken ? "passed" : "not-applicable",
     chromiumSandbox: noSandbox ? "disabled-for-linux-test" : "enabled", nativeWindowsAcceptance: false };
   await writeFile(join(outputDirectory, "desktop-gui-smoke.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify({ outputDirectory, ...report }));

@@ -1779,3 +1779,23 @@ node scripts/prepare-desktop-acceptance.mjs --executable "D:\Preview\win-unpacke
 本机 Windows 构建 ID 为 `ab369d27c595`，位于 `%TEMP%\tc-desktop-20261026-5wPoUV\build-system-chooser-ab369d27c595\win-unpacked`。原 `build\Launch Acceptance Preview.cmd` 已切换到此版，保留验收 profile、工作区与 OAuth 记录；继续使用这个启动脚本，无需安装下载。新版实际提供的前端 bundle 已核对直接入口与选择器调用。
 
 Windows 回归截图与报告：本次临时根目录 `gui-system-chooser-ab369d27c595/workspace-picker-native.json`、`workspace-picker-light.png`、`workspace-picker-dark.png`；部署回执：`windows-system-chooser-update.json`。用户可在新建工作区弹窗直接点击“在文件资源管理器中打开”，在系统窗口选择目录后点“选择此文件夹”，或点“取消”返回；确认不会自动添加项目。
+
+
+### 15.12 普通 Windows 安装版后台 owner ACL 修复（2026-10-27）
+
+用户从公开 `desktop-preview-0.1.0-20261022-1` 安装器启动后，遇到 `desktop_daemon_start_timeout` 与 `daemon_discovery_profile_unprotected`。日志已打印后台监听成功，桌面发现拒绝读取对其他账户开放的 owner 文件；延长等待不能解决权限问题。
+
+此前 15.5 节修复针对专用验收入口，不能等同于普通安装版首次启动通过。该验证缺口现补入正常后台启动流程：
+
+- 在 owner 协调锁内先检查既有 owner；存活或身份未知时保持冲突拒绝，不因收紧 ACL 就接管或覆写其凭据。
+- Windows 正常启动在创建 owner/HMAC 凭据之前，保护专用后台数据目录及其直接状态文件，仅允许当前用户、SYSTEM 与管理员。
+- 新 owner 创建后调用桌面同一套 owner/父目录链权限检查；父目录仍不可信时删除本次新凭据并报错，不修改用户主目录、公共 Temp 或任意父目录的权限。
+- 已确认停止的旧 owner 记录留作 `.interrupted`，生成新凭据；工作区注册、配置和其他状态文件内容保留。
+- 链接/Junction 数据目录在创建协调文件之前拒绝，避免通过链接写入其他位置。
+
+旧安装版若仍有活跃后台，应先正常停止旧后台或重启 Windows，再启动修复版；退出桌面错误窗口本身不保证其已分离后台结束。不应通过删除活动 owner 文件、忽略 ACL 或关闭 HMAC 校验恢复运行。
+
+新增 `packages/daemon/test/daemon-owner.test.ts`，加入 `test:windows-native`，覆盖普通创建、活动 owner 保留、链接拒绝、宽松继承 ACL、已停止旧记录迁移、不安全活动旧 owner 拒绝及不安全父目录清理。真实 Windows 专项与包内普通桌面启动结果在本轮本地报告中记录，不再仅以预设私有验收目录证明安装版启动能力。
+
+
+本轮验证结果：全仓库构建和 typecheck 通过；相关 18 文件 51 项回归通过，4 项 Windows 专属用例在 Linux 跳过。真实 Windows 另对正常创建、宽松继承、停止旧 owner、活动不安全 owner、可写父目录、Junction 和未知 owner 共 7 个专项通过。桌面 GUI 在普通 EXE 启动前主动种入宽松 ACL 的停止旧 owner，随后启动、HMAC、重连、重启与输入恢复通过，报告标记 `standardWindowsOwnerAclRepair=passed`。已用修复后台实际打开原 Windows 默认配置目录，旧 owner 确认为退出状态，工作区注册文件字节保持不变；未发送业务写入 API 或调用模型。安装向导、干净机器升级/卸载及远程 Release 仍不计为本轮已完成项。
