@@ -668,7 +668,9 @@ describe("component integrity and tunnel parser", () => {
     expect(await readFile(join(root, "LICENSE"))).toEqual(expected);
     const blocked = join(root, "blocked"); await mkdir(join(blocked, "LICENSE"), { recursive: true });
     const content = Buffer.from("verified fixture binary"), asset = { name: "cloudflared-linux-amd64", bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
-    await expect(installCloudflared(blocked, asset, new AbortController().signal, () => undefined, async () => new Response(content))).rejects.toThrow("component_install_failed");
+    // Replacing a directory with a file is EPERM on Windows and EISDIR on
+    // POSIX. Both must keep the installation incomplete, with its real cause.
+    await expect(installCloudflared(blocked, asset, new AbortController().signal, () => undefined, async () => new Response(content))).rejects.toThrow(process.platform === "win32" ? "component_permission_denied" : "component_install_failed");
     await expect(readFile(join(blocked, "installed.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 

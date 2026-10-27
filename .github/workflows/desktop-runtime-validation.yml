@@ -142,7 +142,7 @@ jobs:
           release_dir="$RUNNER_TEMP/desktop-release"
           installer="$(node -p '"Token-Coupon-" + require("./packages/desktop/package.json").version + "-x64-preview-setup.exe"')"
           gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --latest=false \
-            --title "Token Coupon Windows preview · $RELEASE_TAG" \
+            --title "orchestrator-tokenCoupon Windows preview · $RELEASE_TAG" \
             --notes-file "$release_dir/RELEASE_NOTES.md" \
             "$release_dir/$installer" "$release_dir/SHA256SUMS"
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false

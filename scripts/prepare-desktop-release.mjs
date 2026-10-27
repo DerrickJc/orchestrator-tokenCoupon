@@ -39,6 +39,7 @@ export async function prepareDesktopRelease({ inputDirectory, outputDirectory, e
       `This is an unsigned preview, not a stable release. Native Windows/Linux CI, packaged-runtime smoke and GUI checks must pass before publication. Clean-machine installation/upgrades and real business Runner acceptance remain pending.\n\n` +
       `Electron and Node are included. Codex/Claude Code are optional: reuse local tools, or open System Settings > Agent components. Optional automatic installation requires npm; login is separate.\n\n` +
       `Native Windows quick connections are supported via the official cloudflared component. First use requires a working download/network path; proxy settings can be configured when needed.\n\n` +
+      `Fixes ordinary Windows daemon startup when owner metadata inherits broad ACLs. Dedicated state directory permissions are protected before creating credentials; stopped legacy owner keys are rotated and existing workspace records are retained.\n\n` +
       `Includes the updated workspace folder picker, Git preparation guidance and compact operation feedback. Project code is licensed under Apache-2.0; third-party components retain their own licenses. User workspaces are retained on uninstall.\n\n` +
       `PowerShell checksum check:\n\n\`\`\`powershell\nGet-FileHash .\\${filename} -Algorithm SHA256\n\`\`\`\n`);
     return { filename, sha256: artifact.sha256, bytes: artifact.bytes, buildId: expectedBuildId };

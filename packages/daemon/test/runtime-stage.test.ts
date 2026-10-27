@@ -19,7 +19,9 @@ it("assembles production resources without the application's source, test direct
     for (const name of ["core", "client", "daemon", "web", "cli"]) {
       const path = join(stage.root, "node_modules", "@token-coupon", name);
       expect((await lstat(path)).isSymbolicLink()).toBe(false);
-      expect((await readdir(path)).sort()).toEqual((name === "core" ? ["dist", "package.json", "resources"] : name === "daemon" ? ["dist", "package.json", "THIRD_PARTY_LICENSES"] : ["dist", "package.json"]).sort());
+      expect((await readdir(path)).sort()).toEqual(["LICENSE", "NOTICE", ...(name === "core" ? ["dist", "package.json", "resources"] : name === "daemon" ? ["dist", "package.json", "THIRD_PARTY_LICENSES"] : ["dist", "package.json"])].sort());
+      expect(await readFile(join(path, "LICENSE"), "utf8")).toBe(await readFile(join(process.cwd(), "LICENSE"), "utf8"));
+      expect(await readFile(join(path, "NOTICE"), "utf8")).toBe(await readFile(join(process.cwd(), "NOTICE"), "utf8"));
     }
     expect(await readFile(join(stage.root, "node_modules/@token-coupon/core/resources/windows-job.ps1"), "utf8")).toContain("AssignProcessToJobObject");
     expect(JSON.parse(await readFile(join(stage.root, "node_modules/@token-coupon/daemon/package.json"), "utf8")).dependencies).toHaveProperty("@token-coupon/client");

@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -23,7 +23,9 @@ async function git(cwd: string, args: string[]): Promise<string> {
 }
 
 async function createRepository(extraIgnore = "", trackedFiles: Record<string, string> = {}): Promise<TestRepository> {
-  const root = await mkdtemp(join(tmpdir(), "token-coupon-phase4-"));
+  // Windows TEMP may contain an 8.3 alias (RUNNER~1). Match registered
+  // workspaces: Git isolation deliberately requires their canonical path.
+  const root = await realpath(await mkdtemp(join(tmpdir(), "token-coupon-phase4-")));
   roots.push(root);
   const workspace = join(root, "repo");
   const hooks = join(root, "empty-hooks");
