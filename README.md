@@ -61,7 +61,7 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 [连接 ChatGPT / Claude](guides/mcp.md) · [创建计划与执行任务](guides/workflow.md) · [跨网页继续已有计划](guides/handoff.md)
 
-[查看网页 MCP 连接示例（含五步图文说明）](guides/mcp.md#图文连接示例)
+[查看网页 MCP 连接示例（含图文说明）](guides/mcp.md#图文连接示例)
 
 ## 使用指南
 
