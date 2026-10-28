@@ -53,12 +53,38 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 ## 网页 MCP 连接示例
 
-![网页 MCP 连接图例](assets/readme/mcp-connection-placeholder.svg)
-/home/lzw/dev/orchestrator-tokenCoupon/pics/1.png
-/home/lzw/dev/orchestrator-tokenCoupon/pics/2.png
-/home/lzw/dev/orchestrator-tokenCoupon/pics/3.png
-/home/lzw/dev/orchestrator-tokenCoupon/pics/4.png
-/home/lzw/dev/orchestrator-tokenCoupon/pics/5.png
+> **提示：**【在这里填写整体提示或操作前的注意事项】
+
+### 1. 【填写第一步标题】
+
+【在这里填写第一张图片对应的操作说明】
+
+![网页 MCP 连接示例：步骤 1](pics/1.png)
+
+### 2. 【填写第二步标题】
+
+【在这里填写第二张图片对应的操作说明】
+
+![网页 MCP 连接示例：步骤 2](pics/2.png)
+
+### 3. 【填写第三步标题】
+
+【在这里填写第三张图片对应的操作说明】
+
+![网页 MCP 连接示例：步骤 3](pics/3.png)
+
+### 4. 【填写第四步标题】
+
+【在这里填写第四张图片对应的操作说明】
+
+![网页 MCP 连接示例：步骤 4](pics/4.png)
+
+### 5. 【填写第五步标题】
+
+【在这里填写第五张图片对应的操作说明】
+
+![网页 MCP 连接示例：步骤 5](pics/5.png)
+
 [查看连接、授权与验证步骤](guides/mcp.md)
 
 ## 使用指南
