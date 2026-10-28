@@ -10,24 +10,10 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 [Windows 下载](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/Token-Coupon-0.1.0-x64-preview-setup.exe) · [快速开始](#快速开始) · [网页连接](guides/mcp.md) · [规划与执行](guides/workflow.md) · [跨网页交接](guides/handoff.md) · [开发](guides/development.md)
 
-> Windows 当前预览版：`desktop-preview-0.1.0-20261027-2`，包含普通后台启动权限修复。版本说明与校验值见 [Releases](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/tag/desktop-preview-0.1.0-20261027-2)。
 
 ![任务执行进度与依赖图](assets/readme/execution-board.png)
 
-*当前界面的离线演示：真实本地后台完成四项 Mock 任务；不代表真实 Agent 已编写代码或通过业务测试。*
 
-## 为什么做这个项目
-
-一项开发任务经常要经历需求澄清、方案设计、代码实现、测试、失败定位和返工。把这些工作都交给同一个 Coding Agent，容易产生重复调研、冗长上下文，以及切换模型后重新解释项目的问题。
-
-本项目把这些环节放进同一条可追溯的执行流程：
-
-- **减少额外模型调用。** 规划、审查、修订和错误分析可以使用已连接的网页 LLM，复用用户已有的订阅或免费额度。
-- **按任务配置执行模型。** 为整份计划设置默认 Runner／模型，也可以逐任务覆盖，让不同 Agent 分工实现、测试和验证。
-- **减少重复上下文。** 交接以本地保存的有效需求、最新草案、审查与执行证据为准；文件和历史对话按需读取。
-- **减少失败后的重做。** 已完成任务与产物保留，失败任务单独重试，再继续剩余依赖任务。
-
-这里的“节省 Token”指减少额外 API／Agent 调用与重复上下文成本，并不代表模型不消耗 Token。网页服务和 Agent 仍受各自额度与计费规则约束；目前尚未提供统一的节省比例基准，也不宣称固定降本百分比。
 
 ## 主要功能
 
@@ -67,9 +53,12 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 ## 网页 MCP 连接示例
 
-<!-- MCP 图例占位：将截图放入 assets/readme/mcp-connection.png，再把下方图片路径改为 assets/readme/mcp-connection.png。可放单张截图或拼接后的连接/授权步骤图。 -->
-![网页 MCP 连接图例，待补充](assets/readme/mcp-connection-placeholder.svg)
-
+![网页 MCP 连接图例](assets/readme/mcp-connection-placeholder.svg)
+/home/lzw/dev/orchestrator-tokenCoupon/pics/1.png
+/home/lzw/dev/orchestrator-tokenCoupon/pics/2.png
+/home/lzw/dev/orchestrator-tokenCoupon/pics/3.png
+/home/lzw/dev/orchestrator-tokenCoupon/pics/4.png
+/home/lzw/dev/orchestrator-tokenCoupon/pics/5.png
 [查看连接、授权与验证步骤](guides/mcp.md)
 
 ## 使用指南
@@ -82,7 +71,7 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 | ChatGPT 规划、Claude 审查，或更换聊天窗口 | [跨网页交接](guides/handoff.md) |
 | 离线体验、源码开发或了解数据目录 | [开发与离线演示](guides/development.md) |
 
-欢迎通过 [Issues](https://github.com/DerrickJc/orchestrator-tokenCoupon/issues) 反馈问题，附上版本、平台、操作步骤和脱敏后的诊断信息。
+欢迎通过 [Issues](https://github.com/DerrickJc/orchestrator-tokenCoupon/issues) 反馈问题，请附上版本、平台、操作步骤和脱敏后的诊断信息。
 
 ## License
 
