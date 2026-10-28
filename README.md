@@ -8,7 +8,17 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 目标是减少重复规划、重复传递上下文和失败后的重复执行，让已有的网页模型额度与本机 Coding Agent 各司其职。
 
-[Windows 下载](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/Token-Coupon-0.1.0-x64-preview-setup.exe) · [快速开始](#快速开始) · [网页连接](guides/mcp.md) · [规划与执行](guides/workflow.md) · [跨网页交接](guides/handoff.md) · [开发](guides/development.md)
+### · [Windows 下载](https://github.com/DerrickJc/orchestrator-tokenCoupon/releases/download/desktop-preview-0.1.0-20261027-2/Token-Coupon-0.1.0-x64-preview-setup.exe)
+
+### · [快速开始](#快速开始)
+
+### · [网页连接](guides/mcp.md)
+
+### · [规划与执行](guides/workflow.md)
+
+### · [跨网页交接](guides/handoff.md)
+
+### · [开发](guides/development.md)
 
 
 ![任务执行进度与依赖图](assets/readme/execution-board.png)
@@ -51,40 +61,7 @@ orchestrator-tokenCoupon 是一个面向长任务的本地多 Agent 编排工作
 
 [连接 ChatGPT / Claude](guides/mcp.md) · [创建计划与执行任务](guides/workflow.md) · [跨网页继续已有计划](guides/handoff.md)
 
-## 网页 MCP 连接示例
-
-
-### 1. 【应用端新建连接复制MCP地址】
-后续可以复用链接无需进行MCP连接，如果链接失效选择新建连接。
-
-![步骤 1](pics/1.png)
-
-### 2. 【LLM网页端进行MCP连接】
-
-在chatgpt/claude端打开“插件”，选择“选择自定义MCP服务器”，填写相关配置参数
-
-![步骤 2](pics/2.png)
-
-### 3. 【应用端接收请求进行配置】
-
-在应用端进行工作区选择、工作区授权等配置
-
-![步骤 3](pics/3.png)
-
-### 4. 【LLM网页端进行连接验证和工具说明】
-
-复制应用端的提示，粘贴到网页端输入框，同时可以@mcp服务器名称（示例中为 @demo,根据自身配置修改）
-提示：chatgpt端选择“聊天”模块避免使用订阅套餐API Token用量
-
-![步骤 4](pics/4.png)
-
-### 5. 【LLM网页端进行规划】
-
-像正常聊天说明需求、进行规划即可
-
-![步骤 5](pics/5.png)
-
-[查看连接、授权与验证步骤](guides/mcp.md)
+[查看网页 MCP 连接示例（含五步图文说明）](guides/mcp.md#图文连接示例)
 
 ## 使用指南
 

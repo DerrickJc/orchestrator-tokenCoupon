@@ -16,13 +16,6 @@
 
 ## 网页 MCP 连接图
 
-首页预留 `mcp-connection-placeholder.svg` 占位。添加你自己的图片时：
+五步连接截图保存在根目录 `pics/1.png` 至 `pics/5.png`，在 `guides/mcp.md` 的“图文连接示例”中使用 `../pics/1.png` 等相对路径引用；首页只提供指南链接。
 
-1. 将截图或拼图保存为 `assets/readme/mcp-connection.png`。
-2. 将根目录 README“网页 MCP 连接示例”中的图片替换为：
-
-   ```markdown
-   ![网页 MCP 连接与授权示例](assets/readme/mcp-connection.png)
-   ```
-
-占位 SVG 可以随后删除。截图请遮住密钥、授权码、账号与不宜公开的项目路径；图片中的临时公网地址不作为可复用连接提供。
+更新图片时，可直接替换对应文件，并在指南中修改步骤说明。截图请遮住密钥、授权码、账号与不宜公开的项目路径；图片中的临时公网地址不作为可复用连接提供。
